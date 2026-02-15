@@ -103,6 +103,109 @@ def validate_city_names(names: List[str], *, strict: bool = False) -> List[str]:
 
 
 # =============================================================================
+# CITIES ABOVE 1 MILLION POPULATION (2024 estimates)
+# =============================================================================
+# These 16 cities have population >= 1 million based on 2024 data.
+# Population figures are in thousands (e.g., 16536 = ~16.5 million).
+CITIES_ABOVE_1M: List[str] = [
+    "Lagos",         # 16,536k
+    "Kano",          # 4,491k
+    "Abuja",         # 4,026k
+    "Ibadan",        # 4,004k
+    "Port Harcourt", # 3,637k
+    "Benin City",    # 1,973k
+    "Onitsha",       # 1,695k
+    "Uyo",           # 1,393k
+    "Nnewi",         # 1,301k
+    "Aba",           # 1,230k
+    "Kaduna",        # 1,221k
+    "Ikorodu",       # 1,145k
+    "Ilorin",        # 1,064k
+    "Warri",         # 1,031k
+    "Owerri",        # 1,023k
+    "Jos",           # 1,001k
+]
+
+# Test cities for quick development/debugging runs
+TEST_CITIES: List[str] = [
+    "Lagos",
+    "Abuja",
+    "Kano",
+    "Jos",
+    "Port Harcourt",
+]
+
+# =============================================================================
+# CITY SELECTION CONFIGURATION
+# =============================================================================
+# Control which cities to process in notebooks.
+# 
+# CITY_SELECTION_MODE options:
+#   - "ALL"      : Process all 16 cities with population >= 1 million (default)
+#   - "TEST"     : Process 5 test cities (Lagos, Abuja, Kano, Jos, Port Harcourt)
+#   - "SPECIFIC" : Process only the cities listed in SELECTED_CITIES
+#
+# SELECTED_CITIES:
+#   - Only used when CITY_SELECTION_MODE = "SPECIFIC"
+#   - Can be any cities from VALID_CITIES (all 50 Nigerian cities)
+#   - Example: ["Lagos", "Abuja", "Enugu", "Maiduguri"]
+
+CITY_SELECTION_MODE: str = "ALL"  # Options: "ALL", "TEST", or "SPECIFIC"
+
+SELECTED_CITIES: List[str] = [
+    # Add cities here when using CITY_SELECTION_MODE = "SPECIFIC"
+    # Can select from any of the 50 cities in VALID_CITIES
+    # "Lagos",
+    # "Enugu",
+    # "Maiduguri",
+]
+
+
+def get_cities_to_process() -> List[str]:
+    """
+    Get the list of cities to process based on CITY_SELECTION_MODE.
+    
+    Returns
+    -------
+    list[str]
+        List of city names to process.
+        
+    Raises
+    ------
+    ValueError
+        If CITY_SELECTION_MODE is invalid or SELECTED_CITIES contains
+        invalid city names.
+    """
+    if CITY_SELECTION_MODE == "ALL":
+        return CITIES_ABOVE_1M.copy()
+    elif CITY_SELECTION_MODE == "TEST":
+        return TEST_CITIES.copy()
+    elif CITY_SELECTION_MODE == "SPECIFIC":
+        if not SELECTED_CITIES:
+            raise ValueError(
+                "CITY_SELECTION_MODE is 'SPECIFIC' but SELECTED_CITIES is empty. "
+                "Please add cities to SELECTED_CITIES in config.py."
+            )
+        # Validate selected cities against all valid cities
+        invalid = [c for c in SELECTED_CITIES if c not in VALID_CITIES]
+        if invalid:
+            from difflib import get_close_matches
+            suggestions = {c: get_close_matches(c, VALID_CITIES, n=2, cutoff=0.5) for c in invalid}
+            hint = "\n".join(f"  - '{c}': did you mean {s}?" for c, s in suggestions.items() if s)
+            raise ValueError(
+                f"Invalid cities in SELECTED_CITIES: {invalid}.\n"
+                f"Valid cities are: {VALID_CITIES}\n"
+                f"{hint if hint else ''}"
+            )
+        return SELECTED_CITIES.copy()
+    else:
+        raise ValueError(
+            f"Invalid CITY_SELECTION_MODE: '{CITY_SELECTION_MODE}'. "
+            "Must be 'ALL', 'TEST', or 'SPECIFIC'."
+        )
+
+
+# =============================================================================
 # AOI PROCESSING CONFIGURATION (Notebook 01)
 # =============================================================================
 # Defines how city Areas of Interest are constructed from urban polygons.

@@ -4,7 +4,8 @@
 
 Reproducible Land Surface Temperature (LST) modeling and Urban Heat Island (UHI) hotspot analysis for Nigerian cities. The project integrates multi-source satellite data (MODIS, ERA5-Land, MSG SEVIRI), stakeholder survey data from workshops organized, and landscape assessment to identify, quantify, and validate persistent heat events across multiple study cities.
 
-**Study cities:** Abuja, Jos, Kano, Lagos, Port Harcourt, all above 1M people.  
+**Study cities:** 16 Nigerian cities with population ≥ 1 million (configurable in `config.py`)  
+**Test cities:** Lagos, Abuja, Kano, Jos, Port Harcourt  
 **Workshop cities:** Individuals from 28 cities across Nigeria were in attendance (stakeholder survey)  
 **Study year:** 2024/2025  
 
@@ -151,9 +152,32 @@ Notebooks must be run in order — each builds on outputs from previous stages.
 | 062 | `062_lst_modelling.ipynb` | Train Random Forest and Gradient Boosting regression models for LST prediction | — | Notebook 061 feature dataset |
 | 063 | `063_lst_model_validation.ipynb` | Model evaluation: hold-out test set, spatial cross-validation, stakeholder comparison | — | Notebook 062 trained models |
 
+### City Selection Configuration
+
+City selection is controlled in **`config.py`** via `CITY_SELECTION_MODE`. Edit this setting to choose which cities to process:
+
+| Mode | Description | Cities |
+|------|-------------|--------|
+| `"ALL"` | All cities with population ≥ 1 million (default) | 16 cities |
+| `"TEST"` | Quick development/debugging runs | Lagos, Abuja, Kano, Jos, Port Harcourt |
+| `"SPECIFIC"` | User-specified custom selection | Any from 50 valid cities |
+
+```python
+# In config.py — change this line:
+CITY_SELECTION_MODE = "ALL"       # Process all 16 cities >= 1M
+CITY_SELECTION_MODE = "TEST"      # 5 test cities for quick runs
+CITY_SELECTION_MODE = "SPECIFIC"  # Custom selection (edit SELECTED_CITIES below)
+
+# For SPECIFIC mode, populate this list:
+SELECTED_CITIES = ["Lagos", "Enugu", "Maiduguri"]  # Any valid cities
+```
+
+**Cities with population ≥ 1 million (2024):**
+Lagos, Kano, Abuja, Ibadan, Port Harcourt, Benin City, Onitsha, Uyo, Nnewi, Aba, Kaduna, Ikorodu, Ilorin, Warri, Owerri, Jos
+
 ### City Selection Flow
 
-Cities selected in **Notebook 01** (via interactive widget or CLI) automatically flow to all downstream notebooks. Each downstream notebook auto-discovers cities by scanning the output directories of its predecessors — no manual configuration needed.
+Cities selected in **config.py** automatically flow to all downstream notebooks. Each downstream notebook auto-discovers cities by scanning the output directories of its predecessors — no manual configuration needed.
 
 ---
 
