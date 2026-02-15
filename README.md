@@ -2,11 +2,11 @@
 
 ## Overview
 
-Reproducible Land Surface Temperature (LST) modeling and Urban Heat Island (UHI) hotspot analysis for Nigerian cities. The project integrates multi-source satellite data (MODIS, ERA5-Land, MSG SEVIRI), stakeholder survey data from 28 workshop cities, and landscape characterization to identify, quantify, and validate persistent urban heat islands across 5 study cities.
+Reproducible Land Surface Temperature (LST) modeling and Urban Heat Island (UHI) hotspot analysis for Nigerian cities. The project integrates multi-source satellite data (MODIS, ERA5-Land, MSG SEVIRI), stakeholder survey data from workshops organized, and landscape assessment to identify, quantify, and validate persistent heat events across multiple study cities.
 
-**Study cities:** Abuja, Jos, Kano, Lagos, Port Harcourt  
-**Workshop cities:** 28 cities across Nigeria (stakeholder survey)  
-**Study year:** 2024  
+**Study cities:** Abuja, Jos, Kano, Lagos, Port Harcourt, all above 1M people.  
+**Workshop cities:** Individuals from 28 cities across Nigeria were in attendance (stakeholder survey)  
+**Study year:** 2024/2025  
 
 ---
 
