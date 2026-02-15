@@ -1,0 +1,11 @@
+{
+"type": "FeatureCollection",
+"name": "Abuja_places_villages",
+"crs": { "type": "name", "properties": { "name": "urn:ogc:def:crs:OGC:1.3:CRS84" } },
+"features": [
+{ "type": "Feature", "properties": { "element": "node", "id": 501448436, "GNS:dsg_code": "PPL", "GNS:dsg_string": "populated place", "GNS:id": "-1996796", "alt_name": "Abayo", "fixme": "no population estimate available, defaulted to village", "is_in:country": "Nigeria", "name": "Abayon", "place": "village", "source": "GNS" }, "geometry": { "type": "Point", "coordinates": [ 8.933333, 7.233333 ] } },
+{ "type": "Feature", "properties": { "element": "node", "id": 501486683, "GNS:dsg_code": "PPL", "GNS:dsg_string": "populated place", "GNS:id": "10311676", "alt_name": null, "fixme": "no population estimate available, defaulted to village", "is_in:country": "Nigeria", "name": "Orhugh", "place": "village", "source": "GNS" }, "geometry": { "type": "Point", "coordinates": [ 8.9718, 7.4897 ] } },
+{ "type": "Feature", "properties": { "element": "node", "id": 501498971, "GNS:dsg_code": "PPL", "GNS:dsg_string": "populated place", "GNS:id": "-2008485", "alt_name": "Buruku", "fixme": "no population estimate available, defaulted to village", "is_in:country": "Nigeria", "name": "Gburuku", "place": "village", "source": "GNS" }, "geometry": { "type": "Point", "coordinates": [ 9.2011661, 7.4560442 ] } },
+{ "type": "Feature", "properties": { "element": "node", "id": 501514860, "GNS:dsg_code": "PPL", "GNS:dsg_string": "populated place", "GNS:id": "-2016048", "alt_name": "Kua", "fixme": "no population estimate available, defaulted to village", "is_in:country": "Nigeria", "name": "Gwa", "place": "village", "source": "GNS" }, "geometry": { "type": "Point", "coordinates": [ 8.9631, 7.2573 ] } }
+]
+}
