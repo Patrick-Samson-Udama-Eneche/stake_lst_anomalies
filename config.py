@@ -151,7 +151,7 @@ TEST_CITIES: List[str] = [
 #   - Can be any cities from VALID_CITIES (all 50 Nigerian cities)
 #   - Example: ["Lagos", "Abuja", "Enugu", "Maiduguri"]
 
-CITY_SELECTION_MODE: str = "ABOVE_1M"  # Options: "ALL", "ABOVE_1M", "TEST", or "SPECIFIC"
+CITY_SELECTION_MODE: str = "TEST"  # Options: "ALL", "ABOVE_1M", "TEST", or "SPECIFIC"
 
 SELECTED_CITIES: List[str] = [
     # Add cities here when using CITY_SELECTION_MODE = "SPECIFIC"
