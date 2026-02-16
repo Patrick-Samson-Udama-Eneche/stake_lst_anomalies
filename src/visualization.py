@@ -4173,7 +4173,16 @@ def create_publication_study_area_map(
                           left=0.05, right=0.95, top=0.90, bottom=0.12,
                           hspace=0.30, wspace=0.15)  # Increased hspace for external scale bars
     
+    # Generate enough panel labels: A-Z, then AA, AB, ...
     panel_labels = list(string.ascii_uppercase)
+    if n_total > 26:
+        for first in string.ascii_uppercase:
+            for second in string.ascii_uppercase:
+                panel_labels.append(first + second)
+                if len(panel_labels) >= n_total:
+                    break
+            if len(panel_labels) >= n_total:
+                break
     
     # Panel A: Nigeria overview
     print("\nCreating Nigeria panel (A)...")
