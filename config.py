@@ -141,7 +141,8 @@ TEST_CITIES: List[str] = [
 # Control which cities to process in notebooks.
 # 
 # CITY_SELECTION_MODE options:
-#   - "ALL"      : Process all 16 cities with population >= 1 million (default)
+#   - "ALL"      : Process all 50 cities in the CSV file
+#   - "ABOVE_1M" : Process 16 cities with population >= 1 million (default)
 #   - "TEST"     : Process 5 test cities (Lagos, Abuja, Kano, Jos, Port Harcourt)
 #   - "SPECIFIC" : Process only the cities listed in SELECTED_CITIES
 #
@@ -150,7 +151,7 @@ TEST_CITIES: List[str] = [
 #   - Can be any cities from VALID_CITIES (all 50 Nigerian cities)
 #   - Example: ["Lagos", "Abuja", "Enugu", "Maiduguri"]
 
-CITY_SELECTION_MODE: str = "ALL"  # Options: "ALL", "TEST", or "SPECIFIC"
+CITY_SELECTION_MODE: str = "ABOVE_1M"  # Options: "ALL", "ABOVE_1M", "TEST", or "SPECIFIC"
 
 SELECTED_CITIES: List[str] = [
     # Add cities here when using CITY_SELECTION_MODE = "SPECIFIC"
@@ -177,6 +178,8 @@ def get_cities_to_process() -> List[str]:
         invalid city names.
     """
     if CITY_SELECTION_MODE == "ALL":
+        return VALID_CITIES.copy()
+    elif CITY_SELECTION_MODE == "ABOVE_1M":
         return CITIES_ABOVE_1M.copy()
     elif CITY_SELECTION_MODE == "TEST":
         return TEST_CITIES.copy()
@@ -201,7 +204,7 @@ def get_cities_to_process() -> List[str]:
     else:
         raise ValueError(
             f"Invalid CITY_SELECTION_MODE: '{CITY_SELECTION_MODE}'. "
-            "Must be 'ALL', 'TEST', or 'SPECIFIC'."
+            "Must be 'ALL', 'ABOVE_1M', 'TEST', or 'SPECIFIC'."
         )
 
 

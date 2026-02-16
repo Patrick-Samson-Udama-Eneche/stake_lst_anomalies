@@ -158,13 +158,15 @@ City selection is controlled in **`config.py`** via `CITY_SELECTION_MODE`. Edit 
 
 | Mode | Description | Cities |
 |------|-------------|--------|
-| `"ALL"` | All cities with population ≥ 1 million (default) | 16 cities |
+| `"ALL"` | All cities in the CSV file | 50 cities |
+| `"ABOVE_1M"` | Cities with population ≥ 1 million (default) | 16 cities |
 | `"TEST"` | Quick development/debugging runs | Lagos, Abuja, Kano, Jos, Port Harcourt |
 | `"SPECIFIC"` | User-specified custom selection | Any from 50 valid cities |
 
 ```python
 # In config.py — change this line:
-CITY_SELECTION_MODE = "ALL"       # Process all 16 cities >= 1M
+CITY_SELECTION_MODE = "ALL"       # All 50 cities in CSV
+CITY_SELECTION_MODE = "ABOVE_1M"  # 16 cities >= 1M population (default)
 CITY_SELECTION_MODE = "TEST"      # 5 test cities for quick runs
 CITY_SELECTION_MODE = "SPECIFIC"  # Custom selection (edit SELECTED_CITIES below)
 
