@@ -26,17 +26,17 @@ ENV/
 
 # Secrets directory (contains all sensitive credentials)
 # secrets/
-!secrets/.gitignore
-!secrets/README.md
-!secrets/*.example
+#!secrets/.gitignore
+#!secrets/README.md
+#!secrets/*.example
 
 # Sensitive files - NEVER COMMIT THESE (legacy locations)
-data/inputs/gee_service_account.json
-**/gee_service_account.json
-**/*credentials*.json
-**/*service_account*.json
-**/*.key
-**/*.pem
+#data/inputs/gee_service_account.json
+#**/gee_service_account.json
+#**/*credentials*.json
+#**/*service_account*.json
+#**/*.key
+#**/*.pem
 
 # IDE
 .vscode/
