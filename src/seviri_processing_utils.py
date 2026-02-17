@@ -172,6 +172,18 @@ def load_city_event_periods(city_name, output_dir, study_year):
                 'quality_flag': city_result['decision_log'][period_type]['quality_flag']
             }
     
+    if not events:
+        # Collect rationale from decision log for informative messaging
+        reasons = []
+        for pt in ['day', 'night']:
+            log = city_result.get('decision_log', {}).get(pt, {})
+            rationale = log.get('rationale', 'unknown reason')
+            reasons.append(f"{pt}: {rationale}")
+        raise ValueError(
+            f"No heat events selected for {city_name} — "
+            + "; ".join(reasons)
+        )
+    
     return events
 
 
@@ -1049,7 +1061,12 @@ def process_city_seviri_events(city_name, eumetsat_creds, output_dir, study_year
     
     try:
         events = load_city_event_periods(city_name, output_dir, study_year)
-        
+    except ValueError as ve:
+        # No events selected — this is expected for some cities (e.g. Lagos)
+        print(f"    SKIP: {ve}")
+        return {'_status': 'no_events', '_reason': str(ve)}
+    
+    try:
         datastore, lst_collection = setup_eumetsat_connection(eumetsat_creds)
         if not datastore:
             raise RuntimeError("Failed to connect to EUMETSAT")
@@ -1168,9 +1185,17 @@ def process_all_cities_seviri(eumetsat_creds, output_dir, study_year, temp_dir,
             if city_results:
                 all_city_results[city_name] = city_results
                 
+                # Handle cities with no heat events (expected, not a failure)
+                if city_results.get('_status') == 'no_events':
+                    skipped_cities.append(city_name)
+                    print(f"⊘ {city_name}: Skipped — no heat events selected by decision tree")
+                    continue
+                
                 city_status = []
                 for period_type, result in city_results.items():
-                    if result:
+                    if period_type.startswith('_'):
+                        continue  # skip internal keys like _status, _reason
+                    if isinstance(result, dict) and result:
                         city_status.append(result.get('status', 'unknown'))
                 
                 if 'skipped' in city_status:

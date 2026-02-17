@@ -9,10 +9,80 @@ MATCHES ORIGINAL NOTEBOOK 04 PROTOCOL EXACTLY
 """
 
 import os
+import json
 import ee
 import pandas as pd
 from pathlib import Path
+from datetime import datetime
 from google.oauth2 import service_account
+
+import config
+
+
+def _save_extraction_metadata(output_path, dataset_type, extra_info=None):
+    """
+    Save extraction metadata alongside a CSV so the skip logic can detect
+    methodology changes (reducer, scale, QA filtering, etc.).
+
+    Parameters
+    ----------
+    output_path : str or Path
+        Path to the CSV that was just saved.
+    dataset_type : str
+        'modis' or 'era5' – key into ``config.EXTRACTION_METHODS``.
+    extra_info : dict, optional
+        Additional key/value pairs to store.
+    """
+    meta_path = Path(output_path).with_suffix('.meta.json')
+    metadata = {
+        'extraction_date': datetime.now().isoformat(),
+        'method': config.EXTRACTION_METHODS[dataset_type],
+    }
+    if extra_info:
+        metadata.update(extra_info)
+    with open(meta_path, 'w', encoding='utf-8') as f:
+        json.dump(metadata, f, indent=2)
+
+
+def validate_extraction_metadata(output_path, dataset_type):
+    """
+    Check whether a cached CSV was produced with the current extraction method.
+
+    Parameters
+    ----------
+    output_path : str or Path
+        Path to the CSV file (the ``.meta.json`` sidecar is derived from it).
+    dataset_type : str
+        'modis' or 'era5' – key into ``config.EXTRACTION_METHODS``.
+
+    Returns
+    -------
+    (bool, str)
+        ``(True, reason)`` if metadata matches the current method,
+        ``(False, reason)`` otherwise.
+    """
+    meta_path = Path(output_path).with_suffix('.meta.json')
+
+    if not meta_path.exists():
+        return False, "No metadata file (pre-versioning extraction)"
+
+    with open(meta_path, encoding='utf-8') as f:
+        stored = json.load(f)
+
+    current = config.EXTRACTION_METHODS[dataset_type]
+    stored_method = stored.get('method', {})
+
+    if stored_method.get('version') != current['version']:
+        return False, (
+            f"Version mismatch: cached={stored_method.get('version')}, "
+            f"current={current['version']}"
+        )
+    if stored_method.get('spatial_reducer') != current['spatial_reducer']:
+        return False, (
+            f"Reducer changed: cached={stored_method.get('spatial_reducer')}, "
+            f"current={current['spatial_reducer']}"
+        )
+    return True, "Metadata matches current method"
 
 
 def initialize_gee(service_account_key, project_id):
@@ -54,6 +124,93 @@ def initialize_gee(service_account_key, project_id):
     except Exception as e:
         print(f"❌ GEE Initialization error: {e}")
         return False
+
+
+# =============================================================================
+# AOI BOUNDARY LOADING
+# =============================================================================
+
+def load_aoi_boundaries(aoi_results_dir: str) -> dict:
+    """
+    Load AOI boundaries from Notebook 01 outputs.
+    
+    Scans ``aoi_results_dir`` for ``City_*/Features/*_AOI_Boundary.geojson``
+    files, reads each one and extracts the bounding box.
+    
+    Only cities listed in ``config.get_cities_to_process()`` are loaded.
+    
+    Parameters
+    ----------
+    aoi_results_dir : str
+        Path to the Notebook 01 output directory
+        (e.g. ``data/outputs/01_aoi_delineation``).
+    
+    Returns
+    -------
+    dict
+        ``{city_name: {'bounds': [west, south, east, north], 'city_dir': Path}}``
+    
+    Raises
+    ------
+    FileNotFoundError
+        If no city directories or AOI boundary files are found.
+    """
+    import geopandas as gpd
+    import sys
+    
+    aoi_dir = Path(aoi_results_dir)
+    if not aoi_dir.exists():
+        raise FileNotFoundError(f"AOI results directory not found: {aoi_dir}")
+    
+    # Get the cities we should process from config
+    # Import config at function level to avoid circular imports
+    project_root = Path(__file__).parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+    import config
+    cities_to_process = config.get_cities_to_process()
+    
+    aoi_data = {}
+    
+    # Scan for City_* directories
+    city_dirs = sorted([d for d in aoi_dir.iterdir() if d.is_dir() and d.name.startswith("City_")])
+    
+    if not city_dirs:
+        raise FileNotFoundError(f"No City_* directories found in {aoi_dir}")
+    
+    for city_dir in city_dirs:
+        city_name = city_dir.name.replace("City_", "")
+        
+        # Only load cities that are in the current selection
+        if city_name not in cities_to_process:
+            continue
+        
+        # Look for AOI boundary GeoJSON
+        features_dir = city_dir / "Features"
+        boundary_file = features_dir / f"{city_name}_AOI_Boundary.geojson"
+        
+        if not boundary_file.exists():
+            print(f"  ⚠️  No AOI boundary file for {city_name}, skipping")
+            continue
+        
+        try:
+            gdf = gpd.read_file(boundary_file)
+            bounds = gdf.total_bounds.tolist()  # [minx, miny, maxx, maxy] = [west, south, east, north]
+            
+            aoi_data[city_name] = {
+                'bounds': bounds,
+                'city_dir': str(city_dir),
+            }
+        except Exception as e:
+            print(f"  ⚠️  Error reading AOI for {city_name}: {e}")
+            continue
+    
+    if not aoi_data:
+        raise FileNotFoundError(
+            f"No valid AOI boundaries found in {aoi_dir} for cities: {cities_to_process}"
+        )
+    
+    return aoi_data
 
 
 # =============================================================================
@@ -262,8 +419,20 @@ def extract_modis_daily_lst(geometry, city_name, year, output_path):
     df = df.sort_values('date').reset_index(drop=True)
     df = df.drop_duplicates(subset=['date']).reset_index(drop=True)
     
+    # Validate data quality - check that at least some values are non-NaN
+    lst_cols = [c for c in df.columns if 'lst_' in c]
+    valid_count = df[lst_cols].notna().any(axis=1).sum()
+    if valid_count == 0:
+        print(f"        ❌ All LST values are NaN for {city_name} - extraction failed silently")
+        print(f"        ⚠️  File NOT saved. Will retry on next run.")
+        return False
+    
+    valid_pct = valid_count / len(df) * 100
+    print(f"        📊 Data quality: {valid_count}/{len(df)} days with valid data ({valid_pct:.1f}%)")
+    
     # Save raw data
     df.to_csv(output_path, index=False)
+    _save_extraction_metadata(output_path, 'modis')
     
     print(f"        ✅ Saved {len(df)} records to {output_path}")
     return True
@@ -379,9 +548,13 @@ def extract_era5_daily_lst(geometry, city_name, year, output_path):
             """Extract comprehensive statistics for each daily composite"""
             date = image.get('date')
             
-            # Extract all bands (already calculated stats)
+            # Spatially aggregate all valid (land) pixels in the AOI.
+            # Using median() for robustness: at ERA5-Land's ~9 km resolution,
+            # only ~4-9 pixels fall within the AOI, so a single outlier/edge
+            # pixel can skew the mean. Median is more representative of
+            # typical conditions across the AOI.
             stats = image.reduceRegion(
-                reducer=ee.Reducer.first(),  # Already calculated min/median/mean/max
+                reducer=ee.Reducer.median(),
                 geometry=geometry,
                 scale=11132,  # ERA5-Land native resolution (~0.1 degree)
                 maxPixels=1e9,
@@ -435,8 +608,20 @@ def extract_era5_daily_lst(geometry, city_name, year, output_path):
         df = df.sort_values('date').reset_index(drop=True)
         df = df.drop_duplicates(subset=['date']).reset_index(drop=True)
         
+        # Validate data quality - check that at least some values are non-NaN
+        lst_cols = [c for c in df.columns if 'lst_' in c]
+        valid_count = df[lst_cols].notna().any(axis=1).sum()
+        if valid_count == 0:
+            print(f"        ❌ All LST values are NaN for {city_name} - extraction failed silently")
+            print(f"        ⚠️  File NOT saved. Will retry on next run.")
+            return False
+        
+        valid_pct = valid_count / len(df) * 100
+        print(f"        📊 Data quality: {valid_count}/{len(df)} days with valid data ({valid_pct:.1f}%)")
+        
         # Save to CSV
         df.to_csv(output_path, index=False)
+        _save_extraction_metadata(output_path, 'era5')
         
         print(f"        ✅ Saved {len(df)} records to {output_path}")
         return True

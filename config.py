@@ -151,11 +151,9 @@ TEST_CITIES: List[str] = [
 #   - Can be any cities from VALID_CITIES (all 50 Nigerian cities)
 #   - Example: ["Lagos", "Abuja", "Enugu", "Maiduguri"]
 
-<<<<<<< HEAD
+
 CITY_SELECTION_MODE: str = "TEST"  # Options: "ALL", "ABOVE_1M", "TEST", or "SPECIFIC"
-=======
-CITY_SELECTION_MODE: str = "ALL"  # Options: "ALL", "ABOVE_1M", "TEST", or "SPECIFIC"
->>>>>>> 6003f2ecb46234d9df3bc4178e7bd605aecc2a12
+
 
 SELECTED_CITIES: List[str] = [
     # Add cities here when using CITY_SELECTION_MODE = "SPECIFIC"
@@ -227,7 +225,7 @@ AOI_DATA_PATHS = {
 
 # Buffer distances around city polygons (in metres):
 ADJACENT_POLYGON_BUFFER = int(os.getenv("ADJACENT_POLYGON_BUFFER", "1000"))  # ← CHANGE THIS  (search radius for nearby urban polygons, default 1 km)
-AOI_BUFFER_DISTANCE = int(os.getenv("AOI_BUFFER_DISTANCE", "5000"))          # ← CHANGE THIS  (AOI buffer around merged polygons, default 5 km)
+AOI_BUFFER_DISTANCE = int(os.getenv("AOI_BUFFER_DISTANCE", "10000"))          # ← CHANGE THIS  (AOI buffer around merged polygons, default 10 km)
 
 # CRS for AOI processing (usually no change needed):
 INPUT_CRS = WGS84
@@ -502,6 +500,27 @@ ERA5_LAND_CONFIG = {
     'day_hours': [13, 14, 15],                             # UTC hours for day window
     'aggregation': 'median',                               # 'median' or 'mean' within window
     'temp_conversion': True,                               # Convert Kelvin → Celsius
+}
+
+# ---------------------------------------------------------------------------
+# Extraction method versioning
+# ---------------------------------------------------------------------------
+# Bump the version string whenever the extraction methodology changes
+# (e.g. spatial reducer, QA filtering, scale).  The skip logic in Notebook 04
+# compares cached metadata against these values and re-extracts on mismatch.
+EXTRACTION_METHODS = {
+    'modis': {
+        'version': 'v1.0',
+        'spatial_reducer': 'stats',                        # min/median/mean/max combined
+        'scale': 1000,
+        'qa_filtering': 'hierarchical',
+    },
+    'era5': {
+        'version': 'v1.2',                                # v1.0=first, v1.1=mean, v1.2=median
+        'spatial_reducer': 'median',
+        'scale': 11132,
+        'temporal_aggregation': 'min_median_mean_max',
+    },
 }
 
 # MODIS QA filtering thresholds

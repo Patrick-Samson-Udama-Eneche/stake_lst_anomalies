@@ -238,6 +238,65 @@ def create_aoi_boundary(buffer_geometry, city_name: str) -> Tuple[gpd.GeoDataFra
     return aoi_gdf, aoi_area_km2
 
 
+def clip_aoi_to_land(aoi_gdf: gpd.GeoDataFrame, boundary_gdf: gpd.GeoDataFrame,
+                     city_name: str) -> Tuple[gpd.GeoDataFrame, float]:
+    """
+    Clip AOI geometry to country boundary to remove ocean/water areas.
+    
+    This is essential for coastal cities (e.g., Lagos) where the bounding box
+    extends over the ocean. ERA5-Land and other land-only datasets have masked
+    pixels over water, causing all-NaN extractions if the geometry includes
+    significant ocean coverage.
+    
+    Args:
+        aoi_gdf: GeoDataFrame with AOI boundary (bounding box)
+        boundary_gdf: GeoDataFrame with country boundary polygon
+        city_name: Name of the city (for logging)
+        
+    Returns:
+        Tuple of (clipped_gdf, clipped_area_km2)
+    """
+    try:
+        aoi_geom = aoi_gdf.geometry.iloc[0]
+        land_geom = boundary_gdf.geometry.unary_union
+        
+        # Ensure same CRS
+        if aoi_gdf.crs != boundary_gdf.crs:
+            boundary_reproj = boundary_gdf.to_crs(aoi_gdf.crs)
+            land_geom = boundary_reproj.geometry.unary_union
+        
+        clipped_geom = aoi_geom.intersection(land_geom)
+        
+        if clipped_geom.is_empty:
+            print(f"  ⚠️ Warning: Clipping resulted in empty geometry for {city_name}, keeping original AOI")
+            original_area = aoi_geom.area / 1_000_000
+            return aoi_gdf, original_area
+        
+        # Calculate area change
+        original_area = aoi_geom.area / 1_000_000
+        clipped_area = clipped_geom.area / 1_000_000
+        reduction = original_area - clipped_area
+        
+        if reduction > 0.01:  # Meaningful reduction threshold (0.01 km²)
+            # Replace geometry in the GeoDataFrame (preserve all columns)
+            clipped_gdf = aoi_gdf.copy()
+            clipped_gdf.geometry = gpd.GeoSeries([clipped_geom], crs=aoi_gdf.crs)
+            
+            pct = (reduction / original_area) * 100
+            print(f"  ✂️ Clipped AOI to land boundary: {original_area:.2f} km² → {clipped_area:.2f} km² "
+                  f"(removed {reduction:.2f} km² ocean/water, {pct:.1f}%)")
+            
+            return clipped_gdf, clipped_area
+        else:
+            print(f"  ✅ AOI is fully within land boundary (no clipping needed)")
+            return aoi_gdf, original_area
+        
+    except Exception as e:
+        print(f"  ⚠️ Warning: AOI clipping failed for {city_name}: {e}")
+        original_area = aoi_gdf.geometry.area.sum() / 1_000_000
+        return aoi_gdf, original_area
+
+
 def find_cities_in_aoi(cities_df: pd.DataFrame, aoi_boundary,
                       target_crs: str) -> Tuple[pd.DataFrame, gpd.GeoDataFrame]:
     """
@@ -566,6 +625,10 @@ def process_city_aoi(selected_city: str, cities_df: pd.DataFrame,
     
     # Create AOI boundary
     aoi_gdf, aoi_area_km2 = create_aoi_boundary(buffer_gdf.geometry.iloc[0], selected_city)
+    
+    # Clip AOI to country boundary (removes ocean areas for coastal cities)
+    if boundary_gdf is not None and not boundary_gdf.empty:
+        aoi_gdf, aoi_area_km2 = clip_aoi_to_land(aoi_gdf, boundary_gdf, selected_city)
     
     # Find cities in AOI
     cities_in_aoi_df, cities_in_aoi_gdf = find_cities_in_aoi(cities_df, aoi_gdf.geometry.iloc[0], urban_gdf.crs)

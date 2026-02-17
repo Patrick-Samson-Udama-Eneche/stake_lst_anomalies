@@ -1087,50 +1087,60 @@ def plot_multi_city_dataset_comparison(
         day_merged = day_comp['merged_data']
         
         if not day_merged.empty:
-            # Find column names
-            col1_day = [c for c in day_merged.columns if dataset1_name in c][0]
-            col2_day = [c for c in day_merged.columns if dataset2_name in c][0]
+            # Find column names (match by dataset name suffix)
+            col1_candidates = [c for c in day_merged.columns if dataset1_name in c]
+            col2_candidates = [c for c in day_merged.columns if dataset2_name in c]
             
-            # Scatter plot - ORANGE for day with thin black outline
-            ax_day.scatter(day_merged[col1_day], day_merged[col2_day], 
-                          alpha=0.7, s=30, color=day_color, 
-                          edgecolors='black', linewidth=0.4)
+            if not col1_candidates or not col2_candidates:
+                # Fallback: use non-date columns in order
+                non_date = [c for c in day_merged.columns if c != 'date']
+                col1_candidates = non_date[:1]
+                col2_candidates = non_date[1:2]
             
-            # 1:1 reference line
-            min_val = min(day_merged[col1_day].min(), day_merged[col2_day].min())
-            max_val = max(day_merged[col1_day].max(), day_merged[col2_day].max())
-            ax_day.plot([min_val, max_val], [min_val, max_val], 
-                       color=line_color, linestyle='--', linewidth=2, alpha=0.8, label='1:1 Line')
-            
-            # Add statistics box at bottom right
-            r = day_comp['correlation']
-            bias = day_comp['bias']
-            rmse = day_comp['rmse']
-            mae = day_comp['mae']
-            n = day_comp['n_samples']
-            
-            stats_text = (f'r = {r:.3f}\n'
-                         f'Bias = {bias:+.2f}°C\n'
-                         f'RMSE = {rmse:.2f}°C\n'
-                         f'MAE = {mae:.2f}°C\n'
-                         f'n = {n}')
-            
-            # Position at bottom right (fixed alignment)
-            ax_day.text(0.97, 0.03, stats_text, transform=ax_day.transAxes, 
-                       verticalalignment='bottom', horizontalalignment='right',
-                       fontsize=9, family='monospace',
-                       bbox=dict(boxstyle='round,pad=0.5', facecolor='white', 
-                                edgecolor='gray', alpha=0.95, linewidth=1))
-            
-            # Axis labels
-            ax_day.set_xlabel(f'{dataset1_name} LST (°C)', fontsize=10, fontweight='bold')
-            ax_day.set_ylabel(f'{dataset2_name} LST (°C)', fontsize=10, fontweight='bold')
+            if not col1_candidates or not col2_candidates:
+                ax_day.text(0.5, 0.5, 'No matching columns', transform=ax_day.transAxes,
+                           ha='center', va='center', fontsize=10, color='gray')
+            else:
+                col1_day = col1_candidates[0]
+                col2_day = col2_candidates[0]
+                
+                # Scatter plot - ORANGE for day with thin black outline
+                ax_day.scatter(day_merged[col1_day], day_merged[col2_day], 
+                              alpha=0.7, s=30, color=day_color, 
+                              edgecolors='black', linewidth=0.4)
+                
+                # 1:1 reference line
+                min_val = min(day_merged[col1_day].min(), day_merged[col2_day].min())
+                max_val = max(day_merged[col1_day].max(), day_merged[col2_day].max())
+                ax_day.plot([min_val, max_val], [min_val, max_val], 
+                           color=line_color, linestyle='--', linewidth=2, alpha=0.8, label='1:1 Line')
+                
+                # Add statistics box at bottom right
+                r = day_comp['correlation']
+                bias = day_comp['bias']
+                rmse = day_comp['rmse']
+                mae = day_comp['mae']
+                n = day_comp['n_samples']
+                
+                stats_text = (f'r = {r:.3f}\n'
+                             f'Bias = {bias:+.2f}\u00b0C\n'
+                             f'RMSE = {rmse:.2f}\u00b0C\n'
+                             f'MAE = {mae:.2f}\u00b0C\n'
+                             f'n = {n}')
+                
+                # Position at bottom right (fixed alignment)
+                ax_day.text(0.97, 0.03, stats_text, transform=ax_day.transAxes, 
+                           verticalalignment='bottom', horizontalalignment='right',
+                           fontsize=9, family='monospace',
+                           bbox=dict(boxstyle='round,pad=0.5', facecolor='white', 
+                                    edgecolor='gray', alpha=0.95, linewidth=1))
+                
+                # Axis labels
+                ax_day.set_xlabel(f'{dataset1_name} LST (\u00b0C)', fontsize=10, fontweight='bold')
+                ax_day.set_ylabel(f'{dataset2_name} LST (\u00b0C)', fontsize=10, fontweight='bold')
             
             # Title (city name and period)
-            if i == 0:
-                ax_day.set_title(f'{city} - Daytime', fontsize=11, fontweight='bold', pad=10)
-            else:
-                ax_day.set_title(f'{city} - Daytime', fontsize=11, fontweight='bold', pad=10)
+            ax_day.set_title(f'{city} - Daytime', fontsize=11, fontweight='bold', pad=10)
             
             # Grid
             ax_day.grid(True, alpha=0.25, linestyle=':', linewidth=0.5)
@@ -1145,50 +1155,60 @@ def plot_multi_city_dataset_comparison(
         night_merged = night_comp['merged_data']
         
         if not night_merged.empty:
-            # Find column names
-            col1_night = [c for c in night_merged.columns if dataset1_name in c][0]
-            col2_night = [c for c in night_merged.columns if dataset2_name in c][0]
+            # Find column names (match by dataset name suffix)
+            col1_candidates = [c for c in night_merged.columns if dataset1_name in c]
+            col2_candidates = [c for c in night_merged.columns if dataset2_name in c]
             
-            # Scatter plot - GREY for night with thin black outline
-            ax_night.scatter(night_merged[col1_night], night_merged[col2_night], 
-                           alpha=0.7, s=30, color=night_color, 
-                           edgecolors='black', linewidth=0.4)
+            if not col1_candidates or not col2_candidates:
+                # Fallback: use non-date columns in order
+                non_date = [c for c in night_merged.columns if c != 'date']
+                col1_candidates = non_date[:1]
+                col2_candidates = non_date[1:2]
             
-            # 1:1 reference line
-            min_val = min(night_merged[col1_night].min(), night_merged[col2_night].min())
-            max_val = max(night_merged[col1_night].max(), night_merged[col2_night].max())
-            ax_night.plot([min_val, max_val], [min_val, max_val], 
-                         color=line_color, linestyle='--', linewidth=2, alpha=0.8, label='1:1 Line')
-            
-            # Add statistics box at bottom right
-            r = night_comp['correlation']
-            bias = night_comp['bias']
-            rmse = night_comp['rmse']
-            mae = night_comp['mae']
-            n = night_comp['n_samples']
-            
-            stats_text = (f'r = {r:.3f}\n'
-                         f'Bias = {bias:+.2f}°C\n'
-                         f'RMSE = {rmse:.2f}°C\n'
-                         f'MAE = {mae:.2f}°C\n'
-                         f'n = {n}')
-            
-            # Position at bottom right (fixed alignment)
-            ax_night.text(0.97, 0.03, stats_text, transform=ax_night.transAxes, 
-                         verticalalignment='bottom', horizontalalignment='right',
-                         fontsize=9, family='monospace',
-                         bbox=dict(boxstyle='round,pad=0.5', facecolor='white', 
-                                  edgecolor='gray', alpha=0.95, linewidth=1))
-            
-            # Axis labels
-            ax_night.set_xlabel(f'{dataset1_name} LST (°C)', fontsize=10, fontweight='bold')
-            ax_night.set_ylabel(f'{dataset2_name} LST (°C)', fontsize=10, fontweight='bold')
+            if not col1_candidates or not col2_candidates:
+                ax_night.text(0.5, 0.5, 'No matching columns', transform=ax_night.transAxes,
+                             ha='center', va='center', fontsize=10, color='gray')
+            else:
+                col1_night = col1_candidates[0]
+                col2_night = col2_candidates[0]
+                
+                # Scatter plot - GREY for night with thin black outline
+                ax_night.scatter(night_merged[col1_night], night_merged[col2_night], 
+                               alpha=0.7, s=30, color=night_color, 
+                               edgecolors='black', linewidth=0.4)
+                
+                # 1:1 reference line
+                min_val = min(night_merged[col1_night].min(), night_merged[col2_night].min())
+                max_val = max(night_merged[col1_night].max(), night_merged[col2_night].max())
+                ax_night.plot([min_val, max_val], [min_val, max_val], 
+                             color=line_color, linestyle='--', linewidth=2, alpha=0.8, label='1:1 Line')
+                
+                # Add statistics box at bottom right
+                r = night_comp['correlation']
+                bias = night_comp['bias']
+                rmse = night_comp['rmse']
+                mae = night_comp['mae']
+                n = night_comp['n_samples']
+                
+                stats_text = (f'r = {r:.3f}\n'
+                             f'Bias = {bias:+.2f}\u00b0C\n'
+                             f'RMSE = {rmse:.2f}\u00b0C\n'
+                             f'MAE = {mae:.2f}\u00b0C\n'
+                             f'n = {n}')
+                
+                # Position at bottom right (fixed alignment)
+                ax_night.text(0.97, 0.03, stats_text, transform=ax_night.transAxes, 
+                             verticalalignment='bottom', horizontalalignment='right',
+                             fontsize=9, family='monospace',
+                             bbox=dict(boxstyle='round,pad=0.5', facecolor='white', 
+                                      edgecolor='gray', alpha=0.95, linewidth=1))
+                
+                # Axis labels
+                ax_night.set_xlabel(f'{dataset1_name} LST (\u00b0C)', fontsize=10, fontweight='bold')
+                ax_night.set_ylabel(f'{dataset2_name} LST (\u00b0C)', fontsize=10, fontweight='bold')
             
             # Title
-            if i == 0:
-                ax_night.set_title(f'{city} - Nighttime', fontsize=11, fontweight='bold', pad=10)
-            else:
-                ax_night.set_title(f'{city} - Nighttime', fontsize=11, fontweight='bold', pad=10)
+            ax_night.set_title(f'{city} - Nighttime', fontsize=11, fontweight='bold', pad=10)
             
             # Grid
             ax_night.grid(True, alpha=0.25, linestyle=':', linewidth=0.5)
@@ -4256,6 +4276,197 @@ def create_publication_study_area_map(
         print("✓ Hollow circle in Nigeria legend")
         print("✓ Compact North Arrow")
         print(f"✓ Saved: {png_path.name}, {pdf_path.name}")
+    
+    return fig
+
+
+def create_nigeria_overview_map(
+    aoi_dict: Dict[str, gpd.GeoDataFrame],
+    nigeria_path: Path,
+    save_path: Path = None,
+    title: str = 'Study Cities: Nigeria',
+    figsize: tuple = (11.69, 7.5),
+    dpi: int = 300
+) -> plt.Figure:
+    """
+    Create a standalone Nigeria overview map showing all selected city locations.
+    
+    Used in non-TEST modes where cities are visualized individually.
+    The same figure dimensions as the publication map are used.
+    
+    Parameters
+    ----------
+    aoi_dict : Dict[str, gpd.GeoDataFrame]
+        Dictionary mapping city names to AOI GeoDataFrames
+    nigeria_path : Path
+        Path to Nigeria boundary GeoJSON file
+    save_path : Path, optional
+        Base path to save figure (will save .png and .pdf)
+    title : str, optional
+        Figure title
+    figsize : tuple, optional
+        Figure size in inches
+    dpi : int, optional
+        DPI for PNG output
+    
+    Returns
+    -------
+    plt.Figure
+    """
+    city_extents = calculate_city_extents(aoi_dict)
+    cities = sorted(aoi_dict.keys())
+    
+    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    
+    nigeria_gdf = gpd.read_file(nigeria_path)
+    create_nigeria_overview_panel(ax, nigeria_gdf, city_extents, cities, panel_label='')
+    ax.set_title(title, fontsize=12, fontweight='bold', pad=10)
+    
+    _add_publication_north_arrow(fig)
+    
+    fig.tight_layout(rect=[0, 0, 0.95, 0.95])
+    
+    if save_path:
+        save_path = Path(save_path)
+        png_path = save_path.with_suffix('.png')
+        pdf_path = save_path.with_suffix('.pdf')
+        fig.savefig(png_path, dpi=dpi, bbox_inches='tight', facecolor='white')
+        fig.savefig(pdf_path, format='pdf', bbox_inches='tight', facecolor='white')
+        print(f"  ✓ Saved: {png_path.name}, {pdf_path.name}")
+    
+    return fig
+
+
+def create_individual_city_study_area_map(
+    city: str,
+    aoi_dict: Dict[str, gpd.GeoDataFrame],
+    geo_features: Dict[str, Dict[str, gpd.GeoDataFrame]],
+    polygon_features: Dict[str, Dict[str, gpd.GeoDataFrame]],
+    nigeria_path: Path,
+    save_path: Path = None,
+    figsize: tuple = (11.69, 7.5),
+    dpi: int = 300
+) -> plt.Figure:
+    """
+    Create a study area map for a single city with Nigeria inset.
+    
+    Layout: Left panel = Nigeria overview (showing this city highlighted),
+    Right panel = City detail with all geospatial features.
+    Uses the same figure dimensions and styling as the combined publication map.
+    
+    Parameters
+    ----------
+    city : str
+        City name
+    aoi_dict : Dict[str, gpd.GeoDataFrame]
+        Full dictionary of all city AOIs (for Nigeria overview context)
+    geo_features : Dict[str, Dict[str, gpd.GeoDataFrame]]
+        Nested dict with features for all cities
+    polygon_features : Dict[str, Dict[str, gpd.GeoDataFrame]]
+        Nested dict with polygon features for all cities
+    nigeria_path : Path
+        Path to Nigeria boundary GeoJSON
+    save_path : Path, optional
+        Base path to save (will save .png and .pdf)
+    figsize : tuple, optional
+        Figure size in inches (default: A4 landscape)
+    dpi : int, optional
+        DPI for PNG output
+    
+    Returns
+    -------
+    plt.Figure
+    """
+    import matplotlib.cm as cm
+    from matplotlib.patches import Patch
+    from matplotlib.lines import Line2D
+    
+    # Calculate extents for all cities (for Nigeria overview)
+    city_extents = calculate_city_extents(aoi_dict)
+    all_cities = sorted(aoi_dict.keys())
+    
+    fig = plt.figure(figsize=figsize)
+    gs = fig.add_gridspec(1, 2, left=0.05, right=0.95, top=0.90, bottom=0.12,
+                          wspace=0.15, width_ratios=[0.4, 0.6])
+    
+    # Left panel: Nigeria overview with this city highlighted
+    ax_nigeria = fig.add_subplot(gs[0])
+    nigeria_gdf = gpd.read_file(nigeria_path).to_crs('EPSG:4326')
+    
+    # Plot Nigeria boundary
+    nigeria_gdf.plot(ax=ax_nigeria, facecolor='#e8e8e8', edgecolor='black', linewidth=0.8)
+    
+    # Plot all cities as grey, highlight current city in red
+    n_cities = len(all_cities)
+    for i, c in enumerate(all_cities):
+        cx, cy = city_extents[c]['cx'], city_extents[c]['cy']
+        if c == city:
+            ax_nigeria.plot(cx, cy, 'o', color='red', markersize=10,
+                           markeredgecolor='black', markeredgewidth=0.8, zorder=6)
+            ax_nigeria.annotate(c, (cx, cy), xytext=(5, 5), textcoords='offset points',
+                               fontsize=8, fontweight='bold', color='red',
+                               bbox=dict(boxstyle='round,pad=0.15', fc='white', alpha=0.9, ec='none'))
+        else:
+            ax_nigeria.plot(cx, cy, 'o', color='grey', markersize=5,
+                           markeredgecolor='black', markeredgewidth=0.5, zorder=4, alpha=0.6)
+            ax_nigeria.annotate(c, (cx, cy), xytext=(3, 3), textcoords='offset points',
+                               fontsize=6, color='grey',
+                               bbox=dict(boxstyle='round,pad=0.1', fc='white', alpha=0.7, ec='none'))
+    
+    nb = nigeria_gdf.total_bounds
+    ax_nigeria.set_xlim(nb[0], nb[2])
+    ax_nigeria.set_ylim(nb[1], nb[3])
+    ax_nigeria.set_title('A', fontsize=11, fontweight='bold', pad=4, loc='left')
+    ax_nigeria.tick_params(labelsize=6)
+    ax_nigeria.set_xlabel('Longitude (°E)', fontsize=6)
+    ax_nigeria.set_ylabel('Latitude (°N)', fontsize=6)
+    ax_nigeria.set_aspect('equal')
+    
+    legend_handles_ng = [
+        Patch(facecolor='#e8e8e8', edgecolor='black', linewidth=1, label='Boundary'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='red',
+               markersize=7, markeredgecolor='black', markeredgewidth=1, label=f'{city} (current)'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='grey',
+               markersize=5, markeredgecolor='black', markeredgewidth=0.5, label='Other cities')
+    ]
+    ax_nigeria.legend(handles=legend_handles_ng, loc='lower right', fontsize=6,
+                     frameon=True, fancybox=True, framealpha=0.9, edgecolor='gray')
+    _add_publication_scale_bar_nigeria(ax_nigeria, nb)
+    
+    # Right panel: City detail
+    ax_city = fig.add_subplot(gs[1])
+    handles, labels = create_city_feature_panel(
+        ax=ax_city,
+        city=city,
+        extent=city_extents[city],
+        geo_features=geo_features[city],
+        polygon_features=polygon_features[city],
+        panel_label='B',
+        collect_legend=True
+    )
+    
+    # Title
+    fig.suptitle(f'Study Area Map: {city}', fontsize=12, fontweight='bold', y=0.96)
+    
+    # Legend
+    if handles:
+        fig.legend(handles, labels, loc='lower center',
+                  bbox_to_anchor=(0.55, 0.02),
+                  ncol=len(handles), fontsize=8, frameon=True, fancybox=True,
+                  edgecolor='gray', framealpha=0.95,
+                  title='City Map Features', title_fontsize=8)
+    
+    # North arrow
+    _add_publication_north_arrow(fig)
+    
+    # Save
+    if save_path:
+        save_path = Path(save_path)
+        png_path = save_path.with_suffix('.png')
+        pdf_path = save_path.with_suffix('.pdf')
+        fig.savefig(png_path, dpi=dpi, bbox_inches='tight', facecolor='white')
+        fig.savefig(pdf_path, format='pdf', bbox_inches='tight', facecolor='white')
+        print(f"  ✓ Saved: {png_path.name}, {pdf_path.name}")
     
     return fig
 
