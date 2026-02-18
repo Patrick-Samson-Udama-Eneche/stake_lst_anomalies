@@ -3490,38 +3490,17 @@ def create_geospatial_features_map(
     # Ensure all data is in WGS84 for consistent plotting
     aoi_plot = aoi_gdf.to_crs('EPSG:4326')
     
-    # Calculate map extent from all features instead of AOI bounds
-    all_bounds = []
+    # Use AOI boundary as the definitive map extent (matches Notebook 01 delineation)
+    aoi_bounds = aoi_plot.total_bounds  # [minx, miny, maxx, maxy]
     
-    # Collect bounds from all available features
-    if main_polygon_gdf is not None and not main_polygon_gdf.empty:
-        all_bounds.append(main_polygon_gdf.to_crs('EPSG:4326').total_bounds)
-    if adjacent_polygons_gdf is not None and not adjacent_polygons_gdf.empty:
-        all_bounds.append(adjacent_polygons_gdf.to_crs('EPSG:4326').total_bounds)
-    if water_gdf is not None and not water_gdf.empty:
-        all_bounds.append(water_gdf.to_crs('EPSG:4326').total_bounds)
-    if roads_gdf is not None and not roads_gdf.empty:
-        all_bounds.append(roads_gdf.to_crs('EPSG:4326').total_bounds)
-    if places_gdf is not None and not places_gdf.empty:
-        all_bounds.append(places_gdf.to_crs('EPSG:4326').total_bounds)
+    # Add a small buffer (2%) for visual breathing room
+    width = aoi_bounds[2] - aoi_bounds[0]
+    height = aoi_bounds[3] - aoi_bounds[1]
+    pad_x = width * 0.02
+    pad_y = height * 0.02
     
-    # If no features available, fall back to AOI bounds
-    if not all_bounds:
-        all_bounds.append(aoi_plot.total_bounds)
-    
-    # Calculate combined extent from all features
-    import numpy as np
-    combined_bounds = np.array(all_bounds)
-    extent_bounds = [
-        combined_bounds[:, 0].min(),  # min x
-        combined_bounds[:, 1].min(),  # min y
-        combined_bounds[:, 2].max(),  # max x
-        combined_bounds[:, 3].max()   # max y
-    ]
-    
-    # Set extent exactly to feature bounds without padding
-    ax.set_xlim(extent_bounds[0], extent_bounds[2])
-    ax.set_ylim(extent_bounds[1], extent_bounds[3])
+    ax.set_xlim(aoi_bounds[0] - pad_x, aoi_bounds[2] + pad_x)
+    ax.set_ylim(aoi_bounds[1] - pad_y, aoi_bounds[3] + pad_y)
     
     legend_handles = []
     legend_labels = []
