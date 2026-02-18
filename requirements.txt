@@ -41,6 +41,9 @@ scikit-image>=0.21.0
 # Progress bars
 tqdm>=4.65.0
 
+# Label positioning for maps
+adjustText>=0.8
+
 # Notebook automation
 papermill>=2.4.0
 nbformat>=5.9.0

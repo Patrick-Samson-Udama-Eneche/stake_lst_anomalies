@@ -1,4 +1,4 @@
-# Urban Heat Island & LST Modeling Project
+# Dynamics of Urban Surface Warming in Nigerian Cities: A Multi-source, Landscape-oriented, Stakeholder-informed Analysis
 
 ## Overview
 

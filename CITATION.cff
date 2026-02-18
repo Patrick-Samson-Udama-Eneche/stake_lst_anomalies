@@ -1,14 +1,15 @@
 cff-version: 1.2.0
 title: >-
-  DRAFT: Physiographic Controls on Urban Heat Intensity in Nigerian Cities:
-  A Hierarchical Analysis with Stakeholder Validation
+  DRAFT: Surface Warming of 50 Nigerian Cities and the Influence of their Physiographic Landscape Characters:
+  A Stakeholder-inclusive Geospatial Analysis.
+
 message: >-
   If you use this software or data, please cite it using the metadata
   from this file.
 type: software
 authors:
   - family-names: Eneche
-    given-names: Patrick
+    given-names: Patrick Samson Udama
     affiliation: University of Twente, The Netherlands & Prince Abubakar Audu Univeristy, Nigeria
     orcid: https://orcid.org/0000-0002-0504-9677
 repository-code: https://github.com/EnechePSU/stake_lst_modelling
