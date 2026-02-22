@@ -224,6 +224,10 @@ def extract_modis_daily_lst(geometry, city_name, year, output_path):
     Uses quarterly batch processing with hierarchical QA filtering (strict + moderate blend).
     Extracts BOTH day and night LST in a single combined CSV file.
     
+    Server-side batch extraction: maps ``reduceRegion`` over all images on the
+    GEE server and retrieves results in a single ``getInfo()`` call per quarter,
+    reducing API round-trips by ~180× compared to per-image iteration.
+    
     Parameters
     ----------
     geometry : ee.Geometry
@@ -313,12 +317,15 @@ def extract_modis_daily_lst(geometry, city_name, year, output_path):
                     night_qa_source.rename('QA_Night_Source')
                 ]).set('date', date_band)
             
-            # Process collection
+            # Process collection with hierarchical QA filtering
             processed = collection.map(process_image)
-            image_list = processed.toList(processed.size())
             collection_size = processed.size().getInfo()
             
-            print(f"        📊 Processing {collection_size} images...")
+            if collection_size == 0:
+                print(f"        ⚠️ No images in quarter {q_idx + 1}")
+                continue
+            
+            print(f"        📊 Extracting {collection_size} images (server-side batch)...")
             
             # Comprehensive statistics reducer: min, median, mean, max (ORIGINAL PROTOCOL)
             stats_reducer = ee.Reducer.min().combine(
@@ -329,81 +336,99 @@ def extract_modis_daily_lst(geometry, city_name, year, output_path):
                 reducer2=ee.Reducer.max(), sharedInputs=True
             )
             
-            # Extract statistics for each image
-            for j in range(collection_size):
-                try:
-                    image = ee.Image(image_list.get(j))
-                    date_str = image.get('date').getInfo()
-                    
-                    # Extract LST statistics for both day and night
-                    stats = image.select(['LST_Day', 'LST_Night', 'QA_Day_Source', 'QA_Night_Source']).reduceRegion(
-                        reducer=stats_reducer,
-                        geometry=geometry,
-                        scale=1000,
-                        maxPixels=1e9,
-                        bestEffort=True
-                    ).getInfo()
-                    
-                    # Calculate QA percentages (original protocol)
-                    qa_day = image.select('QA_Day_Source').reduceRegion(
-                        reducer=ee.Reducer.frequencyHistogram(),
-                        geometry=geometry,
-                        scale=1000,
-                        maxPixels=1e9,
-                        bestEffort=True
-                    ).getInfo().get('QA_Day_Source', {})
-                    
-                    qa_night = image.select('QA_Night_Source').reduceRegion(
-                        reducer=ee.Reducer.frequencyHistogram(),
-                        geometry=geometry,
-                        scale=1000,
-                        maxPixels=1e9,
-                        bestEffort=True
-                    ).getInfo().get('QA_Night_Source', {})
-                    
-                    def calculate_qa_percentages(qa_hist):
-                        if not qa_hist:
-                            return 0, 0, 'none'
-                        total = sum(float(v) for v in qa_hist.values())
-                        if total == 0:
-                            return 0, 0, 'none'
-                        
-                        strict_count = float(qa_hist.get('1', 0))
-                        moderate_count = float(qa_hist.get('2', 0))
-                        
-                        strict_pct = (strict_count / total) * 100
-                        moderate_pct = (moderate_count / total) * 100
-                        
-                        dominant = 'strict' if strict_pct >= moderate_pct else 'moderate' if moderate_pct > 0 else 'none'
-                        return strict_pct, moderate_pct, dominant
-                    
-                    day_strict_pct, day_moderate_pct, day_qa_level = calculate_qa_percentages(qa_day)
-                    night_strict_pct, night_moderate_pct, night_qa_level = calculate_qa_percentages(qa_night)
-                    
-                    # Compile comprehensive results with all statistics
-                    all_results.append({
-                        'date': date_str,
-                        # Day LST - All Statistics (min, median, mean, max)
-                        'day_lst_min': stats.get('LST_Day_min'),
-                        'day_lst_median': stats.get('LST_Day_median'),
-                        'day_lst_mean': stats.get('LST_Day_mean'),
-                        'day_lst_max': stats.get('LST_Day_max'),
-                        # Night LST - All Statistics (min, median, mean, max)
-                        'night_lst_min': stats.get('LST_Night_min'),
-                        'night_lst_median': stats.get('LST_Night_median'),
-                        'night_lst_mean': stats.get('LST_Night_mean'),
-                        'night_lst_max': stats.get('LST_Night_max'),
-                        # QA Information for data quality tracking
-                        'day_qa_strict_pct': round(day_strict_pct, 1),
-                        'day_qa_moderate_pct': round(day_moderate_pct, 1),
-                        'night_qa_strict_pct': round(night_strict_pct, 1),
-                        'night_qa_moderate_pct': round(night_moderate_pct, 1),
-                        'day_qa_level': day_qa_level,
-                        'night_qa_level': night_qa_level
-                    })
-                    
-                except Exception as e:
-                    print(f"        ⚠️ Error processing image {j}: {e}")
+            # --- SERVER-SIDE BATCH EXTRACTION ---
+            # Maps reduceRegion over all images on the GEE server so only ONE
+            # getInfo() call is needed per quarter (instead of ~90 per-image
+            # round-trips). Reduces GEE API calls by ~180× per city.
+            def _extract_daily_feature(image):
+                """Server-side: extract spatial statistics as an ee.Feature."""
+                date_val = image.get('date')
+                
+                # LST spatial statistics (min, median, mean, max)
+                lst_stats = image.select(['LST_Day', 'LST_Night']).reduceRegion(
+                    reducer=stats_reducer,
+                    geometry=geometry,
+                    scale=1000,
+                    maxPixels=1e9,
+                    bestEffort=True
+                )
+                
+                # QA frequency histograms
+                qa_day_hist = image.select('QA_Day_Source').reduceRegion(
+                    reducer=ee.Reducer.frequencyHistogram(),
+                    geometry=geometry,
+                    scale=1000,
+                    maxPixels=1e9,
+                    bestEffort=True
+                ).get('QA_Day_Source')
+                
+                qa_night_hist = image.select('QA_Night_Source').reduceRegion(
+                    reducer=ee.Reducer.frequencyHistogram(),
+                    geometry=geometry,
+                    scale=1000,
+                    maxPixels=1e9,
+                    bestEffort=True
+                ).get('QA_Night_Source')
+                
+                return ee.Feature(None, lst_stats.combine(ee.Dictionary({
+                    'date': date_val,
+                    'qa_day_hist': qa_day_hist,
+                    'qa_night_hist': qa_night_hist
+                })))
+            
+            features_fc = processed.map(_extract_daily_feature)
+            
+            # Single getInfo() retrieves all results for the quarter
+            result_fc = features_fc.getInfo()
+            
+            def _qa_percentages(qa_hist):
+                """Parse QA frequency histogram into percentages."""
+                if not qa_hist:
+                    return 0, 0, 'none'
+                total = sum(float(v) for v in qa_hist.values())
+                if total == 0:
+                    return 0, 0, 'none'
+                strict_count = float(qa_hist.get('1', 0))
+                moderate_count = float(qa_hist.get('2', 0))
+                strict_pct = (strict_count / total) * 100
+                moderate_pct = (moderate_count / total) * 100
+                dominant = 'strict' if strict_pct >= moderate_pct else 'moderate' if moderate_pct > 0 else 'none'
+                return strict_pct, moderate_pct, dominant
+            
+            q_count = 0
+            for feature in result_fc['features']:
+                props = feature['properties']
+                date_str = props.get('date')
+                if not date_str:
+                    continue
+                
+                day_s, day_m, day_l = _qa_percentages(props.get('qa_day_hist'))
+                night_s, night_m, night_l = _qa_percentages(props.get('qa_night_hist'))
+                
+                # Compile comprehensive results (identical output format)
+                all_results.append({
+                    'date': date_str,
+                    # Day LST - All Statistics (min, median, mean, max)
+                    'day_lst_min': props.get('LST_Day_min'),
+                    'day_lst_median': props.get('LST_Day_median'),
+                    'day_lst_mean': props.get('LST_Day_mean'),
+                    'day_lst_max': props.get('LST_Day_max'),
+                    # Night LST - All Statistics (min, median, mean, max)
+                    'night_lst_min': props.get('LST_Night_min'),
+                    'night_lst_median': props.get('LST_Night_median'),
+                    'night_lst_mean': props.get('LST_Night_mean'),
+                    'night_lst_max': props.get('LST_Night_max'),
+                    # QA Information for data quality tracking
+                    'day_qa_strict_pct': round(day_s, 1),
+                    'day_qa_moderate_pct': round(day_m, 1),
+                    'night_qa_strict_pct': round(night_s, 1),
+                    'night_qa_moderate_pct': round(night_m, 1),
+                    'day_qa_level': day_l,
+                    'night_qa_level': night_l
+                })
+                q_count += 1
+            
+            print(f"        ✅ Quarter {q_idx + 1}: {q_count} daily records extracted")
         
         except Exception as e:
             print(f"        ❌ Error processing quarter {q_idx + 1}: {e}")

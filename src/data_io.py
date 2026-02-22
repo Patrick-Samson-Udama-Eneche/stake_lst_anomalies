@@ -785,7 +785,10 @@ def load_seviri_cities_lst(base_dir, study_year):
         city_data = {}
         
         for period_type in ['day', 'night']:
-            if period_type in city_info and city_info[period_type]['status'] in ['completed', 'skipped', 'success']:
+            if (period_type in city_info
+                    and city_info[period_type] is not None
+                    and isinstance(city_info[period_type], dict)
+                    and city_info[period_type].get('status') in ['completed', 'skipped', 'success']):
                 clipped_path = city_info[period_type]['clipped_path']
                 
                 if os.path.exists(clipped_path):
