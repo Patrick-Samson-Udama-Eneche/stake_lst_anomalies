@@ -105,22 +105,24 @@ def get_temporal_resolution_strategy(duration_days):
     """
     Determine temporal resolution based on event duration
     
+    PROTOCOL: Always use 15-minute resolution regardless of event duration.
+    More timestamps per day → better cloud gap elimination via nanmedian.
+    
     Parameters:
     -----------
     duration_days : int
-        Duration of the event in days
+        Duration of the event in days (unused — kept for API compatibility)
     
     Returns:
     --------
     tuple : (strategy, interval_minutes)
-        Strategy name and temporal interval in minutes
+        Always returns ("15min", 15)
     """
-    if duration_days <= 3:
-        return "15min", 15
-    elif duration_days <= 7:
-        return "1hr", 60
-    else:
-        return "daily", 1440
+    # Always 15-minute resolution: 13 timestamps/day within
+    # the 3-hour window (12:00-15:00 day, 00:00-03:00 night).
+    # Longer events produce more images → more robust median composites
+    # and fewer cloud-contaminated gaps in the final LST map.
+    return "15min", 15
 
 
 def load_city_event_periods(city_name, output_dir, study_year):
@@ -496,14 +498,15 @@ def spatial_interpolate_gaps(data, max_distance=5, method='nearest'):
     return filled
 
 
-def compute_median_lst_native_msg(lst_arrays, output_path, transform=None, city_name=None):
+def compute_median_lst_native_msg(lst_inputs, output_path, transform=None, city_name=None):
     """
     Compute median LST in native MSG projection with optional water masking
     
     Parameters:
     -----------
-    lst_arrays : list
-        List of LST numpy arrays
+    lst_inputs : list
+        List of LST numpy arrays  **or**  list of str paths to .npy files
+        on disk (memory-mapped mode — avoids holding all arrays in RAM).
     output_path : str
         Output GeoTIFF path
     transform : affine.Affine, optional
@@ -517,16 +520,52 @@ def compute_median_lst_native_msg(lst_arrays, output_path, transform=None, city_
     str or None : Path to saved GeoTIFF or None if failed
     """
     try:
-        if not lst_arrays:
+        if not lst_inputs:
             print("        No valid LST arrays to process")
             return None
         
-        lst_stack = np.stack(lst_arrays, axis=0)
-        median_lst = np.nanmedian(lst_stack, axis=0)
-        valid_count = np.sum(~np.isnan(lst_stack), axis=0)
+        # Detect mode: in-memory arrays  vs  disk-backed .npy paths
+        disk_mode = isinstance(lst_inputs[0], (str, os.PathLike))
         
-        height, width = median_lst.shape
-        print(f"        Computing median: {width} x {height} pixels from {len(lst_arrays)} arrays")
+        if disk_mode:
+            ref = np.load(lst_inputs[0], mmap_mode='r')
+            height, width = ref.shape
+            del ref
+        else:
+            height, width = lst_inputs[0].shape
+        
+        n_arrays = len(lst_inputs)
+        mode_label = 'disk-backed' if disk_mode else 'in-memory'
+        print(f"        Computing median ({mode_label}): "
+              f"{width} x {height} pixels from {n_arrays} arrays")
+        
+        # Chunked row processing to avoid OOM on full-disk stacks.
+        # np.nanmedian internally copies + partitions, so peak ≈ 3× chunk.
+        # Target ~200 MiB per raw chunk → ~600 MiB peak with nanmedian.
+        TARGET_CHUNK_BYTES = 200 * 1024 * 1024          # 200 MiB
+        bytes_per_row = n_arrays * width * 4             # float32
+        chunk_rows = max(8, min(256, TARGET_CHUNK_BYTES // max(bytes_per_row, 1)))
+        
+        median_lst = np.full((height, width), np.nan, dtype=np.float32)
+        valid_count = np.zeros((height, width), dtype=np.float32)
+        
+        n_chunks = -(-height // chunk_rows)              # ceil division
+        print(f"        Processing in {n_chunks} chunks of {chunk_rows} rows "
+              f"(~{bytes_per_row * chunk_rows / 1024**2:.0f} MiB/chunk)")
+        
+        for r0 in range(0, height, chunk_rows):
+            r1 = min(r0 + chunk_rows, height)
+            if disk_mode:
+                # Load only the needed row slice from each file (mmap)
+                slices = [np.load(p, mmap_mode='r')[r0:r1, :].astype(np.float32)
+                          for p in lst_inputs]
+            else:
+                slices = [a[r0:r1, :] for a in lst_inputs]
+            chunk = np.stack(slices, axis=0)
+            del slices
+            median_lst[r0:r1, :] = np.nanmedian(chunk, axis=0).astype(np.float32)
+            valid_count[r0:r1, :] = np.sum(~np.isnan(chunk), axis=0).astype(np.float32)
+            del chunk
         
         # Calculate coverage before interpolation
         total_pixels = median_lst.size
@@ -723,6 +762,27 @@ def reproject_to_wgs84_1km(input_path, output_dir, city_name, period_type, aoi_p
                 print(f"        WARNING: No valid data after reprojection!")
                 return None
             
+            # ── Post-reprojection gap filling ──────────────────────────────
+            # The MSG→WGS84 reprojection creates geometric NaN at grid
+            # boundaries (~10-17 % of pixels).  Short-event cloud gaps may
+            # also survive.  Fill with nearest-neighbour interpolation up to
+            # 20 km (20 pixels at 1 km resolution).
+            total_pixels = dst_data.size
+            pre_fill_valid = int(valid_pixels)
+            pre_fill_pct  = 100 * pre_fill_valid / total_pixels
+            
+            dst_data = spatial_interpolate_gaps(dst_data, max_distance=20,
+                                                method='nearest')
+            
+            post_fill_valid = int(np.sum(~np.isnan(dst_data)))
+            post_fill_pct   = 100 * post_fill_valid / total_pixels
+            filled_count    = post_fill_valid - pre_fill_valid
+            
+            print(f"        Post-reprojection gap fill: "
+                  f"{pre_fill_pct:.1f}% → {post_fill_pct:.1f}% "
+                  f"(+{filled_count:,} pixels)")
+            # ───────────────────────────────────────────────────────────────
+            
             output_filename = f"{city_name}_SEVIRI_{period_type}_{date_str}_median_WGS84_1km.tif"
             output_path = os.path.join(output_dir, output_filename)
             
@@ -750,10 +810,11 @@ def reproject_to_wgs84_1km(input_path, output_dir, city_name, period_type, aoi_p
                     ORIGINAL_RESOLUTION='3km_MSG',
                     TARGET_CRS=str(target_crs),
                     RESAMPLING='bilinear',
+                    GAP_FILL='nearest_20km',
                     AOI_FILE=os.path.basename(aoi_path)
                 )
             
-            print(f"        Reprojection complete: {valid_pixels:,} valid pixels")
+            print(f"        Reprojection complete: {post_fill_valid:,} valid pixels")
             
             # RE-APPLY water masking after reprojection (critical fix)
             # Reprojection can interpolate across water pixels, so re-mask them
@@ -952,27 +1013,43 @@ def process_single_event(city_name, period_type, timestamps, lst_collection,
                 return None
             
             print(f"        Extracting LST...")
-            lst_arrays = []
+            lst_npy_paths = []   # save to disk instead of accumulating in RAM
+            ref_shape = None
             
             for zip_file in valid_files:
                 lst_result = extract_and_subset_seviri_native(zip_file)
                 if lst_result is not None:
                     lst_data, file_transform = lst_result
-                    lst_arrays.append(lst_data)
+                    if ref_shape is None:
+                        ref_shape = lst_data.shape
+                    # Persist to a temp .npy file and free the array
+                    npy_path = zip_file.replace('.zip', '.npy')
+                    np.save(npy_path, lst_data.astype(np.float32))
+                    lst_npy_paths.append(npy_path)
+                    del lst_data
             
-            print(f"        Valid LST arrays: {len(lst_arrays)}")
+            print(f"        Valid LST arrays: {len(lst_npy_paths)}")
             
-            if not lst_arrays:
+            if not lst_npy_paths:
                 return None
             
             # Create transform
-            height, width = lst_arrays[0].shape
+            height, width = ref_shape
             correct_transform = from_bounds(
                 -5568742.4, -5568742.4, 5568742.4, 5568742.4,
                 width, height
             )
             
-            result_path = compute_median_lst_native_msg(lst_arrays, native_path, correct_transform, city_name)
+            result_path = compute_median_lst_native_msg(
+                lst_npy_paths, native_path, correct_transform, city_name
+            )
+            
+            # Clean up temp .npy files
+            for p in lst_npy_paths:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
             
             if not result_path:
                 return None

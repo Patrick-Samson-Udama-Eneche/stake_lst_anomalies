@@ -224,6 +224,10 @@ def extract_modis_daily_lst(geometry, city_name, year, output_path):
     Uses quarterly batch processing with hierarchical QA filtering (strict + moderate blend).
     Extracts BOTH day and night LST in a single combined CSV file.
     
+    Server-side batch extraction: maps ``reduceRegion`` over all images on the
+    GEE server and retrieves results in a single ``getInfo()`` call per quarter,
+    reducing API round-trips by ~180× compared to per-image iteration.
+    
     Parameters
     ----------
     geometry : ee.Geometry
@@ -313,12 +317,15 @@ def extract_modis_daily_lst(geometry, city_name, year, output_path):
                     night_qa_source.rename('QA_Night_Source')
                 ]).set('date', date_band)
             
-            # Process collection
+            # Process collection with hierarchical QA filtering
             processed = collection.map(process_image)
-            image_list = processed.toList(processed.size())
             collection_size = processed.size().getInfo()
             
-            print(f"        📊 Processing {collection_size} images...")
+            if collection_size == 0:
+                print(f"        ⚠️ No images in quarter {q_idx + 1}")
+                continue
+            
+            print(f"        📊 Extracting {collection_size} images (server-side batch)...")
             
             # Comprehensive statistics reducer: min, median, mean, max (ORIGINAL PROTOCOL)
             stats_reducer = ee.Reducer.min().combine(
@@ -329,81 +336,99 @@ def extract_modis_daily_lst(geometry, city_name, year, output_path):
                 reducer2=ee.Reducer.max(), sharedInputs=True
             )
             
-            # Extract statistics for each image
-            for j in range(collection_size):
-                try:
-                    image = ee.Image(image_list.get(j))
-                    date_str = image.get('date').getInfo()
-                    
-                    # Extract LST statistics for both day and night
-                    stats = image.select(['LST_Day', 'LST_Night', 'QA_Day_Source', 'QA_Night_Source']).reduceRegion(
-                        reducer=stats_reducer,
-                        geometry=geometry,
-                        scale=1000,
-                        maxPixels=1e9,
-                        bestEffort=True
-                    ).getInfo()
-                    
-                    # Calculate QA percentages (original protocol)
-                    qa_day = image.select('QA_Day_Source').reduceRegion(
-                        reducer=ee.Reducer.frequencyHistogram(),
-                        geometry=geometry,
-                        scale=1000,
-                        maxPixels=1e9,
-                        bestEffort=True
-                    ).getInfo().get('QA_Day_Source', {})
-                    
-                    qa_night = image.select('QA_Night_Source').reduceRegion(
-                        reducer=ee.Reducer.frequencyHistogram(),
-                        geometry=geometry,
-                        scale=1000,
-                        maxPixels=1e9,
-                        bestEffort=True
-                    ).getInfo().get('QA_Night_Source', {})
-                    
-                    def calculate_qa_percentages(qa_hist):
-                        if not qa_hist:
-                            return 0, 0, 'none'
-                        total = sum(float(v) for v in qa_hist.values())
-                        if total == 0:
-                            return 0, 0, 'none'
-                        
-                        strict_count = float(qa_hist.get('1', 0))
-                        moderate_count = float(qa_hist.get('2', 0))
-                        
-                        strict_pct = (strict_count / total) * 100
-                        moderate_pct = (moderate_count / total) * 100
-                        
-                        dominant = 'strict' if strict_pct >= moderate_pct else 'moderate' if moderate_pct > 0 else 'none'
-                        return strict_pct, moderate_pct, dominant
-                    
-                    day_strict_pct, day_moderate_pct, day_qa_level = calculate_qa_percentages(qa_day)
-                    night_strict_pct, night_moderate_pct, night_qa_level = calculate_qa_percentages(qa_night)
-                    
-                    # Compile comprehensive results with all statistics
-                    all_results.append({
-                        'date': date_str,
-                        # Day LST - All Statistics (min, median, mean, max)
-                        'day_lst_min': stats.get('LST_Day_min'),
-                        'day_lst_median': stats.get('LST_Day_median'),
-                        'day_lst_mean': stats.get('LST_Day_mean'),
-                        'day_lst_max': stats.get('LST_Day_max'),
-                        # Night LST - All Statistics (min, median, mean, max)
-                        'night_lst_min': stats.get('LST_Night_min'),
-                        'night_lst_median': stats.get('LST_Night_median'),
-                        'night_lst_mean': stats.get('LST_Night_mean'),
-                        'night_lst_max': stats.get('LST_Night_max'),
-                        # QA Information for data quality tracking
-                        'day_qa_strict_pct': round(day_strict_pct, 1),
-                        'day_qa_moderate_pct': round(day_moderate_pct, 1),
-                        'night_qa_strict_pct': round(night_strict_pct, 1),
-                        'night_qa_moderate_pct': round(night_moderate_pct, 1),
-                        'day_qa_level': day_qa_level,
-                        'night_qa_level': night_qa_level
-                    })
-                    
-                except Exception as e:
-                    print(f"        ⚠️ Error processing image {j}: {e}")
+            # --- SERVER-SIDE BATCH EXTRACTION ---
+            # Maps reduceRegion over all images on the GEE server so only ONE
+            # getInfo() call is needed per quarter (instead of ~90 per-image
+            # round-trips). Reduces GEE API calls by ~180× per city.
+            def _extract_daily_feature(image):
+                """Server-side: extract spatial statistics as an ee.Feature."""
+                date_val = image.get('date')
+                
+                # LST spatial statistics (min, median, mean, max)
+                lst_stats = image.select(['LST_Day', 'LST_Night']).reduceRegion(
+                    reducer=stats_reducer,
+                    geometry=geometry,
+                    scale=1000,
+                    maxPixels=1e9,
+                    bestEffort=True
+                )
+                
+                # QA frequency histograms
+                qa_day_hist = image.select('QA_Day_Source').reduceRegion(
+                    reducer=ee.Reducer.frequencyHistogram(),
+                    geometry=geometry,
+                    scale=1000,
+                    maxPixels=1e9,
+                    bestEffort=True
+                ).get('QA_Day_Source')
+                
+                qa_night_hist = image.select('QA_Night_Source').reduceRegion(
+                    reducer=ee.Reducer.frequencyHistogram(),
+                    geometry=geometry,
+                    scale=1000,
+                    maxPixels=1e9,
+                    bestEffort=True
+                ).get('QA_Night_Source')
+                
+                return ee.Feature(None, lst_stats.combine(ee.Dictionary({
+                    'date': date_val,
+                    'qa_day_hist': qa_day_hist,
+                    'qa_night_hist': qa_night_hist
+                })))
+            
+            features_fc = processed.map(_extract_daily_feature)
+            
+            # Single getInfo() retrieves all results for the quarter
+            result_fc = features_fc.getInfo()
+            
+            def _qa_percentages(qa_hist):
+                """Parse QA frequency histogram into percentages."""
+                if not qa_hist:
+                    return 0, 0, 'none'
+                total = sum(float(v) for v in qa_hist.values())
+                if total == 0:
+                    return 0, 0, 'none'
+                strict_count = float(qa_hist.get('1', 0))
+                moderate_count = float(qa_hist.get('2', 0))
+                strict_pct = (strict_count / total) * 100
+                moderate_pct = (moderate_count / total) * 100
+                dominant = 'strict' if strict_pct >= moderate_pct else 'moderate' if moderate_pct > 0 else 'none'
+                return strict_pct, moderate_pct, dominant
+            
+            q_count = 0
+            for feature in result_fc['features']:
+                props = feature['properties']
+                date_str = props.get('date')
+                if not date_str:
+                    continue
+                
+                day_s, day_m, day_l = _qa_percentages(props.get('qa_day_hist'))
+                night_s, night_m, night_l = _qa_percentages(props.get('qa_night_hist'))
+                
+                # Compile comprehensive results (identical output format)
+                all_results.append({
+                    'date': date_str,
+                    # Day LST - All Statistics (min, median, mean, max)
+                    'day_lst_min': props.get('LST_Day_min'),
+                    'day_lst_median': props.get('LST_Day_median'),
+                    'day_lst_mean': props.get('LST_Day_mean'),
+                    'day_lst_max': props.get('LST_Day_max'),
+                    # Night LST - All Statistics (min, median, mean, max)
+                    'night_lst_min': props.get('LST_Night_min'),
+                    'night_lst_median': props.get('LST_Night_median'),
+                    'night_lst_mean': props.get('LST_Night_mean'),
+                    'night_lst_max': props.get('LST_Night_max'),
+                    # QA Information for data quality tracking
+                    'day_qa_strict_pct': round(day_s, 1),
+                    'day_qa_moderate_pct': round(day_m, 1),
+                    'night_qa_strict_pct': round(night_s, 1),
+                    'night_qa_moderate_pct': round(night_m, 1),
+                    'day_qa_level': day_l,
+                    'night_qa_level': night_l
+                })
+                q_count += 1
+            
+            print(f"        ✅ Quarter {q_idx + 1}: {q_count} daily records extracted")
         
         except Exception as e:
             print(f"        ❌ Error processing quarter {q_idx + 1}: {e}")
@@ -629,3 +654,244 @@ def extract_era5_daily_lst(geometry, city_name, year, output_path):
     except Exception as e:
         print(f"        ❌ ERA5-Land extraction error: {e}")
         return False
+
+
+# =============================================================================
+# NOTEBOOK 03 — MODIS MONTHLY/ANNUAL LST WITH HIERARCHICAL QA
+# =============================================================================
+
+def load_modis_collection_with_hierarchical_qa(city_name, geometry, lst_time,
+                                               lst_config, temporal_config,
+                                               project_config):
+    """
+    Load and prepare a MODIS LST ImageCollection with hierarchical QA filtering.
+
+    Implements the strict → moderate fallback strategy:
+      1. Strict QA (error ≤ 1 K) applied first.
+      2. Where strict pixels are absent, moderate QA (error ≤ 2 K) fills gaps.
+      3. A 'QA_Source' band records which tier was used (1 = strict, 2 = moderate).
+
+    Parameters
+    ----------
+    city_name : str
+    geometry : ee.Geometry
+    lst_time : str
+        'day' or 'night'
+    lst_config : dict
+        config.LST_CONFIG
+    temporal_config : dict
+        config.TEMPORAL_CONFIG
+    project_config : dict
+        Local PROJECT_CONFIG dict from the notebook (needs 'start_date', 'end_date').
+
+    Returns
+    -------
+    tuple
+        (processed_collection, image_count, monthly_counts, yearly_counts,
+         monthly_yearly_counts)
+        Any element can be None on failure.
+    """
+    import time as _time
+    import traceback as _tb
+    import datetime as _dt
+
+    start_time = _time.time()
+    try:
+        collection_config = lst_config['collections'][lst_config['primary_collection']]
+        selected_band    = collection_config[lst_time + '_band']
+        selected_qa_band = collection_config[lst_time + '_qa_band']
+        qa_levels_to_use = lst_config['qa_levels_to_use']
+
+        print(f"  🛰️  Loading {collection_config['description']} {lst_time.title()}-time for {city_name}")
+
+        collection = (ee.ImageCollection(collection_config['id'])
+                      .filterDate(project_config['start_date'], project_config['end_date'])
+                      .filterBounds(geometry))
+
+        total_images = collection.size().getInfo()
+        print(f"    📊 Total images in collection: {total_images}")
+
+        def apply_hierarchical_qa(image):
+            lst   = image.select(selected_band)
+            qa    = image.select(selected_qa_band)
+            lst_c = lst.multiply(collection_config['scale_factor']).add(collection_config['offset'])
+            qa_hierarchy = lst_config['quality_hierarchy']
+
+            quality_masks = {}
+            quality_lst   = {}
+            for tier in qa_hierarchy:
+                if tier in qa_levels_to_use:
+                    quality_masks[tier] = qa.bitwiseAnd(3).eq(qa_hierarchy[tier]['qa_bits'])
+                    quality_lst[tier]   = lst_c.updateMask(quality_masks[tier])
+
+            qa_source    = ee.Image(0).rename('QA_Source')
+            sorted_tiers = sorted([t for t in qa_levels_to_use],
+                                  key=lambda t: qa_hierarchy[t]['priority'])
+            for tier in sorted_tiers:
+                qa_source = qa_source.where(quality_masks[tier],
+                                            qa_hierarchy[tier]['priority'])
+
+            lst_hierarchical = None
+            for i, tier in enumerate(sorted_tiers):
+                if i == 0:
+                    lst_hierarchical = quality_lst[tier]
+                else:
+                    lst_hierarchical = lst_hierarchical.blend(quality_lst[tier])
+
+            if lst_hierarchical is None:
+                return ee.Image([]).copyProperties(image, ['system:time_start'])
+
+            lst_hierarchical = lst_hierarchical.rename('LST')
+            valid_temp       = lst_hierarchical.gt(5).And(lst_hierarchical.lt(70))
+            lst_hierarchical = lst_hierarchical.updateMask(valid_temp)
+            qa_source        = qa_source.updateMask(valid_temp)
+
+            return (ee.Image([lst_hierarchical, qa_source])
+                    .copyProperties(image, ['system:time_start']))
+
+        processed_collection = collection.map(apply_hierarchical_qa)
+        image_count          = processed_collection.size().getInfo()
+        print(f"    📊 Processed images after filtering: {image_count}")
+
+        try:
+            dates_millis = processed_collection.aggregate_array('system:time_start').getInfo()
+            dates        = [_dt.datetime.fromtimestamp(d / 1000) for d in dates_millis]
+
+            monthly_counts = {m: sum(1 for d in dates if d.month == m) for m in range(1, 13)}
+            yearly_counts  = {y: sum(1 for d in dates if d.year  == y)
+                              for y in temporal_config['years']}
+            monthly_yearly_counts = {}
+            for y in temporal_config['years']:
+                monthly_yearly_counts[y] = {
+                    m: sum(1 for d in dates if d.year == y and d.month == m)
+                    for m in range(1, 13)}
+
+            duration = _time.time() - start_time
+            print(f"    ⏱️ Collection loaded in {duration:.2f}s")
+            return processed_collection, image_count, monthly_counts, \
+                   yearly_counts, monthly_yearly_counts
+
+        except Exception as e:
+            print(f"    ⚠️ Could not compute image frequency statistics: {e}")
+            return processed_collection, image_count, None, None, None
+
+    except Exception as e:
+        print(f"    ❌ Error loading collection for {city_name}: {e}")
+        print(f"    📋 {_tb.format_exc()}")
+        return None, 0, None, None, None
+
+
+def compute_and_export_lst_geotiff_with_qa(collection, geometry, city_name,
+                                           city_dir, period_type, period_value,
+                                           lst_time, lst_config, project_config):
+    """
+    Compute a median LST composite and export both the LST and QA GeoTIFFs.
+
+    Parameters
+    ----------
+    collection : ee.ImageCollection
+        QA-filtered collection returned by load_modis_collection_with_hierarchical_qa.
+    geometry : ee.Geometry
+    city_name, city_dir : str
+    period_type : str
+        'yearly' or 'monthly_climatology'
+    period_value : int
+        Year (e.g. 2020) or month number (1-12).
+    lst_time : str
+        'day' or 'night'
+    lst_config : dict   (config.LST_CONFIG)
+    project_config : dict
+        Needs 'lst_output_dir'.
+
+    Returns
+    -------
+    dict or None
+        Keys: 'file_name', 'period', 'image_count', 'status', optionally
+        'lst_path', 'qa_path', 'processing_time'.
+    """
+    import time as _time
+    import traceback as _tb
+    import requests as _req
+
+    start = _time.time()
+    try:
+        if period_type == 'yearly':
+            start_date  = f"{period_value}-01-01"
+            end_date    = f"{period_value}-12-31"
+            period_name = str(period_value)
+            file_name   = f"{city_name}_LST_{lst_time.title()}_Yearly_{period_value}"
+            qa_name     = f"{city_name}_QA_Source_{lst_time.title()}_Yearly_{period_value}"
+            period_coll = collection.filterDate(start_date, end_date)
+
+        elif period_type == 'monthly_climatology':
+            month          = period_value
+            month_filter   = ee.Filter.calendarRange(month, month, 'month')
+            period_name    = f"Month_{month:02d}_AllYears"
+            file_name      = f"{city_name}_LST_{lst_time.title()}_MonthlyClimatology_{month:02d}"
+            qa_name        = f"{city_name}_QA_Source_{lst_time.title()}_MonthlyClimatology_{month:02d}"
+            period_coll    = collection.filter(month_filter)
+        else:
+            return None
+
+        period_count = period_coll.size().getInfo()
+        if period_count == 0:
+            return None
+
+        lst_composite = period_coll.select('LST').median().rename('LST')
+        qa_composite  = period_coll.select('QA_Source').mode().rename('QA_Source')
+
+        # Check valid pixels
+        valid_pixels = (ee.Number(lst_composite.reduceRegion(
+            reducer=ee.Reducer.count(), geometry=geometry,
+            scale=lst_config['scale'], maxPixels=1e9).get('LST'))
+            .getInfo())
+        if valid_pixels == 0:
+            return {'file_name': file_name, 'period': period_name,
+                    'image_count': period_count, 'status': 'no_valid_pixels'}
+
+        # Build output paths
+        lst_subfolder  = 'Day' if lst_time == 'day' else 'Night'
+        geotiff_dir    = os.path.join(project_config['lst_output_dir'], city_dir,
+                                      'LST_Temporal_Analysis', lst_subfolder, 'geotiff')
+        os.makedirs(geotiff_dir, exist_ok=True)
+        dl_path        = os.path.join(geotiff_dir, f"{file_name}.tif")
+        qa_path        = os.path.join(geotiff_dir, f"{qa_name}.tif")
+
+        def _download(image, bands, path, label):
+            params = {'scale': lst_config['scale'], 'crs': 'EPSG:4326',
+                      'region': geometry, 'format': 'GEO_TIFF',
+                      'bands': bands}
+            url  = image.getDownloadURL(params)
+            for attempt in range(3):
+                try:
+                    r = _req.get(url, stream=True, timeout=60)
+                    if r.status_code == 200:
+                        with open(path, 'wb') as f:
+                            for chunk in r.iter_content(8192):
+                                if chunk:
+                                    f.write(chunk)
+                        return True
+                    print(f"      ⚠️ HTTP {r.status_code} on attempt {attempt+1} for {label}")
+                except Exception as e:
+                    print(f"      ⚠️ Download error on attempt {attempt+1}: {e}")
+                _time.sleep(2)
+            return False
+
+        lst_ok = _download(lst_composite, ['LST'],       dl_path, 'LST')
+        qa_ok  = _download(qa_composite,  ['QA_Source'], qa_path, 'QA')
+
+        duration = _time.time() - start
+        status   = 'downloaded' if (lst_ok and qa_ok) else ('partial' if lst_ok else 'failed')
+        result   = {'file_name': file_name, 'period': period_name,
+                    'image_count': period_count, 'status': status,
+                    'processing_time': duration}
+        if lst_ok:
+            result['lst_path'] = dl_path
+        if qa_ok:
+            result['qa_path']  = qa_path
+        return result
+
+    except Exception as e:
+        print(f"      ❌ Error: {e}")
+        print(f"      📋 {_tb.format_exc()}")
+        return None

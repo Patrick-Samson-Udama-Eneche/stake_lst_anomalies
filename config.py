@@ -152,7 +152,7 @@ TEST_CITIES: List[str] = [
 #   - Example: ["Lagos", "Abuja", "Enugu", "Maiduguri"]
 
 
-CITY_SELECTION_MODE: str = "TEST"  # Options: "ALL", "ABOVE_1M", "TEST", or "SPECIFIC"
+CITY_SELECTION_MODE: str = "ALL"  # Options: "ALL", "ABOVE_1M", "TEST", or "SPECIFIC"
 
 
 SELECTED_CITIES: List[str] = [
@@ -463,6 +463,53 @@ VISUALIZATION_CONFIG = {
     }
 }
 
+# =============================================================================
+# DASK WORKER CONFIGURATION
+# =============================================================================
+# Tiered worker counts scaled to the number of cities being processed.
+# Each tier trades RAM usage vs. throughput — more workers = faster but
+# requires more memory.  Adjust the counts to match your machine.
+#
+# Rule of thumb for this laptop (Dell Latitude E7240, 8 GB RAM):
+#   - Keep n_workers * 2 GB ≤ available RAM (leave ~2 GB for OS + GEE)
+#   - Each worker uses ~1–1.5 GB when downloading GeoTIFFs from GEE
+#
+#   ← CHANGE THIS  to tune performance for your hardware
+DASK_WORKERS = {
+    #  cities    workers   notes
+    5:   3,   # ≤ 5  cities  — original setting (safe for 8 GB RAM)
+    10:  4,   # 6–10 cities  — slight boost, still stable
+    15:  5,   # 11–15 cities — moderate load
+    20:  6,   # 16–20 cities — higher throughput
+    30:  6,   # 21–30 cities — same ceiling; GEE quota limits gain
+    50:  7,   # 31–50 cities — approach RAM limit; monitor dashboard
+}
+
+
+def get_dask_workers(n_cities: int) -> int:
+    """
+    Return the recommended number of Dask workers for *n_cities*.
+
+    Looks up the first tier whose key is >= n_cities.  Falls back to the
+    largest defined tier when n_cities exceeds all keys.
+
+    Parameters
+    ----------
+    n_cities : int
+        Number of cities that will be processed in this run.
+
+    Returns
+    -------
+    int
+        Number of Dask workers to create.
+    """
+    for threshold in sorted(DASK_WORKERS):
+        if n_cities <= threshold:
+            return DASK_WORKERS[threshold]
+    # More cities than the highest tier — use the largest defined value
+    return DASK_WORKERS[max(DASK_WORKERS)]
+
+
 # Processing options for LST analysis
 PROCESSING_OPTIONS = {
     'export_primary_only': True,                          # Export only the primary collection
@@ -473,6 +520,82 @@ PROCESSING_OPTIONS = {
     'save_qa_source_maps': True,                          # Save QA provenance maps
     'dask_chunksize': 2                                   # ← CHANGE THIS  (cities processed in parallel; lower = less RAM)
 }
+
+
+# =============================================================================
+# CROSS-CITY CHART CONFIGURATION (Notebook 03)
+# =============================================================================
+# Dimensions are computed dynamically from n_cities so every output
+# (50 cities vs 5 cities) is correctly proportioned. CHANGE the scaling
+# coefficients to suit your monitor / publication target.
+#
+# Summary bar chart (trend-category stacked bar):
+#   width  = BASE_W + n_cities * PER_CITY_W_SUMMARY   (capped at MAX_W)
+#   height = SUMMARY_H  (fixed; both Day & Night share horizontal space)
+#
+# Violin chart (one violin per city):
+#   width  = BASE_W + n_cities * PER_CITY_W_VIOLIN    (capped at MAX_W)
+#   height = VIOLIN_H  (fixed; tall enough for spread + year labels)
+#
+# Set VIOLIN_SORT_BY to 'mean' (default) or 'name' to control x-axis order.
+
+CHART_CONFIG = {
+    # ── Width scaling ──────────────────────────────────────────────────────
+    'base_width':            8,      # ← CHANGE THIS  minimum width in inches
+    'per_city_w_summary':    0.40,   # ← CHANGE THIS  extra inches per city (summary bar)
+    'per_city_w_violin':     0.55,   # ← CHANGE THIS  extra inches per city (violin)
+    'max_width':             48,     # ← CHANGE THIS  hard cap (inches) for very large city sets
+
+    # ── Fixed heights ──────────────────────────────────────────────────────
+    'summary_height':        7,      # ← CHANGE THIS  height for the 2-panel summary chart
+    'violin_height':         8,      # ← CHANGE THIS  height for the violin chart
+
+    # ── DPI ────────────────────────────────────────────────────────────────
+    'chart_dpi':             400,    # ← CHANGE THIS  output DPI (300 = screen; 400 = publication)
+
+    # ── Violin settings ────────────────────────────────────────────────────
+    'violin_sort_by':        'mean', # ← CHANGE THIS  'mean' | 'name'  (sort cities on x-axis)
+    'violin_width':          0.8,    # ← CHANGE THIS  individual violin body width (0–1)
+
+    # ── Colour palette ─────────────────────────────────────────────────────
+    'sig_warming_color':    '#d73027',   # Significant warming    — red
+    'sig_cooling_color':    '#4575b4',   # Significant cooling    — blue
+    'insig_warming_color':  '#fdae61',   # Insignificant warming  — orange
+    'insig_notrend_color':  '#abd9e9',   # Insignificant no trend — light blue
+    'hottest_year_color':   '#d73027',   # Hottest-year marker    — red
+    'coolest_year_color':   '#4575b4',   # Coolest-year marker    — blue
+}
+
+
+def get_chart_dims(n_cities: int, chart_type: str = 'summary') -> tuple:
+    """
+    Compute (width, height) in inches for a cross-city chart.
+
+    Parameters
+    ----------
+    n_cities : int
+        Number of cities to plot.
+    chart_type : str
+        'summary'  → trend-category stacked bar chart
+        'violin'   → violin chart (one violin per city)
+
+    Returns
+    -------
+    tuple[float, float]
+        (width, height) in inches, ready to pass to ``figsize``.
+    """
+    base = CHART_CONFIG['base_width']
+    max_w = CHART_CONFIG['max_width']
+
+    if chart_type == 'violin':
+        width = min(base + n_cities * CHART_CONFIG['per_city_w_violin'], max_w)
+        height = CHART_CONFIG['violin_height']
+    else:  # 'summary'
+        width = min(base + n_cities * CHART_CONFIG['per_city_w_summary'], max_w)
+        height = CHART_CONFIG['summary_height']
+
+    return (width, height)
+
 
 # Project-wide settings shared across multiple notebooks
 PROJECT_SETTINGS = {

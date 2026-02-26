@@ -1,4 +1,4 @@
-# Urban Heat Island & LST Modeling Project
+# Dynamics of Urban Surface Warming in Nigerian Cities: A Multi-source, Landscape-oriented, Stakeholder-informed Analysis
 
 ## Overview
 
@@ -57,9 +57,11 @@ python -m venv geovenv
 .\geovenv\Scripts\Activate.ps1    # Windows PowerShell
 # source geovenv/bin/activate     # Linux/Mac
 
-# Install dependencies
+# Install dependencies (includes osmnx for OpenStreetMap queries)
 pip install -r requirements.txt
 ```
+
+> **Note:** The `osmnx` package (added to `requirements.txt`) is required for Notebook 01a to extract OSM roads and places via the Overpass API.
 
 ### 2. Configure Credentials
 See [docs/SECURITY_SETUP.md](docs/SECURITY_SETUP.md) for detailed instructions.
@@ -151,6 +153,43 @@ Notebooks must be run in order — each builds on outputs from previous stages.
 | 061 | `061_lst_model_variables.ipynb` | Feature engineering — extract predictor variables (NDVI, NDBI, elevation, distance to water/roads, population density) per pixel | GEE | Notebook 05 hotspot outputs |
 | 062 | `062_lst_modelling.ipynb` | Train Random Forest and Gradient Boosting regression models for LST prediction | — | Notebook 061 feature dataset |
 | 063 | `063_lst_model_validation.ipynb` | Model evaluation: hold-out test set, spatial cross-validation, stakeholder comparison | — | Notebook 062 trained models |
+
+### Execution Times (Benchmark)
+
+Timings below were measured on a modest development workstation:
+
+| Component | Specification |
+|-----------|---------------|
+| **CPU** | Intel Core i7-4600U @ 2.10 GHz (2 cores, 4 threads) |
+| **RAM** | 8 GB DDR3 |
+| **OS** | Windows 11 |
+| **Python** | 3.11 |
+| **Internet** | ~50 Mbps (required for GEE/OSM/EUMETSAT APIs) |
+
+| Notebook | ~Time (5 cities) | ~Time per city | Notes |
+|----------|------------------|----------------|-------|
+| **01** AOI Delineation | 2–3 min | 30 sec | Local processing only |
+| **01a** OSM/JRC Features | 15–25 min | 3–5 min | GEE water + OSM roads/places + map generation |
+| **02** Stakeholder Analysis | 3–5 min | — | Survey data (no per-city loop) |
+| **03** Monthly/Annual LST | 30–45 min | 6–9 min | GEE MODIS extraction (2006–2024) |
+| **04** Daily LST + SEVIRI | 45–90 min | 10–18 min | GEE + EUMETSAT download (network-bound) |
+| **05** Hotspot Analysis | 20–30 min | 4–6 min | Gi\* statistics, KDE, population exposure |
+
+> **Tip:** For 50 cities (`CITY_SELECTION_MODE = "ALL"`), expect 8–12 hours total.  
+> Use `"TEST"` mode (5 cities) for development/debugging (~2–3 hours total).
+
+### Visualization and Output Logic
+
+When processing many cities (`ALL` or `ABOVE_1M` mode), the pipeline uses **smart output strategies** to keep publication figures readable while still generating per-city outputs:
+
+| Output Type | ALL/ABOVE_1M Mode | TEST/SPECIFIC Mode |
+|-------------|-------------------|-------------------|
+| **Publication study area map** | Nigeria + 5 TEST cities only | All selected cities |
+| **Per-city study area maps** | ✓ Saved to `City_[Name]/Figures/` | ✓ Saved to `City_[Name]/Figures/` |
+| **Per-city feature maps** | ✓ AOI-bounded extent | ✓ AOI-bounded extent |
+| **Summary charts** | ✓ All cities included | ✓ All cities included |
+
+All per-city maps use the **AOI boundary from Notebook 01** as the definitive map extent, ensuring consistent framing across the pipeline.
 
 ### City Selection Configuration
 

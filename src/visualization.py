@@ -518,9 +518,10 @@ def create_combined_lst_heatmap(day_data, night_data, time_dim='year', output_pa
     return fig
 
 
-def create_lst_heatmap(data, lst_time, time_dim='year', output_path=None, dpi=300):
+def create_lst_heatmap(data, lst_time, time_dim='year', output_path=None, dpi=300, 
+                       cities_per_page=10, max_cities=None):
     """
-    Create a single LST heatmap with dynamic sizing and sorted by temperature.
+    Create LST heatmap(s) with pagination for many cities, sorted warmest to coolest.
     
     Parameters:
     -----------
@@ -531,26 +532,39 @@ def create_lst_heatmap(data, lst_time, time_dim='year', output_path=None, dpi=30
     time_dim : str
         'year' or 'month'
     output_path : str, optional
-        Path to save the figure
+        Path to save the figure (page number appended when paginated)
     dpi : int
-        DPI for saved figure
+        DPI for saved figure (default 300, use higher for publication quality)
+    cities_per_page : int
+        Maximum cities per page when >5 cities (default: 10)
+    max_cities : int, optional
+        Maximum total cities to include (default: all cities)
         
     Returns:
     --------
-    matplotlib.figure.Figure
-        The heatmap figure
+    matplotlib.figure.Figure or list
+        Single figure (≤5 cities) or list of figures (>5 cities)
     """
     import seaborn as sns
+    import math
     
     if data.empty:
         print(f"⚠️ No data to plot for {lst_time}-time {time_dim}")
         return None
     
-    # Sort cities by mean temperature (warmest to coolest)
-    # Note: ascending=True because heatmap displays bottom-to-top (last row at bottom)
+    # Sort ALL cities by mean temperature (warmest first)
     data = data.copy()
     data['mean_temp'] = data.mean(axis=1)
-    data = data.sort_values('mean_temp', ascending=True)  # Changed to True for correct display
+    data = data.sort_values('mean_temp', ascending=False)  # Warmest first
+    
+    # Optionally limit total cities
+    n_cities_total = len(data)
+    if max_cities is not None and n_cities_total > max_cities:
+        data = data.head(max_cities)
+        n_cities_total = max_cities
+        print(f"📊 Limited to top {max_cities} hottest cities")
+    
+    # Drop mean_temp column before plotting
     data = data.drop('mean_temp', axis=1)
     
     # For monthly data, convert month numbers to names
@@ -559,35 +573,103 @@ def create_lst_heatmap(data, lst_time, time_dim='year', output_path=None, dpi=30
                       7: 'Jul', 8: 'Aug', 9: 'Sep', 10: 'Oct', 11: 'Nov', 12: 'Dec'}
         data.columns = [month_names.get(int(col), col) for col in data.columns]
     
-    # Dynamic figure sizing based on number of cities
+    # Determine pagination: ≤5 cities = single page (original format), >5 = paginate
+    if n_cities_total <= 5:
+        # Original compact format for small datasets
+        return _create_single_heatmap(data, lst_time, time_dim, output_path, dpi, 
+                                      compact=True)
+    else:
+        # Paginated format for many cities
+        n_pages = math.ceil(n_cities_total / cities_per_page)
+        figures = []
+        
+        print(f"📄 Creating {n_pages} page(s) with up to {cities_per_page} cities each")
+        
+        for page in range(n_pages):
+            start_idx = page * cities_per_page
+            end_idx = min(start_idx + cities_per_page, n_cities_total)
+            page_data = data.iloc[start_idx:end_idx]
+            
+            # Generate page-specific output path
+            if output_path:
+                base_path = output_path.replace('.png', '')
+                page_output = f"{base_path}_Page{page + 1}of{n_pages}.png"
+            else:
+                page_output = None
+            
+            # Create page title suffix
+            page_info = f"Page {page + 1} of {n_pages} (Cities {start_idx + 1}-{end_idx})"
+            
+            fig = _create_single_heatmap(page_data, lst_time, time_dim, page_output, dpi,
+                                         compact=False, page_info=page_info)
+            figures.append(fig)
+        
+        return figures
+
+
+def _create_single_heatmap(data, lst_time, time_dim, output_path, dpi, 
+                           compact=False, page_info=None):
+    """
+    Internal function to create a single heatmap page.
+    
+    Parameters:
+    -----------
+    data : pd.DataFrame
+        Pre-sorted heatmap data for this page
+    lst_time : str
+        'day' or 'night'
+    time_dim : str
+        'year' or 'month'
+    output_path : str, optional
+        Path to save figure
+    dpi : int
+        DPI for saving
+    compact : bool
+        Use compact sizing for ≤5 cities
+    page_info : str, optional
+        Page information to include in title
+    """
+    import seaborn as sns
+    
     n_cities = len(data)
     n_periods = len(data.columns)
     
-    # Calculate figure dimensions (more aggressive compactness)
-    if time_dim == 'month':
-        # Monthly: slightly wider cells, more compact vertically
-        fig_height = max(2.5, min(8, n_cities * 0.28))  # Reduced from 0.35
-        fig_width = max(7, min(16, n_periods * 0.45))   # Slightly wider for month names
+    if compact:
+        # Original compact format for ≤5 cities
+        if time_dim == 'month':
+            fig_height = max(2.5, min(8, n_cities * 0.28))
+            fig_width = max(7, min(16, n_periods * 0.45))
+        else:
+            fig_height = max(2.5, min(8, n_cities * 0.25))
+            fig_width = max(8, min(18, n_periods * 0.32))
     else:
-        # Yearly: keep horizontal, reduce vertical significantly
-        fig_height = max(2.5, min(8, n_cities * 0.25))  # Further reduced from 0.35
-        fig_width = max(8, min(18, n_periods * 0.32))   # Reduced from 0.35
+        # Half A4 vertical format (~8.27" x 5.85") for paginated heatmaps
+        fig_width = 8.27  # A4 width in inches
+        fig_height = 5.85  # Half A4 height
     
-    # Font sizes scale with figure size (reduced)
-    title_fontsize = max(9, min(13, fig_height * 1.3))
-    label_fontsize = max(8, min(11, fig_height * 1.1))
-    tick_fontsize = max(7, min(9, fig_height * 0.85))
-    annot_fontsize = max(5, min(7, fig_height * 0.7))
-    cbar_labelsize = max(7, min(9, fig_height * 0.85))  # Same as tick labels
+    # Font sizes
+    if compact:
+        title_fontsize = max(9, min(13, fig_height * 1.3))
+        label_fontsize = max(8, min(11, fig_height * 1.1))
+        tick_fontsize = max(7, min(9, fig_height * 0.85))
+        annot_fontsize = max(5, min(7, fig_height * 0.7))
+        cbar_labelsize = max(7, min(9, fig_height * 0.85))
+    else:
+        # Fixed sizes for paginated format
+        title_fontsize = 12
+        label_fontsize = 10
+        tick_fontsize = 9
+        annot_fontsize = 7
+        cbar_labelsize = 9
     
     # Create figure
     fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=dpi)
     
     # Choose colormap based on day/night
     cmap = 'YlOrRd' if lst_time == 'day' else 'PuBu'
-    cbar_label = 'LST (\u00b0C)'  # Fixed degree symbol using unicode
+    cbar_label = 'LST (\u00b0C)'
     
-    # Create heatmap with thinner colorbar
+    # Create heatmap with colorbar on right
     heatmap = sns.heatmap(
         data,
         annot=True,
@@ -595,52 +677,47 @@ def create_lst_heatmap(data, lst_time, time_dim='year', output_path=None, dpi=30
         cmap=cmap,
         cbar_kws={
             'label': cbar_label,
-            'shrink': 0.55,  # Further reduced from 0.6
-            'aspect': 35,    # Increased from 30 for even thinner bar
-            'pad': 0.01      # Minimal padding
+            'shrink': 0.7 if not compact else 0.55,
+            'aspect': 30 if not compact else 35,
+            'pad': 0.02
         },
-        linewidths=0.2,  # Even thinner gridlines (from 0.3)
+        linewidths=0.3 if not compact else 0.2,
         linecolor='gray',
         ax=ax,
         annot_kws={'fontsize': annot_fontsize}
     )
     
-    # Adjust colorbar label size to match axis labels
+    # Adjust colorbar
     cbar = heatmap.collections[0].colorbar
     cbar.ax.tick_params(labelsize=tick_fontsize)
     cbar.set_label(cbar_label, size=cbar_labelsize)
     
-    # Format labels
+    # Format title
     time_label = 'Year' if time_dim == 'year' else 'Month'
     title_time = 'Yearly' if time_dim == 'year' else 'Monthly Climatology'
     
-    ax.set_title(
-        f'{lst_time.title()}-time LST - {title_time} (Warmest to Coolest)',
-        fontsize=title_fontsize,
-        fontweight='bold',
-        pad=8  # Further reduced from 10
-    )
+    title = f'{lst_time.title()}-time LST - {title_time} (Warmest to Coolest)'
+    if page_info:
+        title = f'{title}\n{page_info}'
+    
+    ax.set_title(title, fontsize=title_fontsize, fontweight='bold', pad=10)
     ax.set_xlabel(time_label, fontsize=label_fontsize, fontweight='bold')
     ax.set_ylabel('City', fontsize=label_fontsize, fontweight='bold')
     
-    # Rotate x-axis labels for better readability
+    # X-axis labels
     if time_dim == 'month':
-        ax.tick_params(axis='x', rotation=0, labelsize=tick_fontsize)  # Horizontal for month names
+        ax.tick_params(axis='x', rotation=0, labelsize=tick_fontsize)
     else:
         ax.tick_params(axis='x', rotation=45, labelsize=tick_fontsize)
     ax.tick_params(axis='y', rotation=0, labelsize=tick_fontsize)
     
-    plt.tight_layout(pad=0.3)  # Even more minimal padding (from 0.5)
+    plt.tight_layout(pad=0.5)
     
     if output_path:
-        # Save both PNG and PDF
         fig.savefig(output_path, dpi=dpi, bbox_inches='tight')
-        
-        # Generate PDF path from PNG path
         pdf_path = output_path.replace('.png', '.pdf')
         fig.savefig(pdf_path, format='pdf', bbox_inches='tight')
-        
-        print(f'✅ Saved {lst_time}-time {time_dim} heatmap (PNG + PDF)')
+        print(f'✅ Saved: {output_path.split("/")[-1].split(chr(92))[-1]}')
         plt.close(fig)
         return None
     
@@ -1016,227 +1093,182 @@ def plot_multi_city_dataset_comparison(
     dataset2_name='ERA5-Land',
     output_dir=None,
     figsize=None,
-    dpi=300
+    dpi=300,
+    cities_per_page=5
 ):
     """
-    Create multi-panel scatter plots comparing two datasets across multiple cities.
-    
-    Creates a grid of scatter plots (one per city) showing MODIS vs ERA5-Land comparison
-    for both day and night periods, with statistics displayed in each panel.
-    
+    Create paginated multi-panel hex-bin plots comparing two datasets across
+    multiple cities.
+
+    When more than *cities_per_page* cities are supplied the results are split
+    into pages of that size.  Each page is saved separately (``_Page1of3``,
+    etc.) so that every figure remains a manageable height.
+
     Parameters
     ----------
     comparison_results_list : list of dict
-        List of dictionaries, each containing:
-        - 'city': str, city name
-        - 'day_comparison': dict from compare_datasets()
-        - 'night_comparison': dict from compare_datasets()
-    dataset1_name : str
-        Name of first dataset (e.g., 'MODIS')
-    dataset2_name : str
-        Name of second dataset (e.g., 'ERA5-Land')
+        Each dict contains: 'city', 'day_comparison', 'night_comparison'.
+    dataset1_name, dataset2_name : str
+        Human-readable dataset labels (axes / title).
     output_dir : str or Path, optional
-        Directory to save figure
+        Directory to save figures (PNG + PDF per page).
     figsize : tuple, optional
-        Figure size (auto-calculated if None)
+        Per-page size (auto-calculated if *None*).
     dpi : int
-        Figure resolution
-        
+        Figure resolution.
+    cities_per_page : int
+        Maximum number of city rows per figure (default 5).
+
     Returns
     -------
-    fig : matplotlib.figure.Figure
-        The created figure
-        
-    Example
-    -------
-    >>> comparison_results = [
-    ...     {'city': 'Abuja', 'day_comparison': day_comp, 'night_comparison': night_comp},
-    ...     {'city': 'Lagos', 'day_comparison': day_comp, 'night_comparison': night_comp}
-    ... ]
-    >>> fig = plot_multi_city_dataset_comparison(comparison_results)
+    list[matplotlib.figure.Figure]
+        One figure per page.  When only one page is needed a single-element
+        list is returned for backward compatibility.
     """
+    import math
+
     n_cities = len(comparison_results_list)
-    
-    # Calculate grid layout (2 columns: day and night)
-    ncols = 2  # Day and Night
-    nrows = n_cities
-    
-    # Auto-calculate figure size if not provided
-    if figsize is None:
-        width = 14
-        height = 4 * nrows
-        figsize = (width, height)
-    
-    # Create figure and subplots
-    fig, axes = plt.subplots(nrows, ncols, figsize=figsize, dpi=dpi, squeeze=False)
-    
-    # Color scheme - orange for day, grey for night
-    day_color = '#FF8C42'  # Orange for daytime
-    night_color = '#7D7D7D'  # Grey for nighttime
+    n_pages = max(1, math.ceil(n_cities / cities_per_page))
+
     line_color = '#E63946'  # Red for 1:1 line
-    
-    for i, result in enumerate(comparison_results_list):
-        city = result['city']
-        day_comp = result['day_comparison']
-        night_comp = result['night_comparison']
-        
-        # ===== DAY PANEL =====
-        ax_day = axes[i, 0]
-        
-        # Extract merged data
-        day_merged = day_comp['merged_data']
-        
-        if not day_merged.empty:
-            # Find column names (match by dataset name suffix)
-            col1_candidates = [c for c in day_merged.columns if dataset1_name in c]
-            col2_candidates = [c for c in day_merged.columns if dataset2_name in c]
-            
-            if not col1_candidates or not col2_candidates:
-                # Fallback: use non-date columns in order
-                non_date = [c for c in day_merged.columns if c != 'date']
-                col1_candidates = non_date[:1]
-                col2_candidates = non_date[1:2]
-            
-            if not col1_candidates or not col2_candidates:
-                ax_day.text(0.5, 0.5, 'No matching columns', transform=ax_day.transAxes,
-                           ha='center', va='center', fontsize=10, color='gray')
-            else:
-                col1_day = col1_candidates[0]
-                col2_day = col2_candidates[0]
-                
-                # Scatter plot - ORANGE for day with thin black outline
-                ax_day.scatter(day_merged[col1_day], day_merged[col2_day], 
-                              alpha=0.7, s=30, color=day_color, 
-                              edgecolors='black', linewidth=0.4)
-                
-                # 1:1 reference line
-                min_val = min(day_merged[col1_day].min(), day_merged[col2_day].min())
-                max_val = max(day_merged[col1_day].max(), day_merged[col2_day].max())
-                ax_day.plot([min_val, max_val], [min_val, max_val], 
-                           color=line_color, linestyle='--', linewidth=2, alpha=0.8, label='1:1 Line')
-                
-                # Add statistics box at bottom right
-                r = day_comp['correlation']
-                bias = day_comp['bias']
-                rmse = day_comp['rmse']
-                mae = day_comp['mae']
-                n = day_comp['n_samples']
-                
-                stats_text = (f'r = {r:.3f}\n'
-                             f'Bias = {bias:+.2f}\u00b0C\n'
-                             f'RMSE = {rmse:.2f}\u00b0C\n'
-                             f'MAE = {mae:.2f}\u00b0C\n'
-                             f'n = {n}')
-                
-                # Position at bottom right (fixed alignment)
-                ax_day.text(0.97, 0.03, stats_text, transform=ax_day.transAxes, 
-                           verticalalignment='bottom', horizontalalignment='right',
-                           fontsize=9, family='monospace',
-                           bbox=dict(boxstyle='round,pad=0.5', facecolor='white', 
-                                    edgecolor='gray', alpha=0.95, linewidth=1))
-                
-                # Axis labels
-                ax_day.set_xlabel(f'{dataset1_name} LST (\u00b0C)', fontsize=10, fontweight='bold')
-                ax_day.set_ylabel(f'{dataset2_name} LST (\u00b0C)', fontsize=10, fontweight='bold')
-            
-            # Title (city name and period)
-            ax_day.set_title(f'{city} - Daytime', fontsize=11, fontweight='bold', pad=10)
-            
-            # Grid
-            ax_day.grid(True, alpha=0.25, linestyle=':', linewidth=0.5)
-            
-            # Equal aspect for better comparison
-            ax_day.set_aspect('equal', adjustable='box')
-        
-        # ===== NIGHT PANEL =====
-        ax_night = axes[i, 1]
-        
-        # Extract merged data
-        night_merged = night_comp['merged_data']
-        
-        if not night_merged.empty:
-            # Find column names (match by dataset name suffix)
-            col1_candidates = [c for c in night_merged.columns if dataset1_name in c]
-            col2_candidates = [c for c in night_merged.columns if dataset2_name in c]
-            
-            if not col1_candidates or not col2_candidates:
-                # Fallback: use non-date columns in order
-                non_date = [c for c in night_merged.columns if c != 'date']
-                col1_candidates = non_date[:1]
-                col2_candidates = non_date[1:2]
-            
-            if not col1_candidates or not col2_candidates:
-                ax_night.text(0.5, 0.5, 'No matching columns', transform=ax_night.transAxes,
-                             ha='center', va='center', fontsize=10, color='gray')
-            else:
-                col1_night = col1_candidates[0]
-                col2_night = col2_candidates[0]
-                
-                # Scatter plot - GREY for night with thin black outline
-                ax_night.scatter(night_merged[col1_night], night_merged[col2_night], 
-                               alpha=0.7, s=30, color=night_color, 
+    day_cmap = 'Oranges'    # Warm colour-map for daytime hexbins
+    night_cmap = 'Greys'    # Neutral colour-map for nighttime hexbins
+
+    figures = []
+
+    for page_idx in range(n_pages):
+        start = page_idx * cities_per_page
+        end = min(start + cities_per_page, n_cities)
+        page_items = comparison_results_list[start:end]
+        nrows = len(page_items)
+
+        # Auto-calculate figure size per page
+        if figsize is None:
+            width = 14
+            height = 4 * nrows
+            page_figsize = (width, height)
+        else:
+            page_figsize = figsize
+
+        fig, axes = plt.subplots(nrows, 2, figsize=page_figsize, dpi=dpi,
+                                 squeeze=False)
+
+        for i, result in enumerate(page_items):
+            city = result['city']
+            day_comp = result['day_comparison']
+            night_comp = result['night_comparison']
+
+            for col_idx, (comp, cmap, period_label) in enumerate([
+                (day_comp, day_cmap, 'Daytime'),
+                (night_comp, night_cmap, 'Nighttime'),
+            ]):
+                ax = axes[i, col_idx]
+                merged = comp['merged_data']
+
+                if merged.empty:
+                    ax.text(0.5, 0.5, 'No data', transform=ax.transAxes,
+                            ha='center', va='center', fontsize=10, color='gray')
+                    ax.set_title(f'{city} - {period_label}', fontsize=11,
+                                 fontweight='bold', pad=10)
+                    continue
+
+                # Resolve column names
+                col1_cands = [c for c in merged.columns if dataset1_name in c]
+                col2_cands = [c for c in merged.columns if dataset2_name in c]
+                if not col1_cands or not col2_cands:
+                    non_date = [c for c in merged.columns if c != 'date']
+                    col1_cands = non_date[:1]
+                    col2_cands = non_date[1:2]
+                if not col1_cands or not col2_cands:
+                    ax.text(0.5, 0.5, 'No matching columns',
+                            transform=ax.transAxes, ha='center', va='center',
+                            fontsize=10, color='gray')
+                    ax.set_title(f'{city} - {period_label}', fontsize=11,
+                                 fontweight='bold', pad=10)
+                    continue
+
+                x = merged[col1_cands[0]].dropna()
+                y = merged[col2_cands[0]].reindex(x.index).dropna()
+                x = x.reindex(y.index)
+
+                # Choose between hexbin (many points) and scatter (few points)
+                if len(x) >= 30:
+                    hb = ax.hexbin(x, y, gridsize=25, cmap=cmap, mincnt=1,
+                                   linewidths=0.2, edgecolors='grey')
+                    cb = fig.colorbar(hb, ax=ax, shrink=0.7, pad=0.02)
+                    cb.set_label('Count', fontsize=8)
+                    cb.ax.tick_params(labelsize=7)
+                else:
+                    scatter_color = '#FF8C42' if col_idx == 0 else '#7D7D7D'
+                    ax.scatter(x, y, alpha=0.7, s=30, color=scatter_color,
                                edgecolors='black', linewidth=0.4)
-                
+
                 # 1:1 reference line
-                min_val = min(night_merged[col1_night].min(), night_merged[col2_night].min())
-                max_val = max(night_merged[col1_night].max(), night_merged[col2_night].max())
-                ax_night.plot([min_val, max_val], [min_val, max_val], 
-                             color=line_color, linestyle='--', linewidth=2, alpha=0.8, label='1:1 Line')
-                
-                # Add statistics box at bottom right
-                r = night_comp['correlation']
-                bias = night_comp['bias']
-                rmse = night_comp['rmse']
-                mae = night_comp['mae']
-                n = night_comp['n_samples']
-                
+                min_val = min(x.min(), y.min())
+                max_val = max(x.max(), y.max())
+                ax.plot([min_val, max_val], [min_val, max_val],
+                        color=line_color, linestyle='--', linewidth=2,
+                        alpha=0.8, label='1:1 Line')
+
+                # Statistics box
+                r = comp['correlation']
+                bias = comp['bias']
+                rmse = comp['rmse']
+                mae = comp['mae']
+                n = comp['n_samples']
+
                 stats_text = (f'r = {r:.3f}\n'
-                             f'Bias = {bias:+.2f}\u00b0C\n'
-                             f'RMSE = {rmse:.2f}\u00b0C\n'
-                             f'MAE = {mae:.2f}\u00b0C\n'
-                             f'n = {n}')
-                
-                # Position at bottom right (fixed alignment)
-                ax_night.text(0.97, 0.03, stats_text, transform=ax_night.transAxes, 
-                             verticalalignment='bottom', horizontalalignment='right',
-                             fontsize=9, family='monospace',
-                             bbox=dict(boxstyle='round,pad=0.5', facecolor='white', 
-                                      edgecolor='gray', alpha=0.95, linewidth=1))
-                
-                # Axis labels
-                ax_night.set_xlabel(f'{dataset1_name} LST (\u00b0C)', fontsize=10, fontweight='bold')
-                ax_night.set_ylabel(f'{dataset2_name} LST (\u00b0C)', fontsize=10, fontweight='bold')
-            
-            # Title
-            ax_night.set_title(f'{city} - Nighttime', fontsize=11, fontweight='bold', pad=10)
-            
-            # Grid
-            ax_night.grid(True, alpha=0.25, linestyle=':', linewidth=0.5)
-            
-            # Equal aspect
-            ax_night.set_aspect('equal', adjustable='box')
-    
-    # Overall title
-    fig.suptitle(f'Inter-Dataset Validation: {dataset1_name} vs {dataset2_name}', 
-                 fontsize=14, fontweight='bold', y=0.995)
-    
-    # Adjust layout
-    plt.tight_layout(rect=[0, 0, 1, 0.99])
-    
-    # Save if output directory specified
-    if output_dir:
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        png_path = output_dir / f'multi_city_comparison_{dataset1_name}_vs_{dataset2_name}.png'
-        pdf_path = output_dir / f'multi_city_comparison_{dataset1_name}_vs_{dataset2_name}.pdf'
-        
-        fig.savefig(png_path, dpi=dpi, bbox_inches='tight', facecolor='white')
-        fig.savefig(pdf_path, format='pdf', bbox_inches='tight', facecolor='white')
-        print(f"   ✓ Saved: {png_path.name}")
-        print(f"   ✓ Saved: {pdf_path.name}")
-    
-    return fig
+                              f'Bias = {bias:+.2f}\u00b0C\n'
+                              f'RMSE = {rmse:.2f}\u00b0C\n'
+                              f'MAE = {mae:.2f}\u00b0C\n'
+                              f'n = {n}')
+                ax.text(0.97, 0.03, stats_text, transform=ax.transAxes,
+                        verticalalignment='bottom',
+                        horizontalalignment='right', fontsize=9,
+                        family='monospace',
+                        bbox=dict(boxstyle='round,pad=0.5',
+                                  facecolor='white', edgecolor='gray',
+                                  alpha=0.95, linewidth=1))
+
+                ax.set_xlabel(f'{dataset1_name} LST (\u00b0C)', fontsize=10,
+                              fontweight='bold')
+                ax.set_ylabel(f'{dataset2_name} LST (\u00b0C)', fontsize=10,
+                              fontweight='bold')
+                ax.set_title(f'{city} - {period_label}', fontsize=11,
+                             fontweight='bold', pad=10)
+                ax.grid(True, alpha=0.25, linestyle=':', linewidth=0.5)
+                ax.set_aspect('equal', adjustable='box')
+
+        # Page title
+        page_label = (f' (Page {page_idx + 1} of {n_pages})'
+                      if n_pages > 1 else '')
+        fig.suptitle(
+            f'Inter-Dataset Validation: {dataset1_name} vs '
+            f'{dataset2_name}{page_label}',
+            fontsize=14, fontweight='bold', y=0.995)
+        plt.tight_layout(rect=[0, 0, 1, 0.99])
+
+        # Save
+        if output_dir:
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            suffix = (f'_Page{page_idx + 1}of{n_pages}'
+                      if n_pages > 1 else '')
+            stem = f'multi_city_comparison_{dataset1_name}_vs_{dataset2_name}'
+            png_path = output_dir / f'{stem}{suffix}.png'
+            pdf_path = output_dir / f'{stem}{suffix}.pdf'
+
+            fig.savefig(png_path, dpi=dpi, bbox_inches='tight',
+                        facecolor='white')
+            fig.savefig(pdf_path, format='pdf', bbox_inches='tight',
+                        facecolor='white')
+            print(f"   \u2713 Saved: {png_path.name}")
+            print(f"   \u2713 Saved: {pdf_path.name}")
+
+        figures.append(fig)
+
+    return figures[0] if len(figures) == 1 else figures
 
 
 def plot_target_diagram(
@@ -2436,7 +2468,9 @@ def create_persistent_heat_event_maps(
     study_year: int = 2024,
     aoi_dir: str = None,
     dpi: int = 300,
-    figsize: tuple = None
+    figsize: tuple = None,
+    max_combined_cities: int = 5,
+    save_individual: bool = True
 ) -> plt.Figure:
     """
     Create publication-ready multi-panel Persistent Heat Event Maps showing SEVIRI LST
@@ -2461,6 +2495,14 @@ def create_persistent_heat_event_maps(
         Figure DPI (default: 300)
     figsize : tuple, optional
         Figure size (width, height). If None, calculated from number of cities.
+    max_combined_cities : int, optional
+        Maximum number of cities to include on the combined multi-panel figure
+        (default 5).  When more cities are available, only the first
+        *max_combined_cities* (alphabetically) appear on the combined figure.
+        Individual per-city maps are always saved for every city.
+    save_individual : bool, optional
+        If True (default), save a standalone single-panel map for every city
+        into ``<base_dir>/../City_<name>/Figures/``.
     
     Returns
     -------
@@ -2506,10 +2548,24 @@ def create_persistent_heat_event_maps(
         print(f"⚠️  No {period} data available")
         return None
     
+    # Decide which cities go on the combined figure
+    sorted_city_names = sorted(available_cities.keys())
+    if n_cities > max_combined_cities:
+        combined_city_names = sorted_city_names[:max_combined_cities]
+        print(f"\n⚠️  {n_cities} cities available — combined figure limited "
+              f"to first {max_combined_cities}.")
+        print(f"    Individual maps will be saved for ALL {n_cities} cities.")
+    else:
+        combined_city_names = sorted_city_names
+    
+    # Build the subset dict used for the combined figure
+    combined_cities = {name: available_cities[name]
+                       for name in combined_city_names}
+    
     print(f"\n{'='*80}")
     print(f"CREATING PERSISTENT HEAT EVENT MAPS - {period.upper()}")
     print(f"{'='*80}")
-    print(f"Cities: {n_cities}")
+    print(f"Cities (combined figure): {len(combined_cities)} / {n_cities} total")
     
     # Temperature scales and colormap
     if period == 'day':
@@ -2520,10 +2576,11 @@ def create_persistent_heat_event_maps(
     cmap = cm.get_cmap('YlOrRd')
     norm = Normalize(vmin=vmin, vmax=vmax)
     
-    # Dynamic grid layout (max 3 columns) - Scalability Fix #1
+    # Dynamic grid layout (max 3 columns) - uses combined_cities count
+    n_combined = len(combined_cities)
     max_cols = 3
-    n_cols = min(n_cities, max_cols)
-    n_rows = math.ceil(n_cities / n_cols)
+    n_cols = min(n_combined, max_cols)
+    n_rows = math.ceil(n_combined / n_cols)
     
     # Calculate figure size if not provided - enhanced for 30+ cities
     if figsize is None:
@@ -2654,12 +2711,12 @@ def create_persistent_heat_event_maps(
         
         return named_places.loc[selected_indices]
     
-    # Plot each city
+    # Plot each city (combined figure only — limited to combined_cities)
     legend_collected = False
     legend_handles = []
     legend_labels = []
     
-    for idx, (city_name, city_data) in enumerate(sorted(available_cities.items())):
+    for idx, (city_name, city_data) in enumerate(sorted(combined_cities.items())):
         row = idx // n_cols
         col = idx % n_cols
         ax = fig.add_subplot(gs[row, col])
@@ -2898,7 +2955,7 @@ def create_persistent_heat_event_maps(
             continue
     
     # Hide empty subplots
-    for idx in range(n_cities, n_rows * n_cols):
+    for idx in range(n_combined, n_rows * n_cols):
         row = idx // n_cols
         col = idx % n_cols
         fig.add_subplot(gs[row, col]).set_visible(False)
@@ -2951,8 +3008,160 @@ def create_persistent_heat_event_maps(
                    facecolor='white', pad_inches=0.1)
         
         print(f"\n{'='*80}")
-        print(f"✅ Saved: {png_path.name}")
-        print(f"✅ Saved: {pdf_path.name}")
+        print(f"✅ Saved combined: {png_path.name}")
+        print(f"✅ Saved combined: {pdf_path.name}")
+        print(f"{'='*80}")
+    
+    # -----------------------------------------------------------------
+    # Individual per-city maps (saved into each city's Figures folder)
+    # -----------------------------------------------------------------
+    if save_individual and base_dir:
+        analysis_root = Path(base_dir).parent  # e.g. .../04_trend_analysis_daily
+        period_label_ind = 'Daytime' if period == 'day' else 'Nighttime'
+        
+        print(f"\n{'='*80}")
+        print(f"SAVING INDIVIDUAL CITY MAPS ({period.upper()}) — {n_cities} cities")
+        print(f"{'='*80}")
+        
+        for city_name in sorted_city_names:
+            city_data_ind = available_cities[city_name]
+            city_fig_dir = analysis_root / f'City_{city_name}' / 'Figures'
+            city_fig_dir.mkdir(parents=True, exist_ok=True)
+            
+            lst_file = city_data_ind.get(f'{period}_file')
+            event_period = city_data_ind.get(f'{period}_event', 'N/A')
+            
+            if not lst_file or not Path(lst_file).exists():
+                print(f"  ⚠️  {city_name}: LST file not found — skipping")
+                continue
+            
+            try:
+                with rasterio.open(lst_file) as src:
+                    data_raw = src.read(1)
+                    if src.nodata is not None:
+                        data_raw = np.where(data_raw == src.nodata, np.nan, data_raw)
+                    data_masked = np.ma.masked_invalid(data_raw)
+                    
+                    extent = [src.bounds.left, src.bounds.right,
+                             src.bounds.bottom, src.bounds.top]
+                    lst_crs = src.crs
+                    
+                    from shapely.geometry import box as shapely_box
+                    lst_extent = shapely_box(src.bounds.left, src.bounds.bottom,
+                                            src.bounds.right, src.bounds.top)
+                    
+                    # Single-panel figure
+                    ind_fig, ind_ax = plt.subplots(1, 1, figsize=(6, 6), dpi=dpi)
+                    
+                    im = ind_ax.imshow(data_masked, cmap=cmap, norm=norm,
+                                       extent=extent, interpolation='nearest',
+                                       aspect='equal', zorder=1)
+                    
+                    # Overlay geospatial features
+                    features = load_city_features(city_name, aoi_dir)
+                    if features:
+                        if 'water' in features and not features['water'].empty:
+                            water_proj = features['water'].to_crs(lst_crs)
+                            water_clipped = water_proj.clip(lst_extent)
+                            if not water_clipped.empty:
+                                water_clipped.plot(ax=ind_ax, facecolor='steelblue',
+                                                   edgecolor='darkblue', linewidth=0.5,
+                                                   alpha=0.7, zorder=3)
+                        if 'main' in features and not features['main'].empty:
+                            main_proj = features['main'].to_crs(lst_crs)
+                            main_clipped = main_proj.clip(lst_extent)
+                            if not main_clipped.empty:
+                                main_clipped.boundary.plot(ax=ind_ax, color='black',
+                                                           linewidth=2.5, zorder=5)
+                        if 'adjacent' in features and not features['adjacent'].empty:
+                            adj_proj = features['adjacent'].to_crs(lst_crs)
+                            adj_clipped = adj_proj.clip(lst_extent)
+                            if not adj_clipped.empty:
+                                adj_clipped.boundary.plot(ax=ind_ax, color='black',
+                                                          linewidth=1.5,
+                                                          linestyle='--', zorder=5)
+                        if 'places' in features and not features['places'].empty:
+                            places_filtered = filter_places_by_buffer(
+                                features['places'], buffer_km=4.87, max_labels=10)
+                            if places_filtered is not None and not places_filtered.empty:
+                                places_proj = places_filtered.to_crs(lst_crs)
+                                places_proj = places_proj.clip(lst_extent)
+                                if not places_proj.empty:
+                                    places_proj.plot(ax=ind_ax, color='darkred',
+                                                     markersize=22, marker='o',
+                                                     edgecolor='white',
+                                                     linewidth=0.8, zorder=6,
+                                                     alpha=0.95)
+                                    texts_ind = []
+                                    for _, place in places_proj.iterrows():
+                                        t = ind_ax.text(
+                                            place.geometry.x, place.geometry.y,
+                                            place['name'], fontsize=9,
+                                            color='darkred', fontweight='bold',
+                                            bbox=dict(boxstyle='round,pad=0.15',
+                                                      facecolor='white',
+                                                      alpha=0.9,
+                                                      edgecolor='none'),
+                                            zorder=7)
+                                        texts_ind.append(t)
+                                    if ADJUSTTEXT_AVAILABLE and texts_ind:
+                                        adjust_text(texts_ind, ax=ind_ax,
+                                                    arrowprops=None,
+                                                    expand_points=(2.0, 2.0),
+                                                    expand_text=(1.5, 1.5),
+                                                    force_points=(0.3, 0.3),
+                                                    force_text=(0.5, 0.5),
+                                                    lim=500)
+                    
+                    ind_ax.set_xlim(src.bounds.left, src.bounds.right)
+                    ind_ax.set_ylim(src.bounds.bottom, src.bounds.top)
+                    ind_ax.set_aspect('equal', adjustable='box')
+                    ind_ax.set_xticks([])
+                    ind_ax.set_yticks([])
+                    
+                    # Statistics text
+                    valid_data = data_masked.compressed()
+                    if len(valid_data) > 0:
+                        mean_t = np.mean(valid_data)
+                        min_t = np.min(valid_data)
+                        max_t = np.max(valid_data)
+                        stats_txt = (f"{event_period}: {mean_t:.1f}°C "
+                                     f"({min_t:.1f}–{max_t:.1f}°C)")
+                    else:
+                        stats_txt = "No valid data"
+                    
+                    ind_ax.set_title(
+                        f'{city_name} — {period_label_ind} Persistent Heat Event '
+                        f'({study_year})\n{stats_txt}',
+                        fontsize=11, fontweight='bold', pad=10)
+                    
+                    # Colorbar
+                    cb = ind_fig.colorbar(
+                        cm.ScalarMappable(norm=norm, cmap=cmap), ax=ind_ax,
+                        orientation='horizontal', shrink=0.7, pad=0.04)
+                    cb.set_label('Land Surface Temperature (°C)', fontsize=9)
+                    cb.ax.tick_params(labelsize=8)
+                    
+                    ind_fig.tight_layout()
+                    
+                    # Save
+                    stem = f'Persistent_Heat_Event_Map_{period}_{study_year}_{city_name}'
+                    ind_png = city_fig_dir / f'{stem}.png'
+                    ind_pdf = city_fig_dir / f'{stem}.pdf'
+                    ind_fig.savefig(ind_png, dpi=dpi, bbox_inches='tight',
+                                    facecolor='white', pad_inches=0.1)
+                    ind_fig.savefig(ind_pdf, format='pdf', bbox_inches='tight',
+                                    facecolor='white', pad_inches=0.1)
+                    plt.close(ind_fig)
+                    
+                    print(f"  ✓ {city_name}: {ind_png.name}")
+                    
+            except Exception as e:
+                print(f"  ✗ {city_name}: {e}")
+                continue
+        
+        print(f"\n{'='*80}")
+        print(f"✅ Individual maps complete — {n_cities} cities")
         print(f"{'='*80}")
     
     return fig
@@ -3490,38 +3699,17 @@ def create_geospatial_features_map(
     # Ensure all data is in WGS84 for consistent plotting
     aoi_plot = aoi_gdf.to_crs('EPSG:4326')
     
-    # Calculate map extent from all features instead of AOI bounds
-    all_bounds = []
+    # Use AOI boundary as the definitive map extent (matches Notebook 01 delineation)
+    aoi_bounds = aoi_plot.total_bounds  # [minx, miny, maxx, maxy]
     
-    # Collect bounds from all available features
-    if main_polygon_gdf is not None and not main_polygon_gdf.empty:
-        all_bounds.append(main_polygon_gdf.to_crs('EPSG:4326').total_bounds)
-    if adjacent_polygons_gdf is not None and not adjacent_polygons_gdf.empty:
-        all_bounds.append(adjacent_polygons_gdf.to_crs('EPSG:4326').total_bounds)
-    if water_gdf is not None and not water_gdf.empty:
-        all_bounds.append(water_gdf.to_crs('EPSG:4326').total_bounds)
-    if roads_gdf is not None and not roads_gdf.empty:
-        all_bounds.append(roads_gdf.to_crs('EPSG:4326').total_bounds)
-    if places_gdf is not None and not places_gdf.empty:
-        all_bounds.append(places_gdf.to_crs('EPSG:4326').total_bounds)
+    # Add a small buffer (2%) for visual breathing room
+    width = aoi_bounds[2] - aoi_bounds[0]
+    height = aoi_bounds[3] - aoi_bounds[1]
+    pad_x = width * 0.02
+    pad_y = height * 0.02
     
-    # If no features available, fall back to AOI bounds
-    if not all_bounds:
-        all_bounds.append(aoi_plot.total_bounds)
-    
-    # Calculate combined extent from all features
-    import numpy as np
-    combined_bounds = np.array(all_bounds)
-    extent_bounds = [
-        combined_bounds[:, 0].min(),  # min x
-        combined_bounds[:, 1].min(),  # min y
-        combined_bounds[:, 2].max(),  # max x
-        combined_bounds[:, 3].max()   # max y
-    ]
-    
-    # Set extent exactly to feature bounds without padding
-    ax.set_xlim(extent_bounds[0], extent_bounds[2])
-    ax.set_ylim(extent_bounds[1], extent_bounds[3])
+    ax.set_xlim(aoi_bounds[0] - pad_x, aoi_bounds[2] + pad_x)
+    ax.set_ylim(aoi_bounds[1] - pad_y, aoi_bounds[3] + pad_y)
     
     legend_handles = []
     legend_labels = []
@@ -4925,7 +5113,7 @@ def create_city_classification_donut(cities_gdf, survey_df, workshop_total,
     # Add legend explaining the rings
     legend_elements = [
         mpatches.Patch(facecolor='white', edgecolor='black', linewidth=1, 
-                      label='Ring 1: Target Status - >1 Million: 2024'),
+                      label='Ring 1: Target Status - >300K Population: 2024'),
         mpatches.Patch(facecolor='white', edgecolor='black', linewidth=1, 
                       label='Ring 2: Stakeholder Registration Status'),
         mpatches.Patch(facecolor='white', edgecolor='black', linewidth=1, 
@@ -5147,7 +5335,7 @@ def create_perception_chart_with_donuts(
                bbox_to_anchor=(0.99, 0.01))
     
     # Main title
-    fig.suptitle('Stakeholder Perception by City: Warming & Diurnal Heating\n(Workshop Participants, Unique Responses)',
+    fig.suptitle('Stakeholder Perception by City: Warming & Diurnal Heating',
                  fontsize=13, fontweight='bold', y=0.98)
     
     plt.tight_layout(rect=[0, 0, 1, 0.94])
@@ -5342,7 +5530,7 @@ def create_persistent_heat_event_summary_chart(cities_data, base_dir=None, study
     print(f"\nCities sorted from hottest to coolest (by combined day+night mean)")
     print(f"{'='*80}\n")
     
-    # Create figure with single subplot for grouped bars
+    # Create figure with single subplot for horizontal grouped bars
     n_cities = len(cities)
     
     # Get dynamic layout parameters
@@ -5353,7 +5541,7 @@ def create_persistent_heat_event_summary_chart(cities_data, base_dir=None, study
     
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
     
-    x = np.arange(n_cities)
+    y = np.arange(n_cities)
     
     # Colors
     day_base_color = '#FFB366'  # Light orange for day base
@@ -5361,7 +5549,7 @@ def create_persistent_heat_event_summary_chart(cities_data, base_dir=None, study
     danger_color = '#FF0000'  # Red for exceeding portion (tip)
     range_color = '#000000'  # Black for all range indicators
     
-    # Process day and night data
+    # Process day and night data — horizontal bars
     for i, city in enumerate(cities):
         day_val = day_means[i]
         day_min = day_mins[i]
@@ -5370,133 +5558,130 @@ def create_persistent_heat_event_summary_chart(cities_data, base_dir=None, study
         night_min = night_mins[i]
         night_max = night_maxs[i]
         
-        # --- DAY BAR (left) ---
+        # --- DAY BAR (top of pair) ---
         if not np.isnan(day_val):
-            # Base portion (0 to mean or full bar if below mean)
             if day_val > day_overall_mean:
-                base_height = day_overall_mean
-                exceed_height = day_val - day_overall_mean
+                base_width_val = day_overall_mean
+                exceed_width_val = day_val - day_overall_mean
             else:
-                base_height = day_val
-                exceed_height = 0
+                base_width_val = day_val
+                exceed_width_val = 0
             
-            # Plot base (orange)
-            ax.bar(x[i] - width/2, base_height, width, 
-                   color=day_base_color, edgecolor='black', linewidth=1,
-                   label='_nolegend_')
+            ax.barh(y[i] - width/2, base_width_val, width,
+                    color=day_base_color, edgecolor='black', linewidth=1)
             
-            # Plot exceeding portion (red tip) if above mean
-            if exceed_height > 0:
-                ax.bar(x[i] - width/2, exceed_height, width, 
-                       bottom=base_height, color=danger_color, 
-                       edgecolor='black', linewidth=1, label='_nolegend_')
+            if exceed_width_val > 0:
+                ax.barh(y[i] - width/2, exceed_width_val, width,
+                        left=base_width_val, color=danger_color,
+                        edgecolor='black', linewidth=1)
             
-            # Add range indicator (min to max)
+            # Range indicator (min to max) — horizontal
             if not np.isnan(day_min) and not np.isnan(day_max):
-                ax.plot([x[i] - width/2, x[i] - width/2], [day_min, day_max],
-                       color=range_color, linewidth=3, alpha=0.6, zorder=2,
-                       label='_nolegend_')
-                # Add caps to range
-                cap_width = width * 0.3
-                ax.plot([x[i] - width/2 - cap_width/2, x[i] - width/2 + cap_width/2], 
-                       [day_min, day_min], color=range_color, linewidth=2, alpha=0.6,
-                       label='_nolegend_')
-                ax.plot([x[i] - width/2 - cap_width/2, x[i] - width/2 + cap_width/2], 
-                       [day_max, day_max], color=range_color, linewidth=2, alpha=0.6,
-                       label='_nolegend_')
+                ax.plot([day_min, day_max], [y[i] - width/2, y[i] - width/2],
+                        color=range_color, linewidth=3, alpha=0.6, zorder=2)
+                cap_h = width * 0.3
+                ax.plot([day_min, day_min],
+                        [y[i] - width/2 - cap_h/2, y[i] - width/2 + cap_h/2],
+                        color=range_color, linewidth=2, alpha=0.6)
+                ax.plot([day_max, day_max],
+                        [y[i] - width/2 - cap_h/2, y[i] - width/2 + cap_h/2],
+                        color=range_color, linewidth=2, alpha=0.6)
             
-            # Add value label at center of bar
-            ax.text(x[i] - width/2, day_val / 2, f'{day_val:.1f}',
-                   ha='center', va='center', fontsize=fontsize_labels, fontweight='bold',
-                   color='white', bbox=dict(boxstyle='round,pad=0.3', facecolor='black', alpha=0.7))
+            # Value label inside bar
+            ax.text(day_val / 2, y[i] - width/2, f'{day_val:.1f}',
+                    ha='center', va='center', fontsize=fontsize_labels,
+                    fontweight='bold', color='white',
+                    bbox=dict(boxstyle='round,pad=0.3', facecolor='black',
+                              alpha=0.7))
         
-        # --- NIGHT BAR (right) ---
+        # --- NIGHT BAR (bottom of pair) ---
         if not np.isnan(night_val):
-            # Base portion (0 to mean or full bar if below mean)
             if night_val > night_overall_mean:
-                base_height = night_overall_mean
-                exceed_height = night_val - night_overall_mean
+                base_width_val = night_overall_mean
+                exceed_width_val = night_val - night_overall_mean
             else:
-                base_height = night_val
-                exceed_height = 0
+                base_width_val = night_val
+                exceed_width_val = 0
             
-            # Plot base (dark grey)
-            ax.bar(x[i] + width/2, base_height, width,
-                   color=night_base_color, edgecolor='black', linewidth=1,
-                   label='_nolegend_')
+            ax.barh(y[i] + width/2, base_width_val, width,
+                    color=night_base_color, edgecolor='black', linewidth=1)
             
-            # Plot exceeding portion (red tip) if above mean
-            if exceed_height > 0:
-                ax.bar(x[i] + width/2, exceed_height, width,
-                       bottom=base_height, color=danger_color,
-                       edgecolor='black', linewidth=1, label='_nolegend_')
+            if exceed_width_val > 0:
+                ax.barh(y[i] + width/2, exceed_width_val, width,
+                        left=base_width_val, color=danger_color,
+                        edgecolor='black', linewidth=1)
             
-            # Add range indicator (min to max)
             if not np.isnan(night_min) and not np.isnan(night_max):
-                ax.plot([x[i] + width/2, x[i] + width/2], [night_min, night_max],
-                       color=range_color, linewidth=3, alpha=0.6, zorder=2,
-                       label='_nolegend_')
-                # Add caps to range
-                cap_width = width * 0.3
-                ax.plot([x[i] + width/2 - cap_width/2, x[i] + width/2 + cap_width/2], 
-                       [night_min, night_min], color=range_color, linewidth=2, alpha=0.6,
-                       label='_nolegend_')
-                ax.plot([x[i] + width/2 - cap_width/2, x[i] + width/2 + cap_width/2], 
-                       [night_max, night_max], color=range_color, linewidth=2, alpha=0.6,
-                       label='_nolegend_')
+                ax.plot([night_min, night_max], [y[i] + width/2, y[i] + width/2],
+                        color=range_color, linewidth=3, alpha=0.6, zorder=2)
+                cap_h = width * 0.3
+                ax.plot([night_min, night_min],
+                        [y[i] + width/2 - cap_h/2, y[i] + width/2 + cap_h/2],
+                        color=range_color, linewidth=2, alpha=0.6)
+                ax.plot([night_max, night_max],
+                        [y[i] + width/2 - cap_h/2, y[i] + width/2 + cap_h/2],
+                        color=range_color, linewidth=2, alpha=0.6)
             
-            # Add value label at center of bar
-            ax.text(x[i] + width/2, night_val / 2, f'{night_val:.1f}',
-                   ha='center', va='center', fontsize=fontsize_labels, fontweight='bold',
-                   color='white', bbox=dict(boxstyle='round,pad=0.3', facecolor='black', alpha=0.7))
+            ax.text(night_val / 2, y[i] + width/2, f'{night_val:.1f}',
+                    ha='center', va='center', fontsize=fontsize_labels,
+                    fontweight='bold', color='white',
+                    bbox=dict(boxstyle='round,pad=0.3', facecolor='black',
+                              alpha=0.7))
     
-    # Add mean lines with labels on the lines
+    # Add mean lines (now vertical) with labels
     if not np.isnan(day_overall_mean):
-        ax.axhline(day_overall_mean, color='darkorange', linestyle='--', 
+        ax.axvline(day_overall_mean, color='darkorange', linestyle='--',
                    linewidth=2.5, alpha=0.8, zorder=3)
-        # Add label on the line (positioned at right edge, avoiding overlap)
-        ax.text(n_cities - 0.3, day_overall_mean + 0.3, f'Day Mean: {day_overall_mean:.1f}°C',
-               fontsize=9, fontweight='bold', color='darkorange', 
-               bbox=dict(boxstyle='round,pad=0.4', facecolor='white', edgecolor='darkorange', alpha=0.9),
-               ha='right', va='bottom')
+        ax.text(day_overall_mean + 0.3, n_cities - 0.3,
+                f'Day Mean: {day_overall_mean:.1f}°C',
+                fontsize=9, fontweight='bold', color='darkorange',
+                bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
+                          edgecolor='darkorange', alpha=0.9),
+                ha='left', va='top')
     
     if not np.isnan(night_overall_mean):
-        ax.axhline(night_overall_mean, color='dimgray', linestyle='--',
+        ax.axvline(night_overall_mean, color='dimgray', linestyle='--',
                    linewidth=2.5, alpha=0.8, zorder=3)
-        # Add label on the line (positioned at left edge, avoiding overlap)
-        ax.text(0.3, night_overall_mean + 0.3, f'Night Mean: {night_overall_mean:.1f}°C',
-               fontsize=9, fontweight='bold', color='dimgray',
-               bbox=dict(boxstyle='round,pad=0.4', facecolor='white', edgecolor='dimgray', alpha=0.9),
-               ha='left', va='bottom')
+        ax.text(night_overall_mean + 0.3, 0.3,
+                f'Night Mean: {night_overall_mean:.1f}°C',
+                fontsize=9, fontweight='bold', color='dimgray',
+                bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
+                          edgecolor='dimgray', alpha=0.9),
+                ha='left', va='bottom')
     
-    # Add vertical separator lines between cities
+    # Horizontal separator lines between cities
     for i in range(1, n_cities):
-        ax.axvline(x[i] - 0.5, color='lightgrey', linestyle='-', linewidth=1, alpha=0.3, zorder=0)
+        ax.axhline(y[i] - 0.5, color='lightgrey', linestyle='-',
+                   linewidth=1, alpha=0.3, zorder=0)
     
-    # Formatting
-    ax.set_xlabel('Cities', fontsize=13, fontweight='bold')
-    ax.set_ylabel('Mean LST (°C)', fontsize=13, fontweight='bold')
-    ax.set_title(f'Persistent Heat Event Comparison: Day vs Night - {study_year}\n' +
-                 f'Red tips indicate temperatures exceeding overall mean (Danger Zone)',
-                 fontsize=14, fontweight='bold', pad=20)
-    ax.set_xticks(x)
-    ax.set_xticklabels(cities, rotation=45, ha='right', fontsize=10)
-    ax.grid(axis='y', alpha=0.3, linestyle='--', zorder=0)
+    # Formatting — axes swapped for horizontal layout
+    ax.set_ylabel('Cities (sorted hottest → coolest)', fontsize=13,
+                  fontweight='bold')
+    ax.set_xlabel('Mean LST (°C)', fontsize=13, fontweight='bold')
+    ax.set_title(
+        f'Persistent Heat Event Comparison: Day vs Night - {study_year}\n'
+        f'Red tips indicate temperatures exceeding overall mean (Danger Zone)',
+        fontsize=14, fontweight='bold', pad=20)
+    ax.set_yticks(y)
+    ax.set_yticklabels(cities, fontsize=10)
+    ax.invert_yaxis()  # hottest at top
+    ax.grid(axis='x', alpha=0.3, linestyle='--', zorder=0)
     
-    # Create custom legend (simplified - no mean values)
+    # Create custom legend
     from matplotlib.patches import Patch
     from matplotlib.lines import Line2D
     
     legend_elements = [
         Patch(facecolor=day_base_color, edgecolor='black', label='Day Base'),
         Patch(facecolor=night_base_color, edgecolor='black', label='Night Base'),
-        Patch(facecolor=danger_color, edgecolor='black', label='Excess Above Mean (Red Tip)'),
-        Line2D([0], [0], color=range_color, linewidth=4, alpha=0.6, label='Range (Min-Max)'),
+        Patch(facecolor=danger_color, edgecolor='black',
+              label='Excess Above Mean (Red Tip)'),
+        Line2D([0], [0], color=range_color, linewidth=4, alpha=0.6,
+               label='Range (Min-Max)'),
     ]
     
-    # Position legend at bottom right
-    ax.legend(handles=legend_elements, loc='lower right', fontsize=9, 
-             framealpha=0.95, edgecolor='black', fancybox=True, ncol=2)
+    ax.legend(handles=legend_elements, loc='lower right', fontsize=9,
+              framealpha=0.95, edgecolor='black', fancybox=True, ncol=2)
     
     plt.tight_layout()
     
@@ -5525,6 +5710,8 @@ def _get_chart_layout_params(n_cities):
     Get dynamic layout parameters based on number of cities.
     
     Helper function to maintain consistent sizing across heat event charts.
+    Charts use **horizontal bars** (cities on the y-axis) so the figure grows
+    vertically with more cities.
     
     Parameters
     ----------
@@ -5537,13 +5724,13 @@ def _get_chart_layout_params(n_cities):
         Dictionary with 'figsize', 'width', and 'fontsize_labels' keys
     """
     if n_cities <= 10:
-        return {'figsize': (14, 7), 'width': 0.38, 'fontsize_labels': 8}
+        return {'figsize': (14, 8), 'width': 0.38, 'fontsize_labels': 8}
     elif n_cities <= 20:
-        return {'figsize': (18, 7), 'width': 0.35, 'fontsize_labels': 7}
+        return {'figsize': (14, 14), 'width': 0.35, 'fontsize_labels': 7}
     elif n_cities <= 30:
-        return {'figsize': (24, 7), 'width': 0.32, 'fontsize_labels': 6}
+        return {'figsize': (14, 20), 'width': 0.32, 'fontsize_labels': 7}
     else:  # Up to 50+ cities
-        return {'figsize': (32, 7), 'width': 0.28, 'fontsize_labels': 5}
+        return {'figsize': (14, 28), 'width': 0.28, 'fontsize_labels': 6}
 
 
 def create_persistent_heat_event_variability_chart(cities_data, base_dir=None, study_year=2024, dpi=300):
@@ -5661,96 +5848,105 @@ def create_persistent_heat_event_variability_chart(cities_data, base_dir=None, s
     
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
     
-    x = np.arange(n_cities)
+    y = np.arange(n_cities)
     
     # Colors (consistent with summary chart)
     day_base_color = '#FFB366'  # Light orange for day
     night_base_color = '#696969'  # Dark grey for night
     high_var_color = '#FF0000'  # Red for high variability
     
-    # Plot bars
+    # Plot horizontal bars
     for i, city in enumerate(cities):
         day_sd = day_stds[i]
         night_sd = night_stds[i]
         
-        # --- DAY BAR (left) ---
+        # --- DAY BAR (top of pair) ---
         if not np.isnan(day_sd):
-            # Base bar (from 0 to mean_std or full height if below mean)
-            base_height = min(day_sd, day_mean_std)
-            ax.bar(x[i] - width/2, base_height, width, 
-                   color=day_base_color, edgecolor='black', linewidth=1)
+            base_w = min(day_sd, day_mean_std)
+            ax.barh(y[i] - width/2, base_w, width,
+                    color=day_base_color, edgecolor='black', linewidth=1)
             
-            # Red tip only if SD exceeds mean SD
             if day_sd > day_mean_std:
-                tip_height = day_sd - day_mean_std
-                ax.bar(x[i] - width/2, tip_height, width, 
-                       bottom=day_mean_std, color=high_var_color, 
-                       edgecolor='black', linewidth=1)
+                tip_w = day_sd - day_mean_std
+                ax.barh(y[i] - width/2, tip_w, width,
+                        left=day_mean_std, color=high_var_color,
+                        edgecolor='black', linewidth=1)
             
-            # Add value label
-            ax.text(x[i] - width/2, day_sd / 2, f'{day_sd:.2f}',
-                   ha='center', va='center', fontsize=fontsize_labels, fontweight='bold',
-                   color='white', bbox=dict(boxstyle='round,pad=0.3', facecolor='black', alpha=0.7))
+            ax.text(day_sd / 2, y[i] - width/2, f'{day_sd:.2f}',
+                    ha='center', va='center', fontsize=fontsize_labels,
+                    fontweight='bold', color='white',
+                    bbox=dict(boxstyle='round,pad=0.3', facecolor='black',
+                              alpha=0.7))
         
-        # --- NIGHT BAR (right) ---
+        # --- NIGHT BAR (bottom of pair) ---
         if not np.isnan(night_sd):
-            # Base bar (from 0 to mean_std or full height if below mean)
-            base_height = min(night_sd, night_mean_std)
-            ax.bar(x[i] + width/2, base_height, width,
-                   color=night_base_color, edgecolor='black', linewidth=1)
+            base_w = min(night_sd, night_mean_std)
+            ax.barh(y[i] + width/2, base_w, width,
+                    color=night_base_color, edgecolor='black', linewidth=1)
             
-            # Red tip only if SD exceeds mean SD
             if night_sd > night_mean_std:
-                tip_height = night_sd - night_mean_std
-                ax.bar(x[i] + width/2, tip_height, width,
-                       bottom=night_mean_std, color=high_var_color,
-                       edgecolor='black', linewidth=1)
+                tip_w = night_sd - night_mean_std
+                ax.barh(y[i] + width/2, tip_w, width,
+                        left=night_mean_std, color=high_var_color,
+                        edgecolor='black', linewidth=1)
             
-            # Add value label
-            ax.text(x[i] + width/2, night_sd / 2, f'{night_sd:.2f}',
-                   ha='center', va='center', fontsize=fontsize_labels, fontweight='bold',
-                   color='white', bbox=dict(boxstyle='round,pad=0.3', facecolor='black', alpha=0.7))
+            ax.text(night_sd / 2, y[i] + width/2, f'{night_sd:.2f}',
+                    ha='center', va='center', fontsize=fontsize_labels,
+                    fontweight='bold', color='white',
+                    bbox=dict(boxstyle='round,pad=0.3', facecolor='black',
+                              alpha=0.7))
     
-    # Add mean SD lines with labels
+    # Mean SD lines (vertical now)
     if not np.isnan(day_mean_std):
-        ax.axhline(day_mean_std, color='darkorange', linestyle='--', 
+        ax.axvline(day_mean_std, color='darkorange', linestyle='--',
                    linewidth=2.5, alpha=0.8, zorder=3)
-        ax.text(n_cities - 0.3, day_mean_std + 0.05, f'Day Mean SD: {day_mean_std:.2f}°C',
-               fontsize=9, fontweight='bold', color='darkorange', 
-               bbox=dict(boxstyle='round,pad=0.4', facecolor='white', edgecolor='darkorange', alpha=0.9),
-               ha='right', va='bottom')
+        ax.text(day_mean_std + 0.05, n_cities - 0.3,
+                f'Day Mean SD: {day_mean_std:.2f}°C',
+                fontsize=9, fontweight='bold', color='darkorange',
+                bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
+                          edgecolor='darkorange', alpha=0.9),
+                ha='left', va='top')
     
     if not np.isnan(night_mean_std):
-        ax.axhline(night_mean_std, color='dimgray', linestyle='--',
+        ax.axvline(night_mean_std, color='dimgray', linestyle='--',
                    linewidth=2.5, alpha=0.8, zorder=3)
-        ax.text(0.3, night_mean_std + 0.05, f'Night Mean SD: {night_mean_std:.2f}°C',
-               fontsize=9, fontweight='bold', color='dimgray',
-               bbox=dict(boxstyle='round,pad=0.4', facecolor='white', edgecolor='dimgray', alpha=0.9),
-               ha='left', va='bottom')
+        ax.text(night_mean_std + 0.05, 0.3,
+                f'Night Mean SD: {night_mean_std:.2f}°C',
+                fontsize=9, fontweight='bold', color='dimgray',
+                bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
+                          edgecolor='dimgray', alpha=0.9),
+                ha='left', va='bottom')
     
-    # Add vertical separators
+    # Horizontal separators between cities
     for i in range(1, n_cities):
-        ax.axvline(x[i] - 0.5, color='lightgrey', linestyle='-', linewidth=1, alpha=0.3, zorder=0)
+        ax.axhline(y[i] - 0.5, color='lightgrey', linestyle='-',
+                   linewidth=1, alpha=0.3, zorder=0)
     
-    # Formatting
-    ax.set_xlabel('Cities', fontsize=13, fontweight='bold')
-    ax.set_ylabel('Standard Deviation (°C)', fontsize=13, fontweight='bold')
-    ax.set_title(f'Temperature Variability During Persistent Heat Events - {study_year}\n' +
-                 f'Red tips indicate cities with high temperature variability (SD > Mean SD)',
-                 fontsize=14, fontweight='bold', pad=20)
-    ax.set_xticks(x)
-    ax.set_xticklabels(cities, rotation=45, ha='right', fontsize=10)
-    ax.grid(axis='y', alpha=0.3, linestyle='--', zorder=0)
+    # Formatting — axes swapped for horizontal layout
+    ax.set_ylabel('Cities (sorted highest → lowest variability)', fontsize=13,
+                  fontweight='bold')
+    ax.set_xlabel('Standard Deviation (°C)', fontsize=13, fontweight='bold')
+    ax.set_title(
+        f'Temperature Variability During Persistent Heat Events - {study_year}\n'
+        f'Red tips indicate cities with high temperature variability (SD > Mean SD)',
+        fontsize=14, fontweight='bold', pad=20)
+    ax.set_yticks(y)
+    ax.set_yticklabels(cities, fontsize=10)
+    ax.invert_yaxis()  # highest variability at top
+    ax.grid(axis='x', alpha=0.3, linestyle='--', zorder=0)
     
     # Legend
     legend_elements = [
-        Patch(facecolor=day_base_color, edgecolor='black', label='Day Normal Variability'),
-        Patch(facecolor=night_base_color, edgecolor='black', label='Night Normal Variability'),
-        Patch(facecolor=high_var_color, edgecolor='black', label='High Variability Tip (SD > Mean SD)'),
+        Patch(facecolor=day_base_color, edgecolor='black',
+              label='Day Normal Variability'),
+        Patch(facecolor=night_base_color, edgecolor='black',
+              label='Night Normal Variability'),
+        Patch(facecolor=high_var_color, edgecolor='black',
+              label='High Variability Tip (SD > Mean SD)'),
     ]
     
-    ax.legend(handles=legend_elements, loc='upper right', fontsize=9, 
-             framealpha=0.95, edgecolor='black', fancybox=True)
+    ax.legend(handles=legend_elements, loc='lower right', fontsize=9,
+              framealpha=0.95, edgecolor='black', fancybox=True)
     
     plt.tight_layout()
     
@@ -8131,3 +8327,1710 @@ def create_tree_species_heatmap(
         'total_mentions': int(ct.values.sum()),
         'success': True,
     }
+
+
+# =============================================================================
+# NOTEBOOK 03 — DASK-BASED MAP VISUALIZATIONS
+# =============================================================================
+
+def _load_geotiff_nb03(file_path):
+    """Load a GeoTIFF, mask nodata and extreme values, return (data, bounds, transform, crs)."""
+    try:
+        import rasterio
+        import numpy as np
+        with rasterio.open(file_path) as src:
+            data = src.read(1).astype(float)
+            if src.nodata is not None:
+                data[data == src.nodata] = np.nan
+            data[(data < -50) | (data > 70)] = np.nan
+            return data, src.bounds, src.transform, src.crs
+    except Exception as e:
+        print(f"❌ Error loading {file_path}: {e}")
+        return None, None, None, None
+
+
+def _calc_qa_stats_nb03(qa_file_path):
+    """Return a short QA stats string from a QA GeoTIFF (e.g. 'QA: S-72.4%')."""
+    try:
+        import rasterio
+        import numpy as np
+        with rasterio.open(qa_file_path) as src:
+            qa_data = src.read(1)
+            valid = np.count_nonzero(~np.isnan(qa_data.astype(float)))
+            if valid == 0:
+                return "No QA data"
+            strict_pct = np.count_nonzero(qa_data == 1) / valid * 100
+            return f"QA: S-{strict_pct:.1f}%"
+    except Exception:
+        return "QA data unavailable"
+
+
+def create_monthly_climatology_map(city_name, city_dir, lst_time,
+                                   lst_config, vis_config,
+                                   temporal_config, project_config):
+    """
+    Create a 4×3 A5 grid of monthly LST climatology maps for one city & time.
+
+    This is the ``@delayed`` function from Notebook 03 Cell 16, extracted so
+    it can be submitted to a Dask cluster from either the notebook or a script.
+
+    Parameters
+    ----------
+    city_name : str
+    city_dir  : str  (relative path under lst_output_dir, e.g. 'City_Lagos')
+    lst_time  : str  ('day' or 'night')
+    lst_config   : dict  (config.LST_CONFIG)
+    vis_config   : dict  (config.VISUALIZATION_CONFIG[lst_time])
+    temporal_config : dict  (config.TEMPORAL_CONFIG)
+    project_config  : dict  (config.PROJECT_CONFIG)
+
+    Returns
+    -------
+    dict with keys: status, city, lst_time, type, output_pdf, output_png
+    """
+    import glob
+    import re
+    import os
+    import numpy as np
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as _plt
+    from matplotlib.gridspec import GridSpec
+    from matplotlib.colors import LinearSegmentedColormap
+
+    A5_SIZE_INCHES = (5.83, 8.27)
+
+    try:
+        subdir       = 'Day' if lst_time == 'day' else 'Night'
+        geotiff_dir  = os.path.join(project_config['lst_output_dir'], city_dir,
+                                    'LST_Temporal_Analysis', subdir, 'geotiff')
+        if not os.path.exists(geotiff_dir):
+            return {'status': 'error',
+                    'message': f'Directory not found: {geotiff_dir}'}
+
+        monthly_files = sorted(glob.glob(
+            os.path.join(geotiff_dir,
+                         f"{city_name}_LST_{lst_time.title()}_MonthlyClimatology_*.tif")))
+        if not monthly_files:
+            return {'status': 'no_data',
+                    'message': f'No monthly files found for {city_name} {lst_time}'}
+
+        figures_dir = os.path.join(os.path.dirname(geotiff_dir), 'Figures')
+        os.makedirs(figures_dir, exist_ok=True)
+
+        MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
+                       'July', 'August', 'September', 'October', 'November', 'December']
+        min_val    = vis_config['min_temp']
+        max_val    = vis_config['max_temp']
+        hi_temp    = vis_config['highlight_temp']
+        lst_cmap   = LinearSegmentedColormap.from_list(
+            vis_config['colormap_name'], vis_config['colors'])
+
+        fig = _plt.figure(figsize=A5_SIZE_INCHES, dpi=300)
+        _plt.tight_layout()
+        gs  = GridSpec(4, 3, figure=fig, hspace=0.15, wspace=0.1)
+
+        im = None
+        for fp in monthly_files:
+            m = re.search(r'MonthlyClimatology_(\d+)', os.path.basename(fp))
+            if not m:
+                continue
+            mnum = int(m.group(1))
+            ax   = fig.add_subplot(gs[(mnum - 1) // 3, (mnum - 1) % 3])
+            data, bounds, transform, crs = _load_geotiff_nb03(fp)
+            if data is not None:
+                im = ax.imshow(data, cmap=lst_cmap, vmin=min_val, vmax=max_val)
+                ax.set_title(MONTH_NAMES[mnum - 1], fontsize=8)
+                ax.set_xticks([]); ax.set_yticks([])
+                qa_fp = fp.replace('_LST_', '_QA_Source_')
+                if os.path.exists(qa_fp):
+                    ax.text(0.98, 0.02, _calc_qa_stats_nb03(qa_fp),
+                            ha='right', va='bottom', transform=ax.transAxes,
+                            fontsize=6.5,
+                            bbox=dict(facecolor='white', alpha=0.7,
+                                      pad=1, edgecolor='none'))
+            else:
+                ax.text(0.5, 0.5, 'No Data', ha='center', va='center',
+                        transform=ax.transAxes)
+                ax.set_title(MONTH_NAMES[mnum - 1], fontsize=8)
+
+        fig.canvas.draw()
+        if im is not None:
+            cbar_ax = fig.add_axes([0.15, 0.05, 0.7, 0.02])
+            ticks   = sorted(set(list(range(int(min_val), int(max_val) + 1, 5)) + [hi_temp]))
+            cbar    = fig.colorbar(im, cax=cbar_ax, orientation='horizontal', ticks=ticks)
+            cbar.ax.set_xticklabels([str(t) for t in ticks], fontsize=6)
+            hi_idx  = ticks.index(hi_temp)
+            cbar.ax.get_xticklabels()[hi_idx].set_weight('bold')
+            cbar.set_label('Temperature (°C)', fontsize=8)
+
+        yr_range = f"{temporal_config['years'][0]}-{temporal_config['years'][-1]}"
+        fig.suptitle(f"{city_name} — {lst_time.title()}-time Monthly LST Climatology",
+                     fontsize=10, y=0.95)
+        fig.text(0.5, 0.01,
+                 f"Median {lst_time.title()}-time LST values across years {yr_range}",
+                 ha='center', fontsize=6)
+        fig.canvas.draw()
+
+        out_pdf = os.path.join(figures_dir,
+                               f"{city_name}_{lst_time.title()}_Monthly_LST_Climatology.pdf")
+        out_png = os.path.join(figures_dir,
+                               f"{city_name}_{lst_time.title()}_Monthly_LST_Climatology.png")
+        fig.savefig(out_pdf, bbox_inches='tight', format='pdf')
+        fig.savefig(out_png, bbox_inches='tight', dpi=300, format='png')
+        _plt.close(fig)
+
+        return {'status': 'success', 'city': city_name, 'lst_time': lst_time,
+                'type': 'monthly', 'output_pdf': out_pdf, 'output_png': out_png}
+
+    except Exception as e:
+        import traceback
+        return {'status': 'error', 'city': city_name, 'lst_time': lst_time,
+                'type': 'monthly',
+                'message': f"{e}\n{traceback.format_exc()}"}
+
+
+def create_yearly_lst_map(city_name, city_dir, lst_time,
+                          lst_config, vis_config,
+                          temporal_config, project_config):
+    """
+    Create a 5×4 A5 grid of yearly LST median maps for one city & time.
+
+    Parameters
+    ----------
+    (same as create_monthly_climatology_map)
+
+    Returns
+    -------
+    dict with keys: status, city, lst_time, type, output_pdf, output_png
+    """
+    import glob
+    import re
+    import os
+    import numpy as np
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as _plt
+    from matplotlib.gridspec import GridSpec
+    from matplotlib.colors import LinearSegmentedColormap
+
+    A5_SIZE_INCHES = (5.83, 8.27)
+    N_ROWS, N_COLS = 5, 4
+
+    try:
+        subdir      = 'Day' if lst_time == 'day' else 'Night'
+        geotiff_dir = os.path.join(project_config['lst_output_dir'], city_dir,
+                                   'LST_Temporal_Analysis', subdir, 'geotiff')
+        if not os.path.exists(geotiff_dir):
+            return {'status': 'error',
+                    'message': f'Directory not found: {geotiff_dir}'}
+
+        yearly_files = sorted(glob.glob(
+            os.path.join(geotiff_dir,
+                         f"{city_name}_LST_{lst_time.title()}_Yearly_*.tif")))
+        if not yearly_files:
+            return {'status': 'no_data',
+                    'message': f'No yearly files found for {city_name} {lst_time}'}
+
+        figures_dir = os.path.join(os.path.dirname(geotiff_dir), 'Figures')
+        os.makedirs(figures_dir, exist_ok=True)
+
+        min_val  = vis_config['min_temp']
+        max_val  = vis_config['max_temp']
+        hi_temp  = vis_config['highlight_temp']
+        lst_cmap = LinearSegmentedColormap.from_list(
+            vis_config['colormap_name'], vis_config['colors'])
+
+        fig = _plt.figure(figsize=A5_SIZE_INCHES, dpi=300)
+        _plt.tight_layout()
+        gs  = GridSpec(N_ROWS, N_COLS, figure=fig, hspace=0.15, wspace=0.1)
+
+        im = None
+        for i, fp in enumerate(yearly_files[:N_ROWS * N_COLS]):
+            m = re.search(r'Yearly_(\d{4})', os.path.basename(fp))
+            if not m:
+                continue
+            year_str = m.group(1)
+            ax = fig.add_subplot(gs[i // N_COLS, i % N_COLS])
+            data, bounds, transform, crs = _load_geotiff_nb03(fp)
+            if data is not None:
+                im = ax.imshow(data, cmap=lst_cmap, vmin=min_val, vmax=max_val)
+                ax.set_title(year_str, fontsize=8)
+                ax.set_xticks([]); ax.set_yticks([])
+                qa_fp = fp.replace('_LST_', '_QA_Source_')
+                if os.path.exists(qa_fp):
+                    ax.text(0.98, 0.02, _calc_qa_stats_nb03(qa_fp),
+                            ha='right', va='bottom', transform=ax.transAxes,
+                            fontsize=6.5,
+                            bbox=dict(facecolor='white', alpha=0.7,
+                                      pad=1, edgecolor='none'))
+            else:
+                ax.text(0.5, 0.5, 'No Data', ha='center', va='center',
+                        transform=ax.transAxes)
+                ax.set_title(year_str, fontsize=8)
+
+        fig.canvas.draw()
+        if im is not None:
+            cbar_ax = fig.add_axes([0.15, 0.05, 0.7, 0.02])
+            ticks   = sorted(set(list(range(int(min_val), int(max_val) + 1, 5)) + [hi_temp]))
+            cbar    = fig.colorbar(im, cax=cbar_ax, orientation='horizontal', ticks=ticks)
+            cbar.ax.set_xticklabels([str(t) for t in ticks], fontsize=6)
+            hi_idx  = ticks.index(hi_temp)
+            cbar.ax.get_xticklabels()[hi_idx].set_weight('bold')
+            cbar.set_label('Temperature (°C)', fontsize=8)
+
+        fig.suptitle(f"{city_name} — {lst_time.title()}-time Yearly LST Medians",
+                     fontsize=10, y=0.95)
+        fig.canvas.draw()
+
+        out_pdf = os.path.join(figures_dir,
+                               f"{city_name}_{lst_time.title()}_Yearly_LST.pdf")
+        out_png = os.path.join(figures_dir,
+                               f"{city_name}_{lst_time.title()}_Yearly_LST.png")
+        fig.savefig(out_pdf, bbox_inches='tight', format='pdf')
+        fig.savefig(out_png, bbox_inches='tight', dpi=300, format='png')
+        _plt.close(fig)
+
+        return {'status': 'success', 'city': city_name, 'lst_time': lst_time,
+                'type': 'yearly', 'output_pdf': out_pdf, 'output_png': out_png}
+
+    except Exception as e:
+        import traceback
+        return {'status': 'error', 'city': city_name, 'lst_time': lst_time,
+                'type': 'yearly',
+                'message': f"{e}\n{traceback.format_exc()}"}
+
+
+def create_qa_maps(aoi_data, lst_config, temporal_config, project_config):
+    """
+    Create monthly QA climatology and yearly QA maps for all cities.
+
+    Equivalent to Notebook 03 Cell 17.  Saves PNGs/PDFs into
+    ``Figures/QA_Maps/`` inside each city's LST_Temporal_Analysis directory.
+
+    Parameters
+    ----------
+    aoi_data : dict  {city_name: {'city_dir': ...}}
+    lst_config      : dict  (config.LST_CONFIG)
+    temporal_config : dict  (config.TEMPORAL_CONFIG)
+    project_config  : dict  (config.PROJECT_CONFIG)
+    """
+    import glob
+    import re
+    import os
+    import numpy as np
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as _plt
+    import matplotlib.gridspec as gridspec
+    from matplotlib.colors import ListedColormap, BoundaryNorm
+
+    A5_SIZE_INCHES = (8.27, 11.69)
+
+    lst_time_options = (['day', 'night'] if lst_config['lst_time'] == 'both'
+                        else [lst_config['lst_time']])
+
+    # Build QA colourmap
+    qa_colors  = []
+    qa_labels  = []
+    qa_values  = []
+    for tier in sorted(lst_config.get('qa_levels_to_use', []),
+                       key=lambda t: lst_config['quality_hierarchy'][t]['priority']):
+        tc = lst_config['quality_hierarchy'][tier]
+        qa_colors.append(tc['color'])
+        qa_labels.append(
+            f"{tier.capitalize()} (≤{tc['description'].split('≤')[1].strip()})"
+            if '≤' in tc['description'] else tier.capitalize()
+        )
+        qa_values.append(tc['priority'])
+
+    qa_cmap = ListedColormap(qa_colors) if qa_colors else None
+    qa_norm = (BoundaryNorm([qa_values[0] - 0.5] + [v + 0.5 for v in qa_values],
+                            len(qa_colors))
+               if qa_colors else None)
+
+    def _load_qa(fp):
+        try:
+            import rasterio
+            with rasterio.open(fp) as src:
+                data = src.read(1).astype(float)
+                if src.nodata is not None:
+                    data[data == src.nodata] = np.nan
+                return data, src.bounds, src.transform, src.crs
+        except Exception as exc:
+            print(f"❌ Error loading QA file {fp}: {exc}")
+            return None, None, None, None
+
+    def _qa_stats_str(qa_data):
+        try:
+            valid = np.count_nonzero(~np.isnan(qa_data))
+            if valid == 0:
+                return "No QA data"
+            parts = []
+            for tier, tc in lst_config['quality_hierarchy'].items():
+                if tier in lst_config.get('qa_levels_to_use', []):
+                    pct = np.count_nonzero(qa_data == tc['priority']) / valid * 100
+                    parts.append(f"{tier[0].upper()}:{pct:.1f}%")
+            return " | ".join(parts)
+        except Exception:
+            return "QA data unavailable"
+
+    MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June',
+                   'July', 'August', 'September', 'October', 'November', 'December']
+
+    for city_name, aoi_info in aoi_data.items():
+        print(f"\n🏙️  Processing QA maps for {city_name}")
+        city_dir = aoi_info['city_dir']
+
+        for lst_time in lst_time_options:
+            subdir      = 'Day' if lst_time == 'day' else 'Night'
+            geotiff_dir = os.path.join(project_config['lst_output_dir'], city_dir,
+                                       'LST_Temporal_Analysis', subdir, 'geotiff')
+            if not os.path.exists(geotiff_dir):
+                print(f"  ❌ Not found: {geotiff_dir}")
+                continue
+
+            qa_maps_dir = os.path.join(os.path.dirname(geotiff_dir),
+                                       'Figures', 'QA_Maps')
+            os.makedirs(qa_maps_dir, exist_ok=True)
+
+            # ── Monthly QA ────────────────────────────────────────────────
+            monthly_qa = sorted(glob.glob(
+                os.path.join(geotiff_dir,
+                             f"{city_name}_QA_Source_{subdir.lower()}_MonthlyClimatology_*.tif")))
+            if monthly_qa:
+                try:
+                    fig = _plt.figure(figsize=A5_SIZE_INCHES, dpi=300)
+                    gs  = gridspec.GridSpec(4, 3, figure=fig, hspace=0.15, wspace=0.1)
+                    for fp in monthly_qa:
+                        m = (re.search(r'MonthlyClimatology_(\d+)', os.path.basename(fp)) or
+                             re.search(r'month_(\d+)', os.path.basename(fp)))
+                        if not m:
+                            continue
+                        mnum = int(m.group(1))
+                        ax   = fig.add_subplot(gs[(mnum - 1) // 3, (mnum - 1) % 3])
+                        qa_data, *_ = _load_qa(fp)
+                        if qa_data is not None:
+                            ax.imshow(qa_data, cmap=qa_cmap, norm=qa_norm)
+                            ax.set_title(MONTH_NAMES[mnum - 1], fontsize=8)
+                            ax.set_xticks([]); ax.set_yticks([])
+                            ax.text(0.98, 0.02, _qa_stats_str(qa_data),
+                                    ha='right', va='bottom',
+                                    transform=ax.transAxes, fontsize=7.5,
+                                    bbox=dict(facecolor='white', alpha=0.7,
+                                              pad=1, edgecolor='none'))
+                        else:
+                            ax.text(0.5, 0.5, 'No QA Data',
+                                    ha='center', va='center', transform=ax.transAxes)
+                            ax.set_title(MONTH_NAMES[mnum - 1], fontsize=8)
+                    cbar_ax = fig.add_axes([0.15, 0.05, 0.7, 0.02])
+                    _plt.colorbar(
+                        _plt.cm.ScalarMappable(cmap=qa_cmap, norm=qa_norm),
+                        cax=cbar_ax, orientation='horizontal', ticks=qa_values
+                    ).ax.set_xticklabels(qa_labels, fontsize=6)
+                    fig.suptitle(
+                        f"{city_name} — {lst_time.title()}-time Monthly QA Climatology",
+                        fontsize=10, y=0.95)
+                    yr_range = f"{temporal_config['years'][0]}-{temporal_config['years'][-1]}"
+                    _plt.figtext(0.5, 0.01, f"Data period: {yr_range}",
+                                 ha='center', fontsize=6)
+                    out_pdf = os.path.join(qa_maps_dir,
+                        f"{city_name}_{lst_time.title()}_Monthly_QA_Climatology.pdf")
+                    out_png = os.path.join(qa_maps_dir,
+                        f"{city_name}_{lst_time.title()}_Monthly_QA_Climatology.png")
+                    _plt.savefig(out_pdf, bbox_inches='tight')
+                    _plt.savefig(out_png, bbox_inches='tight', dpi=300)
+                    _plt.close()
+                    print(f"  ✅ Monthly QA → {os.path.basename(out_png)}")
+                except Exception as exc:
+                    import traceback
+                    print(f"  ❌ Monthly QA error for {city_name}: {exc}")
+                    print(traceback.format_exc())
+
+            # ── Yearly QA ─────────────────────────────────────────────────
+            yearly_qa = sorted(glob.glob(
+                os.path.join(geotiff_dir,
+                             f"{city_name}_QA_Source_{subdir.lower()}_Yearly_*.tif")))
+            if not yearly_qa:
+                continue
+            try:
+                n = len(yearly_qa)
+                if n <= 12: nr, nc = 3, 4
+                elif n <= 16: nr, nc = 4, 4
+                elif n <= 20: nr, nc = 5, 4
+                else: nr, nc = 5, 5
+
+                fig = _plt.figure(figsize=A5_SIZE_INCHES, dpi=300)
+                gs  = gridspec.GridSpec(nr, nc, figure=fig, hspace=0.15, wspace=0.1)
+                for i, fp in enumerate(yearly_qa):
+                    m = (re.search(r'Yearly_(\d{4})', os.path.basename(fp)) or
+                         re.search(r'_(\d{4})_', os.path.basename(fp)))
+                    if not m or i >= nr * nc:
+                        continue
+                    ax = fig.add_subplot(gs[i // nc, i % nc])
+                    qa_data, *_ = _load_qa(fp)
+                    if qa_data is not None:
+                        ax.imshow(qa_data, cmap=qa_cmap, norm=qa_norm)
+                        ax.set_title(m.group(1), fontsize=8)
+                        ax.set_xticks([]); ax.set_yticks([])
+                        ax.text(0.98, 0.02, _qa_stats_str(qa_data),
+                                ha='right', va='bottom',
+                                transform=ax.transAxes, fontsize=7.5,
+                                bbox=dict(facecolor='white', alpha=0.7,
+                                          pad=1, edgecolor='none'))
+                    else:
+                        ax.text(0.5, 0.5, 'No QA Data',
+                                ha='center', va='center', transform=ax.transAxes)
+                        ax.set_title(m.group(1), fontsize=8)
+                cbar_ax = fig.add_axes([0.15, 0.05, 0.7, 0.02])
+                _plt.colorbar(
+                    _plt.cm.ScalarMappable(cmap=qa_cmap, norm=qa_norm),
+                    cax=cbar_ax, orientation='horizontal', ticks=qa_values
+                ).ax.set_xticklabels(qa_labels, fontsize=6)
+                fig.suptitle(
+                    f"{city_name} — {lst_time.title()}-time Yearly QA Maps",
+                    fontsize=10, y=0.95)
+                out_pdf = os.path.join(qa_maps_dir,
+                    f"{city_name}_{lst_time.title()}_Yearly_QA.pdf")
+                out_png = os.path.join(qa_maps_dir,
+                    f"{city_name}_{lst_time.title()}_Yearly_QA.png")
+                _plt.savefig(out_pdf, bbox_inches='tight')
+                _plt.savefig(out_png, bbox_inches='tight', dpi=300)
+                _plt.close()
+                print(f"  ✅ Yearly QA  → {os.path.basename(out_png)}")
+            except Exception as exc:
+                import traceback
+                print(f"  ❌ Yearly QA error for {city_name}: {exc}")
+                print(traceback.format_exc())
+
+
+def create_lst_trend_plots(aoi_data, all_stats_df,
+                           temporal_config, project_config, lst_config):
+    """
+    Create per-city dual-panel LST trend plots (left: yearly trends,
+    right: monthly climatology) and a standalone legend.
+
+    Equivalent to Notebook 03 Cell 21 (Block 7).
+
+    Parameters
+    ----------
+    aoi_data : dict  {city_name: {'city_dir': ...}}
+    all_stats_df    : pd.DataFrame  (from All_Cities_LST_Statistics.csv)
+    temporal_config : dict  (config.TEMPORAL_CONFIG)
+    project_config  : dict  (config.PROJECT_CONFIG)
+    lst_config      : dict  (config.LST_CONFIG)
+    """
+    import os
+    import shutil
+    import numpy as np
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as _plt
+    import matplotlib.ticker as ticker
+    import matplotlib.patches as mpatches
+    from matplotlib.lines import Line2D
+    from scipy import stats
+
+    FIGURE_SIZE  = (18, 9)
+    DPI          = 300
+    DAY_COLOR    = '#FF7F0E'
+    DAY_FILL     = (1.0, 0.5, 0.055, 0.3)
+    NIGHT_COLOR  = '#000000'
+    NIGHT_FILL   = (0.5, 0.5, 0.5, 0.3)
+    MONTH_ABBRS  = {1:'Jan',2:'Feb',3:'Mar',4:'Apr',5:'May',6:'Jun',
+                    7:'Jul',8:'Aug',9:'Sep',10:'Oct',11:'Nov',12:'Dec'}
+
+    lst_time_options = (['day', 'night'] if lst_config['lst_time'] == 'both'
+                        else [lst_config['lst_time']])
+
+    def _safe_y(ax, x, y, offset, frac=0.1):
+        ylim = ax.get_ylim()
+        yr   = ylim[1] - ylim[0]
+        ny   = y + offset
+        if ny + yr * frac > ylim[1]:
+            ny = y - abs(offset) - yr * frac
+        elif ny - yr * frac < ylim[0]:
+            ny = y + abs(offset) + yr * frac
+        return max(ylim[0] + yr * frac * 0.5,
+                   min(ny, ylim[1] - yr * frac * 0.5))
+
+    for city_name, aoi_info in aoi_data.items():
+        city_df = all_stats_df[all_stats_df['city'] == city_name]
+        if city_df.empty:
+            print(f"⚠️  No data for {city_name}")
+            continue
+
+        city_dir        = aoi_info['city_dir']
+        city_temporal   = os.path.join(project_config['lst_output_dir'],
+                                       f'City_{city_name}', 'LST_Temporal_Analysis')
+        os.makedirs(city_temporal, exist_ok=True)
+        figures_dir     = os.path.join(city_temporal, 'Figures')
+        os.makedirs(figures_dir, exist_ok=True)
+
+        fig, (ax1, ax2) = _plt.subplots(1, 2, figsize=FIGURE_SIZE, sharey=True)
+        _plt.subplots_adjust(wspace=0.05)
+
+        yr_range  = (f"({temporal_config['years'][0]}-{temporal_config['years'][-1]})"
+                     if temporal_config.get('years') else "")
+        fig.suptitle(f"{city_name} Land Surface Temperature {yr_range}",
+                     fontweight='bold', fontsize=27, y=0.95)
+
+        all_temps  = []
+        day_data   = {}
+        night_data = {}
+
+        # ── Left panel: yearly trends ──────────────────────────────────
+        ax1.set_title("Yearly LST Trends", fontsize=21, pad=20)
+        for lst_time in lst_time_options:
+            time_df  = city_df[city_df['day_night'] == lst_time]
+            yearly   = time_df[time_df['time_period_type'] == 'yearly'].sort_values('time_period')
+            if yearly.empty:
+                continue
+            years    = yearly['time_period'].values.astype(int)
+            meds     = yearly['lst_median'].values
+            lo, hi   = yearly['lst_min'].values, yearly['lst_max'].values
+            all_temps.extend(lo); all_temps.extend(hi)
+            col, fill, _d = ((DAY_COLOR, DAY_FILL, day_data)
+                             if lst_time == 'day'
+                             else (NIGHT_COLOR, NIGHT_FILL, night_data))
+            _d.update({'years': years, 'temps': meds,
+                       'min_temps': lo, 'max_temps': hi})
+            ax1.fill_between(years, lo, hi, color=fill, zorder=1)
+            ax1.plot(years, meds, color=col, alpha=0.8, linestyle='-',
+                     linewidth=3.75, zorder=2)
+            ax1.scatter(years, meds, color=col, s=60, zorder=3)
+            try:
+                sl, ic, rv, pv, _ = stats.linregress(years, meds)
+                r2 = rv ** 2
+                ax1.plot(years, ic + sl * years, color=col,
+                         linestyle=':', linewidth=3, zorder=1)
+                eq   = f"{lst_time.capitalize()}: y = {sl:.4f}x + {ic:.2f}"
+                st   = (f"R² = {r2:.3f}, p<{pv:.2f}*" if pv < 0.05
+                        else f"R² = {r2:.3f}, p={pv:.3f}")
+                wm   = sl * 10
+                tc   = sl * (years[-1] - years[0])
+                txt  = f"{eq}\n{st}\nWarming: {wm:.2f}°C/decade ({tc:.2f}°C total)"
+                _d.update({'trend_text': txt, 'color': col})
+            except Exception:
+                pass
+
+        _BOX_POS = {'day': (0.02, 0.95, 'top'), 'night': (0.01, 0.03, 'bottom')}
+        for lst_time in ['day', 'night']:
+            d = day_data if lst_time == 'day' else night_data
+            if d and 'trend_text' in d:
+                xp, yp, va = _BOX_POS[lst_time]
+                ax1.text(xp, yp, d['trend_text'], transform=ax1.transAxes,
+                         fontsize=15, va=va,
+                         bbox=dict(boxstyle='round,pad=0.5', facecolor='white',
+                                   alpha=0.6, edgecolor=d['color'], linewidth=2),
+                         color=d['color'], fontweight='bold')
+        for lst_time in ['day', 'night']:
+            d = day_data if lst_time == 'day' else night_data
+            if not d:
+                continue
+            years, meds, col = d['years'], d['temps'], DAY_COLOR if lst_time == 'day' else NIGHT_COLOR
+            yr   = ax1.get_ylim()[1] - ax1.get_ylim()[0] if ax1.get_ylim()[1] != ax1.get_ylim()[0] else 10
+            off  = yr * 0.03
+            ax1.annotate(f"{years[-1]}: {meds[-1]:.1f}°C",
+                         xy=(years[-1], meds[-1]),
+                         xytext=(years[-1], _safe_y(ax1, years[-1], meds[-1], off)),
+                         ha='center', va='top', fontsize=12, fontweight='bold',
+                         color=col,
+                         bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                                   edgecolor=col, alpha=0.9),
+                         arrowprops=dict(arrowstyle='->', color=col, lw=1))
+            mi   = int(np.argmin(meds))
+            ax1.annotate(f"{years[mi]}: {meds[mi]:.1f}°C",
+                         xy=(years[mi], meds[mi]),
+                         xytext=(years[mi], _safe_y(ax1, years[mi], meds[mi], -off)),
+                         ha='center', va='top', fontsize=12, fontweight='bold',
+                         color=col,
+                         bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                                   edgecolor=col, alpha=0.9),
+                         arrowprops=dict(arrowstyle='->', color=col, lw=1))
+
+        ax1.set_xlabel("Year", fontsize=18)
+        ax1.set_ylabel("LST (°C)", fontsize=18)
+        ax1.grid(True, linestyle='--', alpha=0.6)
+        ax1.tick_params(axis='both', labelsize=15)
+        ax1.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+        ax1.xaxis.set_major_formatter(ticker.FormatStrFormatter('%d'))
+
+        # ── Right panel: monthly climatology ───────────────────────────
+        ax2.set_title("Monthly LST Climatology", fontsize=21, pad=20)
+        day_data   = {}
+        night_data = {}
+        for lst_time in lst_time_options:
+            time_df  = city_df[city_df['day_night'] == lst_time]
+            monthly  = time_df[
+                (time_df['time_period_type'] == 'monthly') &
+                (time_df['is_climatology'] == True)
+            ].sort_values('time_period')
+            if monthly.empty:
+                monthly = time_df[
+                    time_df['time_period_type'] == 'monthly'
+                ].sort_values('time_period')
+            if monthly.empty:
+                continue
+            months = monthly['time_period'].values.astype(int)
+            meds   = monthly['lst_median'].values
+            lo, hi = monthly['lst_min'].values, monthly['lst_max'].values
+            all_temps.extend(lo); all_temps.extend(hi)
+            col, fill, _d = ((DAY_COLOR, DAY_FILL, day_data)
+                             if lst_time == 'day'
+                             else (NIGHT_COLOR, NIGHT_FILL, night_data))
+            _d.update({'months': months, 'temps': meds})
+            ax2.fill_between(months, lo, hi, color=fill, zorder=1)
+            ax2.plot(months, meds, color=col, alpha=0.8, linestyle='-',
+                     linewidth=3.75, zorder=2)
+            ax2.scatter(months, meds, color=col, s=60, zorder=3)
+            yr2 = max(all_temps) - min(all_temps) if all_temps else 10
+            off2 = yr2 * 0.05
+            maxi = int(np.argmax(meds)); mini = int(np.argmin(meds))
+            for mi, sym in [(maxi, (months[maxi], meds[maxi])),
+                             (mini, (months[mini], meds[mini]))]:
+                off_dir = off2 if mi == maxi else -off2
+                ax2.annotate(
+                    f"{MONTH_ABBRS[sym[0]]}: {sym[1]:.1f}°C",
+                    xy=sym,
+                    xytext=(sym[0], _safe_y(ax2, sym[0], sym[1], off_dir)),
+                    ha='center', va='top', fontsize=15, fontweight='bold',
+                    color=col,
+                    bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                              edgecolor=col, alpha=0.9),
+                    arrowprops=dict(arrowstyle='->', color=col, lw=1.5))
+            amp = float(meds.max() - meds.min())
+            stats_txt = f"Monthly amplitude: {amp:.1f}°C\nStd Dev: {float(np.std(meds)):.1f}°C"
+            _d.update({'monthly_stats_text': stats_txt, 'color': col})
+
+        _BOX_POS2 = {'day': (0.98, 0.95, 'top', 'right'),
+                     'night': (0.99, 0.03, 'bottom', 'right')}
+        for lst_time in ['day', 'night']:
+            d = day_data if lst_time == 'day' else night_data
+            if d and 'monthly_stats_text' in d:
+                xp, yp, va, ha = _BOX_POS2[lst_time]
+                ax2.text(xp, yp, d['monthly_stats_text'], transform=ax2.transAxes,
+                         fontsize=12, va=va, ha=ha,
+                         bbox=dict(boxstyle='round,pad=0.5', facecolor='white',
+                                   alpha=0.6, edgecolor=d['color'], linewidth=1),
+                         color=d['color'], fontweight='bold')
+
+        ax2.set_xlabel("Month", fontsize=18)
+        ax2.set_xticks(range(1, 13))
+        ax2.set_xticklabels([MONTH_ABBRS[i] for i in range(1, 13)])
+        ax2.grid(True, linestyle='--', alpha=0.6)
+        ax2.tick_params(axis='both', labelsize=15)
+
+        if all_temps:
+            ym, yM  = min(all_temps), max(all_temps)
+            margin  = (yM - ym) * 0.1
+            ax1.set_ylim(ym - margin, yM + margin)
+            ax2.set_ylim(ym - margin, yM + margin)
+
+        _plt.tight_layout(rect=[0, 0.03, 1, 0.92])
+        out_png = os.path.join(figures_dir, f"{city_name}_LST_Trends_Combined2.png")
+        out_pdf = os.path.join(figures_dir, f"{city_name}_LST_Trends_Combined2.pdf")
+        _plt.savefig(out_png, dpi=DPI, bbox_inches='tight')
+        _plt.savefig(out_pdf, bbox_inches='tight')
+        _plt.close(fig)
+        print(f"✅ Saved trend plots for {city_name}")
+
+    # ── Standalone legend ─────────────────────────────────────────────
+    legend_dir = os.path.join(project_config['lst_output_dir'], 'Stats')
+    os.makedirs(legend_dir, exist_ok=True)
+    leg_fig, leg_ax = _plt.subplots(figsize=(12, 3), dpi=300)
+    leg_ax.axis('off')
+    leg_handles = [
+        Line2D([0], [0], color=DAY_COLOR,   linewidth=3.75, label='Day-time Median'),
+        Line2D([0], [0], color=DAY_COLOR,   linewidth=3, linestyle=':',
+               label='Day Trend Line'),
+        mpatches.Patch(color=DAY_FILL,    label='Day Min-Max Range'),
+        Line2D([0], [0], color=NIGHT_COLOR, linewidth=3.75, label='Night-time Median'),
+        Line2D([0], [0], color=NIGHT_COLOR, linewidth=3, linestyle=':',
+               label='Night Trend Line'),
+        mpatches.Patch(color=NIGHT_FILL,  label='Night Min-Max Range'),
+    ]
+    leg = leg_ax.legend(handles=leg_handles, loc='center', ncol=3, fontsize=14,
+                        frameon=True, fancybox=True, shadow=True,
+                        framealpha=0.9, edgecolor='black')
+    leg.get_frame().set_linewidth(1.5)
+    leg_fig.tight_layout()
+    leg_png = os.path.join(legend_dir, "LST_Trend_Plot_Legend.png")
+    leg_pdf = os.path.join(legend_dir, "LST_Trend_Plot_Legend.pdf")
+    leg_fig.savefig(leg_png, dpi=300, bbox_inches='tight',
+                    facecolor='white', edgecolor='none')
+    leg_fig.savefig(leg_pdf, bbox_inches='tight',
+                    facecolor='white', edgecolor='none')
+    _plt.close(leg_fig)
+    print(f"✅ Legend saved: {leg_png}")
+
+    for city_name, aoi_info in aoi_data.items():
+        cf = os.path.join(project_config['lst_output_dir'], f'City_{city_name}',
+                          'LST_Temporal_Analysis', 'Figures')
+        if os.path.exists(cf):
+            shutil.copy2(leg_png, os.path.join(cf, f"{city_name}_LST_Trend_Legend.png"))
+            shutil.copy2(leg_pdf, os.path.join(cf, f"{city_name}_LST_Trend_Legend.pdf"))
+
+
+def create_trend_category_chart(summary_csv_path, output_dir):
+    """
+    Create the Block 9a grouped bar chart: cities vs. LST trend categories.
+
+    Reads ``City_LST_Enhanced_Summary.csv`` and saves
+    ``Trend_Category_Summary_Chart.png/.pdf`` into *output_dir*.
+
+    Parameters
+    ----------
+    summary_csv_path : str  Path to City_LST_Enhanced_Summary.csv
+    output_dir       : str  Directory where output files are saved
+    """
+    import os
+    import re
+    import numpy as np
+    import pandas as pd
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as _plt
+    import matplotlib.ticker as mticker
+
+    if not os.path.exists(summary_csv_path):
+        print(f"❌ Summary file not found: {summary_csv_path}")
+        return
+
+    df = pd.read_csv(summary_csv_path)
+    os.makedirs(output_dir, exist_ok=True)
+
+    def _slope(val):
+        m = re.search(r'([-+]?\d+\.?\d*)\s*°C/year', str(val))
+        return float(m.group(1)) if m else 0.0
+
+    def _is_sig(val):
+        s = str(val).lower()
+        if 'not significant' in s:
+            return False
+        m = re.search(r'p\s*=\s*([\d.]+)', s)
+        if m:
+            return float(m.group(1)) < 0.05
+        return ('increasing trend' in s or 'decreasing trend' in s)
+
+    CATS       = ['Significant Warming', 'Significant Cooling',
+                  'Insignificant Warming', 'No Trend / Insig. Cooling']
+    CAT_COLORS = ['#d73027', '#4575b4', '#fdae61', '#abd9e9']
+
+    def _cat(row):
+        sl, sg = _slope(row.get('Warming Rate', '')), _is_sig(row.get('Trend Significance', ''))
+        if sg   and sl > 0: return 'Significant Warming'
+        elif sg and sl < 0: return 'Significant Cooling'
+        elif sl > 0:        return 'Insignificant Warming'
+        else:               return 'No Trend / Insig. Cooling'
+
+    df['_cat'] = df.apply(_cat, axis=1)
+
+    tc = next((c for c in df.columns
+               if c.strip().lower() in ('time', 'day_night', 'lst_time')), None)
+    if tc is None:
+        print("❌ Could not find time column in CSV"); return
+
+    df['_tnorm'] = df[tc].str.strip().str.capitalize()
+    counts = {}
+    for t in ['Day', 'Night']:
+        sub = df[df['_tnorm'] == t]
+        if not sub.empty:
+            counts[t] = {c: int((sub['_cat'] == c).sum()) for c in CATS}
+
+    if not counts:
+        print("❌ No data to plot"); return
+
+    x     = np.arange(len(CATS))
+    bw    = 0.35
+    n_t   = len(counts)
+    TS    = {'Day': {'hatch': '', 'alpha': 0.88},
+             'Night': {'hatch': '//', 'alpha': 0.75}}
+
+    fig, ax = _plt.subplots(figsize=(13, 6))
+    for i, (t, cnt) in enumerate(counts.items()):
+        vals   = [cnt.get(c, 0) for c in CATS]
+        offset = (i - (n_t - 1) / 2) * bw
+        st     = TS.get(t, {'hatch': '', 'alpha': 0.88})
+        bars   = ax.bar(x + offset, vals, bw, label=f'{t}-time',
+                        color=[CAT_COLORS[j] for j in range(len(CATS))],
+                        edgecolor='white', linewidth=0.8,
+                        alpha=st['alpha'], hatch=st['hatch'])
+        for bar, v in zip(bars, vals):
+            if v > 0:
+                ax.text(bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() + 0.15, str(v),
+                        ha='center', va='bottom', fontsize=11, fontweight='bold')
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(CATS, fontsize=12)
+    ax.set_ylabel('Number of Cities', fontsize=13)
+    ax.set_title('LST Trend Category Summary — All Cities',
+                 fontsize=15, fontweight='bold', pad=14)
+    ax.legend(fontsize=12)
+    ax.set_ylim(0, max(max(v for d in counts.values() for v in d.values()), 1) + 2)
+    ax.yaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+    ax.grid(axis='y', linestyle='--', alpha=0.5)
+    ax.spines[['top', 'right']].set_visible(False)
+    _plt.tight_layout()
+
+    chart_png = os.path.join(output_dir, 'Trend_Category_Summary_Chart.png')
+    chart_pdf = os.path.join(output_dir, 'Trend_Category_Summary_Chart.pdf')
+    fig.savefig(chart_png, dpi=400, bbox_inches='tight')
+    fig.savefig(chart_pdf, bbox_inches='tight')
+    _plt.close(fig)
+    print(f"✅ Trend Category Chart → {chart_png}")
+
+
+def create_annual_lst_violin_chart(all_stats_csv_path, output_dir, lst_config):
+    """
+    Create the Block 9b butterfly half-violin chart.
+
+    One figure, one shared LST x-axis (10–46°C).
+    Cities on the y-axis (warmest → top).
+    Night-time half-violins grow leftward; Day-time grow rightward.
+
+    Parameters
+    ----------
+    all_stats_csv_path : str   Path to All_Cities_LST_Statistics.csv
+    output_dir         : str   Directory where output files are saved
+    lst_config         : dict  (config.LST_CONFIG)
+    """
+    import os
+    import numpy as np
+    import pandas as pd
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot       as _plt
+    import matplotlib.ticker       as _ticker
+    import matplotlib.lines        as _mlines
+    import matplotlib.patches      as _mpatch
+    from scipy.stats import gaussian_kde as _kde
+
+    if not os.path.exists(all_stats_csv_path):
+        print(f"❌ Not found: {all_stats_csv_path}"); return
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    all_df = pd.read_csv(all_stats_csv_path)
+    yr_df  = all_df[
+        (all_df['time_period_type'] == 'yearly') &
+        (all_df['is_climatology'] == False)
+    ].copy()
+    yr_df['year'] = yr_df['time_period'].astype(int)
+
+    available = yr_df['day_night'].unique().tolist()
+    lst_times = [t for t in ['day', 'night'] if t in available]
+    if lst_config['lst_time'] != 'both':
+        lst_times = [t for t in lst_times if t == lst_config['lst_time']]
+
+    if not lst_times:
+        print("❌ No yearly data found"); return
+
+    ref_time     = 'day' if 'day' in lst_times else lst_times[0]
+    city_means   = (yr_df[yr_df['day_night'] == ref_time]
+                    .groupby('city')['lst_median'].mean()
+                    .sort_values(ascending=False))
+    sorted_cities = city_means.index.tolist()
+    n             = len(sorted_cities)
+    city_ypos     = {c: i + 1 for i, c in enumerate(sorted_cities)}
+
+    X_MIN, X_MAX = 10, 46
+    VLINE_X      = 27.0
+    DAY_COLOR    = '#FF7F0E'
+    NIGHT_COLOR  = '#555555'
+    HALF_W       = 0.38
+    KDE_PTS      = 300
+
+    fig, ax = _plt.subplots(figsize=(13.0, max(5.0, n * 0.42)))
+
+    def _draw_hv(data, y0, side, color):
+        if len(data) < 2:
+            return
+        xlo = max(data.min() - 0.5, X_MIN)
+        xhi = min(data.max() + 0.5, X_MAX)
+        xg  = np.linspace(xlo, xhi, KDE_PTS)
+        try:
+            sigma = np.std(data)
+            bw    = max(0.3, sigma * 0.35)
+            kde   = _kde(data, bw_method=bw / (sigma if sigma > 0 else 1))
+            dens  = kde(xg)
+        except Exception:
+            return
+        dn = dens / dens.max() * HALF_W if dens.max() > 0 else dens
+
+        if side == 'right':
+            yl, yh = np.full_like(xg, y0), y0 + dn
+        else:
+            yl, yh = y0 - dn, np.full_like(xg, y0)
+
+        ax.fill_between(xg, yl, yh, color=color, alpha=0.48, linewidth=0)
+        ax.plot(xg, yh, color=color, linewidth=0.9, alpha=0.85)
+        ax.plot(xg, yl, color=color, linewidth=0.9, alpha=0.85)
+        med  = float(np.median(data))
+        medn = float(np.interp(med, xg, dn))
+        if side == 'right':
+            ax.plot([med, med], [y0, y0 + medn],
+                    color=color, linewidth=2.5, solid_capstyle='round', zorder=5)
+        else:
+            ax.plot([med, med], [y0 - medn, y0],
+                    color=color, linewidth=2.5, solid_capstyle='round', zorder=5)
+
+    has_hot = has_cool = False
+    for city in sorted_cities:
+        y0 = city_ypos[city]
+        for lst_time in lst_times:
+            col  = DAY_COLOR  if lst_time == 'day' else NIGHT_COLOR
+            side = 'right'    if lst_time == 'day' else 'left'
+            vals = yr_df[(yr_df['day_night'] == lst_time) &
+                         (yr_df['city'] == city)]['lst_median'].dropna().values
+            _draw_hv(vals, y0, side, col)
+            if len(vals) > 0:
+                dy = 0.10 if lst_time == 'day' else -0.10
+                ax.scatter(vals.max(), y0 + dy, color='#d73027', s=48, zorder=7,
+                           linewidths=0,
+                           label='Hottest year' if not has_hot else '')
+                ax.scatter(vals.min(), y0 + dy, color='#4575b4', s=48, zorder=7,
+                           linewidths=0,
+                           label='Coolest year' if not has_cool else '')
+                has_hot = has_cool = True
+
+    ax.set_xlim(X_MIN, X_MAX)
+    ax.set_ylim(n + 0.7, 0.3)
+    ax.set_xlabel('Annual Median LST (°C)', fontsize=12)
+    ax.xaxis.set_major_locator(_ticker.MultipleLocator(4))
+    ax.xaxis.set_minor_locator(_ticker.MultipleLocator(2))
+    ax.grid(axis='x', which='major', linestyle='--', alpha=0.45)
+    ax.grid(axis='x', which='minor', linestyle=':', alpha=0.25)
+    ax.set_yticks(list(range(1, n + 1)))
+    ax.set_yticklabels(sorted_cities, fontsize=max(6, 10 - n // 12))
+    ax.tick_params(axis='y', length=0)
+    ax.spines[['top', 'right']].set_visible(False)
+
+    ax.axvline(VLINE_X, color='#444444', linewidth=1.2,
+               linestyle='--', alpha=0.7, zorder=3)
+    ax.text(VLINE_X - 0.35, 0.25, '◀ Night-time',
+            fontsize=9, color=NIGHT_COLOR, fontweight='bold',
+            ha='right', va='center', transform=ax.get_xaxis_transform())
+    ax.text(VLINE_X + 0.35, 0.25, 'Day-time ▶',
+            fontsize=9, color=DAY_COLOR, fontweight='bold',
+            ha='left', va='center', transform=ax.get_xaxis_transform())
+
+    leg_handles = [
+        _mpatch.Patch(facecolor=NIGHT_COLOR, alpha=0.55, label='Night-time LST'),
+        _mpatch.Patch(facecolor=DAY_COLOR,   alpha=0.55, label='Day-time LST'),
+        _mlines.Line2D([], [], marker='o', color='w', markerfacecolor='#d73027',
+                       markersize=7, label='Hottest year'),
+        _mlines.Line2D([], [], marker='o', color='w', markerfacecolor='#4575b4',
+                       markersize=7, label='Coolest year'),
+    ]
+    ax.legend(handles=leg_handles, fontsize=9, loc='lower right', framealpha=0.85)
+    ax.set_title(
+        'Annual LST Distribution per City  '
+        '—  Night-time (left) vs Day-time (right)\n'
+        'Cities sorted warmest → coolest  ·  '
+        'Red = hottest year  ·  Blue = coolest year',
+        fontsize=11, fontweight='bold', pad=10)
+
+    _plt.tight_layout()
+    out_png = os.path.join(output_dir, 'Annual_LST_Violin_Chart.png')
+    out_pdf = os.path.join(output_dir, 'Annual_LST_Violin_Chart.pdf')
+    fig.savefig(out_png, dpi=400, bbox_inches='tight')
+    fig.savefig(out_pdf, bbox_inches='tight')
+    _plt.close(fig)
+    print(f"✅ Annual LST Violin Chart → {out_png}")
+
+
+def create_stakeholder_validation_chart(validation_df, output_dir,
+                                        chart_type='annual'):
+    """
+    Create multi-layer donut / sunburst chart comparing stakeholder
+    warming perceptions with actual LST trends.
+
+    Equivalent to Notebook 03 Cells 29 (annual) & 30 (monthly).
+
+    Parameters
+    ----------
+    validation_df : pd.DataFrame
+        For annual chart columns: city, n_stakeholders, pct_of_total,
+        pct_perceived_warming, overall_agreement, duration_counts,
+        day_significance, night_significance.
+        For monthly chart cols additionally: lst_day_hottest,
+        lst_night_hottest.
+    output_dir : str
+        Directory where PNG/PDF are saved.
+    chart_type : str
+        'annual' (default) or 'monthly'.
+    """
+    import os
+    import math
+    import numpy as np
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as _plt
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    AGREE_COLOR    = '#0000FF'
+    DISAGREE_COLOR = '#FF0000'
+    DUR_COLORS     = {
+        'Within the last 5 years': '#FFD700',
+        'Between 5 - 10 years':    '#4169E1',
+        'Between 11 - 15 years':   '#32CD32',
+        'Over 15 years':           '#8B008B',
+    }
+    DUR_CATS = list(DUR_COLORS.keys())
+
+    valid_df    = validation_df[validation_df['n_stakeholders'] > 0].copy()
+    n_cities    = len(valid_df)
+    total_stake = valid_df['n_stakeholders'].sum()
+    max_cols    = min(5, n_cities)
+    n_rows      = math.ceil(n_cities / max_cols)
+    fig_w       = 8 * max_cols
+    fig_h       = 8 * n_rows + 3
+
+    fig  = _plt.figure(figsize=(fig_w, fig_h))
+    hr   = [5] * n_rows + [1]
+    gs   = fig.add_gridspec(n_rows + 1, max_cols, height_ratios=hr, hspace=0.3)
+
+    for i, (_, row) in enumerate(valid_df.iterrows()):
+        ax        = fig.add_subplot(gs[i // max_cols, i % max_cols])
+        city      = row['city']
+        n_s       = row['n_stakeholders']
+        pct_tot   = row['pct_of_total']
+        agree     = row['overall_agreement']
+        dur       = row.get('duration_counts', {})
+        if not isinstance(dur, dict):
+            dur = {}
+
+        # Layer 1 (inner): city proportion
+        ax.pie([n_s, total_stake - n_s], radius=0.5,
+               colors=['#FFA500', '#E0E0E0'],
+               wedgeprops=dict(width=0.2, edgecolor='white', linewidth=2),
+               startangle=90)
+
+        # Layer 2 (middle): agreement
+        if not np.isnan(agree):
+            ax.pie([agree, 100 - agree], radius=0.7,
+                   colors=[AGREE_COLOR, DISAGREE_COLOR],
+                   wedgeprops=dict(width=0.2, edgecolor='white', linewidth=2),
+                   startangle=90)
+
+        # Layer 3 (outer): duration
+        d3s = [(float(dur.get(dc, 0)), DUR_COLORS[dc])
+               for dc in DUR_CATS if dur.get(dc, 0) > 0]
+        if d3s:
+            ax.pie([s for s, _ in d3s], radius=0.9,
+                   colors=[c for _, c in d3s],
+                   wedgeprops=dict(width=0.2, edgecolor='white', linewidth=2),
+                   startangle=90)
+
+        ax.text(0, 0.15, city, ha='center', va='center',
+                fontsize=18, fontweight='bold')
+        ax.text(0, -0.05, str(n_s), ha='center', va='center',
+                fontsize=32, fontweight='bold')
+        ax.text(0, -0.25, f"({pct_tot:.1f}%)", ha='center', va='center',
+                fontsize=14)
+
+        if chart_type == 'annual':
+            title_txt = (f"Day: {row.get('day_significance','N/A')}, "
+                         f"Night: {row.get('night_significance','N/A')}")
+        else:
+            title_txt = (f"Day: {row.get('lst_day_hottest','N/A')}, "
+                         f"Night: {row.get('lst_night_hottest','N/A')}")
+        ax.text(0.5, 0.92, title_txt, transform=ax.transAxes,
+                fontsize=12, ha='center', va='top',
+                bbox=dict(boxstyle='round,pad=0.5', facecolor='lightyellow',
+                          edgecolor='gray', linewidth=1))
+        ax.set_aspect('equal')
+
+    # Legend
+    leg_ax = fig.add_subplot(gs[n_rows, :])
+    leg_ax.axis('off')
+    leg_els = [
+        _plt.Line2D([0], [0], marker='s', color='w',
+                    markerfacecolor=AGREE_COLOR, markersize=20,
+                    label='  Agrees with LST trend'),
+        _plt.Line2D([0], [0], marker='s', color='w',
+                    markerfacecolor=DISAGREE_COLOR, markersize=20,
+                    label='  Disagrees with LST trend'),
+    ]
+    for dc in DUR_CATS:
+        leg_els.append(_plt.Line2D(
+            [0], [0], marker='s', color='w',
+            markerfacecolor=DUR_COLORS[dc], markersize=20,
+            label=f'  {dc}'))
+    leg_ax.legend(handles=leg_els, loc='center', ncol=3,
+                  frameon=False, fontsize=14, handletextpad=0.5, columnspacing=2)
+
+    if chart_type == 'annual':
+        title  = (f"Annual Validation: Multi-Layer Donuts "
+                  f"(Total: {total_stake} stakeholders)\n"
+                  f"Inner: City Proportion | Middle: Annual Trend Agreement "
+                  f"| Outer: Duration")
+        fstem  = 'Stakeholder_Validation_Sunburst_Chart'
+    else:
+        title  = (f"Monthly Peak Validation: Multi-Layer Split Donuts "
+                  f"(Total: {total_stake} stakeholders)\n"
+                  f"Inner: City Proportion | Middle: Monthly Peak Agreement "
+                  f"(Day OR Night) | Outer: Duration")
+        fstem  = 'Stakeholder_Validation_Monthly_Sunburst_Chart'
+
+    fig.suptitle(title, fontsize=16, fontweight='bold', y=0.98)
+    _plt.tight_layout()
+
+    out_png = os.path.join(output_dir, f'{fstem}.png')
+    out_pdf = os.path.join(output_dir, f'{fstem}.pdf')
+    fig.savefig(out_png, dpi=300, bbox_inches='tight', facecolor='white')
+    fig.savefig(out_pdf, bbox_inches='tight', facecolor='white')
+    _plt.close(fig)
+    print(f"✅ Stakeholder validation chart ({chart_type}) → {out_png}")
+
+
+# ====================================================================
+# OPTION A: PAIRED DOT PLOT
+# ====================================================================
+
+def create_paired_dot_plot(cities_data, base_dir=None, study_year=2024, dpi=200):
+    """
+    Create a paired dot plot showing mean LST ± 1 SD for day and night
+    persistent heat events, with a 2-layer donut inset summarising
+    danger-zone counts.
+
+    Each city gets two markers (Day = diamond, Night = circle) connected
+    by a thin line.  Filled markers denote cities exceeding the overall
+    mean (danger zone); hollow markers sit below the mean.  Whiskers
+    span ± 1 standard deviation.  A 2-layer donut inset (inner = Day/Night
+    totals as dotted outlines; outer = Danger/Normal filled wedges)
+    provides a compact summary.
+
+    Parameters
+    ----------
+    cities_data : dict
+        ``{city_name: {'day_file': str, 'night_file': str, ...}}``.
+        Each value must contain ``'day_file'`` and ``'night_file'``
+        pointing to single-band GeoTIFF rasters of persistent-heat
+        mean LST.
+    base_dir : str or Path, optional
+        Directory for saving PNG + PDF.  If *None* the figure is
+        returned without saving.
+    study_year : int, optional
+        Year label used in the title and filename (default 2024).
+    dpi : int, optional
+        Screen DPI for the figure (default 200); saved at 300 DPI.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The finished figure (caller should ``display()`` / ``plt.close()``).
+
+    Examples
+    --------
+    >>> fig = create_paired_dot_plot(cities_data, base_dir='outputs',
+    ...                              study_year=2024)
+    >>> display(fig); plt.close(fig)
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.patheffects as pe
+    import numpy as np
+    import rasterio
+    from pathlib import Path
+    from matplotlib.lines import Line2D
+
+    # -- Colour palette (matches project-wide constants) ----------------
+    DAY_FILL     = '#FF8C00'
+    DAY_HOLLOW   = '#FFB366'
+    NIGHT_FILL   = '#444444'
+    NIGHT_HOLLOW = '#999999'
+    EXCEED_EDGE  = '#CC0000'
+
+    # -- 1  Gather stats from raster files ------------------------------
+    dot_data = []
+    for city_name, city_data in cities_data.items():
+        row = {'city': city_name}
+        for period in ['day', 'night']:
+            if period in city_data and f'{period}_file' in city_data:
+                lst_file = city_data[f'{period}_file']
+                if lst_file and Path(lst_file).exists():
+                    try:
+                        with rasterio.open(lst_file) as src:
+                            d = src.read(1)
+                            v = d[~np.isnan(d)]
+                            if len(v) > 0:
+                                row[f'{period}_mean'] = float(np.mean(v))
+                                row[f'{period}_std']  = float(np.std(v))
+                                row[f'{period}_min']  = float(np.min(v))
+                                row[f'{period}_max']  = float(np.max(v))
+                            else:
+                                row[f'{period}_mean'] = np.nan
+                    except Exception:
+                        row[f'{period}_mean'] = np.nan
+        dot_data.append(row)
+
+    # -- 2  Sort hottest → coolest (combined day+night mean) -----------
+    def _sort_key(r):
+        dm = r.get('day_mean', np.nan)
+        nm = r.get('night_mean', np.nan)
+        dm = dm if not np.isnan(dm) else 0
+        nm = nm if not np.isnan(nm) else 0
+        return dm + nm
+
+    dot_data.sort(key=_sort_key, reverse=True)
+
+    cities_list  = [r['city'] for r in dot_data]
+    day_means    = np.array([r.get('day_mean', np.nan) for r in dot_data])
+    day_stds     = np.array([r.get('day_std', np.nan)  for r in dot_data])
+    night_means  = np.array([r.get('night_mean', np.nan) for r in dot_data])
+    night_stds   = np.array([r.get('night_std', np.nan)  for r in dot_data])
+
+    day_overall   = np.nanmean(day_means)
+    night_overall = np.nanmean(night_means)
+
+    n = len(cities_list)
+    y = np.arange(n)
+
+    # -- 3  Build figure (A4-portrait: ~190 mm × 260 mm usable) --------
+    fig, ax = plt.subplots(figsize=(7.5, 10.2), dpi=dpi)
+
+    for i in range(n):
+        dm, ds = day_means[i], day_stds[i]
+        nm, ns = night_means[i], night_stds[i]
+        has_day   = not np.isnan(dm)
+        has_night = not np.isnan(nm)
+
+        # Connecting line
+        if has_day and has_night:
+            ax.plot([nm, dm], [i, i], color='#BBBBBB', lw=1.2, zorder=1)
+
+        # Night dot + whisker
+        if has_night:
+            ns_val = ns if not np.isnan(ns) else 0
+            exceeds_night = nm > night_overall
+            fc = NIGHT_FILL if exceeds_night else 'white'
+            ec = EXCEED_EDGE if exceeds_night else NIGHT_HOLLOW
+            ax.plot([nm - ns_val, nm + ns_val], [i, i],
+                    color=NIGHT_HOLLOW, lw=2.5, solid_capstyle='round', zorder=2)
+            ax.scatter(nm, i, s=55, c=fc, edgecolors=ec, linewidths=1.3,
+                       zorder=3, marker='o')
+            if exceeds_night:
+                ax.annotate(f'{nm:.1f}', xy=(nm, i), xytext=(4, -6),
+                            textcoords='offset points', fontsize=5.5,
+                            fontweight='bold', color='#444444',
+                            ha='left', va='top', zorder=5)
+
+        # Day dot + whisker
+        if has_day:
+            ds_val = ds if not np.isnan(ds) else 0
+            exceeds_day = dm > day_overall
+            fc = DAY_FILL if exceeds_day else 'white'
+            ec = EXCEED_EDGE if exceeds_day else DAY_HOLLOW
+            ax.plot([dm - ds_val, dm + ds_val], [i, i],
+                    color=DAY_HOLLOW, lw=2.5, solid_capstyle='round', zorder=2)
+            ax.scatter(dm, i, s=55, c=fc, edgecolors=ec, linewidths=1.3,
+                       zorder=3, marker='D')
+            if exceeds_day:
+                ax.annotate(f'{dm:.1f}', xy=(dm, i), xytext=(4, -6),
+                            textcoords='offset points', fontsize=5.5,
+                            fontweight='bold', color='#CC5500',
+                            ha='left', va='top', zorder=5)
+
+    # Reference lines
+    ax.axvline(day_overall, color='#FF8C00', ls='--', lw=1.2, alpha=0.7,
+               zorder=0, label=f'Day Mean: {day_overall:.1f} C')
+    ax.axvline(night_overall, color='#666666', ls='--', lw=1.2, alpha=0.7,
+               zorder=0, label=f'Night Mean: {night_overall:.1f} C')
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(cities_list, fontsize=9)
+    ax.invert_yaxis()
+    ax.set_xlabel('Mean LST (\u00b0C)', fontsize=10)
+    ax.set_ylabel('Cities (sorted hottest \u2192 coolest)', fontsize=10)
+    ax.set_title(
+        f'Persistent Heat Event: Day vs Night Mean LST \u00b1 1 SD \u2013 {study_year}\n'
+        f'Filled markers = exceeding overall mean  |  Whiskers = \u00b11 SD',
+        fontsize=10, fontweight='bold')
+    ax.grid(axis='x', alpha=0.25)
+
+    # Legend
+    legend_elements = [
+        Line2D([0], [0], marker='D', color='w', markerfacecolor=DAY_FILL,
+               markeredgecolor=EXCEED_EDGE, markersize=8,
+               label='Day > Mean (danger)'),
+        Line2D([0], [0], marker='D', color='w', markerfacecolor='white',
+               markeredgecolor=DAY_HOLLOW, markersize=8,
+               label='Day \u2264 Mean'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor=NIGHT_FILL,
+               markeredgecolor=EXCEED_EDGE, markersize=8,
+               label='Night > Mean (danger)'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='white',
+               markeredgecolor=NIGHT_HOLLOW, markersize=8,
+               label='Night \u2264 Mean'),
+        Line2D([0], [0], color=DAY_HOLLOW, lw=2.5, label='\u00b11 SD (Day)'),
+        Line2D([0], [0], color=NIGHT_HOLLOW, lw=2.5, label='\u00b11 SD (Night)'),
+        Line2D([0], [0], color='#BBBBBB', lw=1.2, label='Day\u2013Night gap'),
+    ]
+    ax.legend(handles=legend_elements, loc='lower right', fontsize=7,
+              framealpha=0.9)
+
+    # -- 4  Inset 2-layer donut summary --------------------------------
+    _halo = [pe.withStroke(linewidth=2.5, foreground='white')]
+
+    day_valid   = ~np.isnan(day_means)
+    night_valid = ~np.isnan(night_means)
+    n_day       = int(np.sum(day_valid))
+    n_night     = int(np.sum(night_valid))
+    day_danger   = int(np.sum(day_means[day_valid] > day_overall))
+    day_normal   = n_day - day_danger
+    night_danger = int(np.sum(night_means[night_valid] > night_overall))
+    night_normal = n_night - night_danger
+
+    ax_donut = fig.add_axes([0.64, 0.23, 0.44, 0.22])
+    ax_donut.set_aspect('equal')
+
+    # Outer ring: Danger | Normal
+    outer_sizes   = [day_danger, day_normal, night_danger, night_normal]
+    outer_colors  = [DAY_FILL, DAY_HOLLOW, NIGHT_FILL, NIGHT_HOLLOW]
+    outer_edges   = [EXCEED_EDGE, DAY_HOLLOW, EXCEED_EDGE, NIGHT_HOLLOW]
+    outer_texts   = [f'Danger\n{day_danger}', f'Normal\n{day_normal}',
+                     f'Danger\n{night_danger}', f'Normal\n{night_normal}']
+    outer_tcolors = ['#8B0000', '#7A4800', 'black', '#333333']
+
+    wedges_o, _ = ax_donut.pie(
+        outer_sizes, colors=outer_colors, radius=1.0,
+        wedgeprops=dict(width=0.30, linewidth=1.5),
+        startangle=90, counterclock=False)
+    for w, ec in zip(wedges_o, outer_edges):
+        w.set_edgecolor(ec)
+
+    for w, lbl, tc in zip(wedges_o, outer_texts, outer_tcolors):
+        ang = (w.theta1 + w.theta2) / 2
+        x_pos = 0.85 * np.cos(np.radians(ang))
+        y_pos = 0.85 * np.sin(np.radians(ang))
+        ax_donut.text(x_pos, y_pos, lbl, ha='center', va='center',
+                      fontsize=6, fontweight='bold', color=tc,
+                      path_effects=_halo)
+
+    # Inner ring: Day | Night (dotted outlines, no fill)
+    inner_sizes   = [n_day, n_night]
+    inner_colors  = ['none', 'none']
+    inner_edges   = [DAY_FILL, NIGHT_FILL]
+    inner_texts   = [f'Day\n{n_day}', f'Night\n{n_night}']
+    inner_tcolors = [DAY_FILL, NIGHT_FILL]
+
+    wedges_i, _ = ax_donut.pie(
+        inner_sizes, colors=inner_colors, radius=0.70,
+        wedgeprops=dict(width=0.28, linewidth=2.0, linestyle=(0, (3, 2))),
+        startangle=90, counterclock=False)
+    for w, ec in zip(wedges_i, inner_edges):
+        w.set_edgecolor(ec)
+
+    for w, lbl, tc in zip(wedges_i, inner_texts, inner_tcolors):
+        ang = (w.theta1 + w.theta2) / 2
+        x_pos = 0.56 * np.cos(np.radians(ang))
+        y_pos = 0.56 * np.sin(np.radians(ang))
+        ax_donut.text(x_pos, y_pos, lbl, ha='center', va='center',
+                      fontsize=7, fontweight='bold', color=tc,
+                      path_effects=_halo)
+
+    ax_donut.text(0, 0, f'{n}\nCities', ha='center', va='center',
+                  fontsize=9, fontweight='bold', color='#333333')
+    ax_donut.text(0, 1.18, 'Inner: Day | Night', ha='center', va='bottom',
+                  fontsize=5.5, color='#555555', fontstyle='italic',
+                  path_effects=_halo)
+    ax_donut.text(0, -1.18, 'Outer: Danger | Normal', ha='center', va='top',
+                  fontsize=5.5, color='#555555', fontstyle='italic',
+                  path_effects=_halo)
+
+    plt.tight_layout()
+
+    # -- 5  Save --------------------------------------------------------
+    if base_dir is not None:
+        save_dir = Path(base_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        for ext in ['png', 'pdf']:
+            out = save_dir / f'Paired_Dot_Plot_MeanSD_{study_year}.{ext}'
+            fig.savefig(out, dpi=300, bbox_inches='tight')
+        print(f"Saved: Paired_Dot_Plot_MeanSD_{study_year}.png/pdf")
+
+    return fig
+
+
+# ====================================================================
+# OPTION C: DAY-NIGHT SCATTER WITH HEAT DURATION PIE CHARTS
+# ====================================================================
+
+def create_daynight_scatter_pie(cities_data, base_dir=None, study_year=2024, dpi=200):
+    """
+    Create a day-vs-night scatter plot where each city is represented by
+    a pie chart whose size encodes total persistent heat duration and
+    whose slices show the day/night split.
+
+    Quadrant shading highlights danger-zone cities (hot day + hot night).
+    City labels are placed on a transparent overlay axis at high zorder
+    so they render above all pie charts, with ``adjustText`` resolving
+    overlaps and thin leader lines connecting displaced labels to their
+    pie centres.
+
+    Parameters
+    ----------
+    cities_data : dict
+        ``{city_name: {'day_file': str, 'night_file': str,
+        'day_duration': int, 'night_duration': int, ...}}``.
+    base_dir : str or Path, optional
+        Directory for saving PNG + PDF.  ``None`` → no save.
+    study_year : int, optional
+        Year label (default 2024).
+    dpi : int, optional
+        Screen DPI (default 200); saved at 300 DPI.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The finished figure.
+
+    Examples
+    --------
+    >>> fig = create_daynight_scatter_pie(cities_data,
+    ...                                   base_dir='outputs',
+    ...                                   study_year=2024)
+    >>> display(fig); plt.close(fig)
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.patheffects as pe
+    import numpy as np
+    import rasterio
+    from pathlib import Path
+    from matplotlib.patches import Patch
+    from matplotlib.lines import Line2D
+
+    try:
+        from adjustText import adjust_text
+        HAS_ADJUSTTEXT = True
+    except ImportError:
+        HAS_ADJUSTTEXT = False
+
+    # -- 1  Gather data -------------------------------------------------
+    pie_data = []
+    for city_name, city_data in cities_data.items():
+        row = {'city': city_name}
+        for period in ['day', 'night']:
+            if f'{period}_file' in city_data:
+                lst_file = city_data[f'{period}_file']
+                if lst_file and Path(lst_file).exists():
+                    try:
+                        with rasterio.open(lst_file) as src:
+                            arr = src.read(1)
+                            valid = arr[~np.isnan(arr)]
+                            if len(valid) > 0:
+                                row[f'{period}_mean'] = float(np.mean(valid))
+                                row[f'{period}_std']  = float(np.std(valid))
+                    except Exception:
+                        pass
+            dur = city_data.get(f'{period}_duration', 0)
+            row[f'{period}_dur'] = int(dur) if dur else 0
+
+        if 'day_mean' in row and 'night_mean' in row:
+            pie_data.append(row)
+
+    if not pie_data:
+        print("No cities with both day and night data — skipping.")
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.text(0.5, 0.5, 'No data', transform=ax.transAxes,
+                ha='center', va='center')
+        return fig
+
+    n_cities = len(pie_data)
+    names     = [r['city'] for r in pie_data]
+    x_day     = np.array([r['day_mean'] for r in pie_data])
+    y_night   = np.array([r['night_mean'] for r in pie_data])
+    d_dur     = np.array([r.get('day_dur', 0) for r in pie_data])
+    n_dur     = np.array([r.get('night_dur', 0) for r in pie_data])
+    total_dur = d_dur + n_dur
+
+    day_overall   = np.nanmean(x_day)
+    night_overall = np.nanmean(y_night)
+
+    # -- 2  Pie sizing (figure fraction) --------------------------------
+    MIN_PIE = 0.018
+    MAX_PIE = 0.048
+    valid_totals = total_dur[total_dur > 0]
+    min_total = int(valid_totals.min()) if len(valid_totals) > 0 else 1
+    max_total = int(total_dur.max()) if total_dur.max() > 0 else 2
+
+    DAY_COLOR   = '#FF8C00'
+    NIGHT_COLOR = '#444444'
+
+    # -- 3  Figure and main axes ----------------------------------------
+    fig, ax = plt.subplots(figsize=(18, 13), dpi=dpi)
+
+    x_range = x_day.max() - x_day.min()
+    y_range = y_night.max() - y_night.min()
+    x_pad = max(x_range * 0.20, 4.0)
+    y_pad = max(y_range * 0.20, 1.5)
+    ax.set_xlim(x_day.min() - x_pad, x_day.max() + x_pad)
+    ax.set_ylim(y_night.min() - y_pad, y_night.max() + y_pad)
+
+    # Quadrant reference lines
+    ax.axvline(day_overall, color='#FF8C00', ls='--', lw=1.2, alpha=0.6, zorder=1)
+    ax.axhline(night_overall, color='#666666', ls='--', lw=1.2, alpha=0.6, zorder=1)
+
+    # Shade quadrants
+    xlims = ax.get_xlim()
+    ylims = ax.get_ylim()
+    n_frac = (night_overall - ylims[0]) / (ylims[1] - ylims[0])
+    ax.axvspan(day_overall, xlims[1], ymin=n_frac, ymax=1,
+               color='#FF0000', alpha=0.04, zorder=0)
+    ax.axvspan(xlims[0], day_overall, ymin=0, ymax=n_frac,
+               color='#0066CC', alpha=0.04, zorder=0)
+
+    # Quadrant labels
+    ax.text(0.98, 0.98, 'HOT DAY + HOT NIGHT\n(Danger Zone)',
+            transform=ax.transAxes, ha='right', va='top', fontsize=7,
+            color='#CC0000', fontstyle='italic', alpha=0.7)
+    ax.text(0.02, 0.02, 'COOL DAY + COOL NIGHT\n(Below Average)',
+            transform=ax.transAxes, ha='left', va='bottom', fontsize=7,
+            color='#0055AA', fontstyle='italic', alpha=0.7)
+    ax.text(0.98, 0.02, 'HOT DAY + COOL NIGHT\n(Night Relief)',
+            transform=ax.transAxes, ha='right', va='bottom', fontsize=7,
+            color='#886600', fontstyle='italic', alpha=0.5)
+    ax.text(0.02, 0.98, 'COOL DAY + HOT NIGHT\n(Possible UHI)',
+            transform=ax.transAxes, ha='left', va='top', fontsize=7,
+            color='#555555', fontstyle='italic', alpha=0.5)
+
+    ax.set_xlabel(
+        f'Day Mean LST (\u00b0C)  |  dashed = overall mean {day_overall:.1f}\u00b0C',
+        fontsize=10)
+    ax.set_ylabel(
+        f'Night Mean LST (\u00b0C)  |  dashed = overall mean {night_overall:.1f}\u00b0C',
+        fontsize=10)
+    ax.set_title(
+        f'Day vs Night Mean LST During Persistent Heat Events \u2013 {study_year}\n'
+        f'Pie size = Total Heat Duration  |  Orange = Day Duration  '
+        f'|  Grey = Night Duration',
+        fontsize=12, fontweight='bold')
+    ax.grid(alpha=0.2)
+
+    # -- 4  Lock data→display transforms --------------------------------
+    fig.canvas.draw()
+
+    # -- 5  Draw pie charts at each city position -----------------------
+    for i in range(n_cities):
+        t = total_dur[i]
+        if t == 0:
+            ax.plot(x_day[i], y_night[i], 'x', color='grey', ms=4,
+                    mew=0.8, zorder=5)
+            continue
+
+        if max_total > min_total:
+            frac = (t - min_total) / (max_total - min_total)
+        else:
+            frac = 0.5
+        pie_sz = MIN_PIE + frac * (MAX_PIE - MIN_PIE)
+
+        disp_xy = ax.transData.transform((x_day[i], y_night[i]))
+        fig_xy  = fig.transFigure.inverted().transform(disp_xy)
+
+        pie_ax = fig.add_axes(
+            [fig_xy[0] - pie_sz / 2, fig_xy[1] - pie_sz / 2,
+             pie_sz, pie_sz],
+            zorder=5)
+
+        if d_dur[i] == 0:
+            slices, colors = [n_dur[i]], [NIGHT_COLOR]
+        elif n_dur[i] == 0:
+            slices, colors = [d_dur[i]], [DAY_COLOR]
+        else:
+            slices, colors = [d_dur[i], n_dur[i]], [DAY_COLOR, NIGHT_COLOR]
+
+        pie_ax.pie(slices, colors=colors, startangle=90,
+                   wedgeprops={'edgecolor': 'white', 'linewidth': 0.8})
+        pie_ax.set_aspect('equal')
+        pie_ax.patch.set_alpha(0)
+
+    # -- 6  Labels on transparent overlay axes (above pies) -------------
+    ax_pos = ax.get_position()
+    ax_overlay = fig.add_axes(ax_pos, frameon=False, zorder=100)
+    ax_overlay.set_xlim(ax.get_xlim())
+    ax_overlay.set_ylim(ax.get_ylim())
+    ax_overlay.set_xticks([])
+    ax_overlay.set_yticks([])
+    ax_overlay.patch.set_alpha(0)
+
+    halo = [pe.withStroke(linewidth=3, foreground='white')]
+
+    xlims_d = ax.get_xlim()
+    dx_data = xlims_d[1] - xlims_d[0]
+    pie_radii = []
+    for i in range(n_cities):
+        td = total_dur[i]
+        if td == 0 or max_total <= min_total:
+            fr = 0.5
+        else:
+            fr = (td - min_total) / (max_total - min_total)
+        ps = MIN_PIE + fr * (MAX_PIE - MIN_PIE)
+        pie_radii.append(ps / 2 * dx_data * 1.6)
+
+    texts = []
+    for i in range(n_cities):
+        lx = x_day[i] + pie_radii[i] + dx_data * 0.004
+        ly = y_night[i]
+        txt = ax_overlay.text(
+            lx, ly, names[i], fontsize=8, fontweight='bold',
+            color='#222222', ha='left', va='center',
+            path_effects=halo)
+        texts.append(txt)
+
+    if HAS_ADJUSTTEXT:
+        ax_overlay.scatter(x_day, y_night, s=1500, alpha=0)
+        adjust_text(
+            texts, x=x_day.tolist(), y=y_night.tolist(),
+            ax=ax_overlay,
+            expand_points=(4.0, 4.0), expand_text=(2.0, 2.0),
+            force_points=(5.0, 5.0), force_text=(2.0, 2.0),
+            ensure_inside_axes=True, max_move=None)
+
+    # Manual leader lines from pie centre to displaced labels
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    for i in range(n_cities):
+        bbox = texts[i].get_window_extent(renderer)
+        inv = ax_overlay.transData.inverted()
+        cx, cy = x_day[i], y_night[i]
+        lx0, lcy = inv.transform((bbox.x0, (bbox.y0 + bbox.y1) / 2))
+        lx1, _   = inv.transform((bbox.x1, bbox.y0))
+        if abs(lx0 - cx) < abs(lx1 - cx):
+            conn_x, conn_y = lx0, lcy
+        else:
+            conn_x, conn_y = lx1, lcy
+        dist = np.sqrt((conn_x - cx)**2 + (conn_y - cy)**2)
+        if dist > pie_radii[i] * 1.5:
+            ax_overlay.plot([cx, conn_x], [cy, conn_y],
+                            '-', color='#555555', lw=0.7, alpha=0.6)
+
+    # -- 7  Legend at bottom centre ------------------------------------
+    legend_elements = [
+        Patch(facecolor=DAY_COLOR, edgecolor='white', lw=0.8,
+              label='Day Persistent Heat Duration'),
+        Patch(facecolor=NIGHT_COLOR, edgecolor='white', lw=0.8,
+              label='Night Persistent Heat Duration'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='#AAAAAA',
+               alpha=0.5, markersize=6,
+               label=f'Smallest pie = {min_total} days total'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='#AAAAAA',
+               alpha=0.5, markersize=14,
+               label=f'Largest pie = {max_total} days total'),
+    ]
+    ax.legend(handles=legend_elements, loc='lower center', ncol=2,
+              fontsize=8, framealpha=0.9,
+              title='Pie Chart Legend', title_fontsize=8)
+
+    # -- 8  Save --------------------------------------------------------
+    if base_dir is not None:
+        save_dir = Path(base_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        for ext in ['png', 'pdf']:
+            out = save_dir / f'DayNight_Scatter_PieDuration_{study_year}.{ext}'
+            fig.savefig(out, dpi=300, bbox_inches='tight')
+        print(f"Saved: DayNight_Scatter_PieDuration_{study_year}.png/pdf")
+
+    return fig
