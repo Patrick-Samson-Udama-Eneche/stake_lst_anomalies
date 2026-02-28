@@ -6220,12 +6220,15 @@ def create_city_hotspot_grid_maps(city_name, hotspot_polygons, survey_points, la
         print(f"✗ Error loading boundaries for {city_name}: {e}")
         return None
     
-    # Load OSM features
+    # Load OSM features (separate try/except so roads still display when
+    # water_bodies file is absent — 12 cities lack a water_bodies GeoJSON)
     try:
         osm_roads = gpd.read_file(osm_dir / f'{city_name}_roads.geojson')
-        osm_water = gpd.read_file(osm_dir / f'{city_name}_water_bodies.geojson')
     except Exception:
         osm_roads = gpd.GeoDataFrame()
+    try:
+        osm_water = gpd.read_file(osm_dir / f'{city_name}_water_bodies.geojson')
+    except Exception:
         osm_water = gpd.GeoDataFrame()
     
     # Clip and merge landscape data
@@ -6696,30 +6699,33 @@ def create_gi_star_distribution_plots(city_name, output_dir, skip_if_exists=True
 
 
 def create_hotspot_area_by_contour_plots(hotspot_polygons_enriched, landscape_gdf_4326,
-                                         output_dir: Path, skip_if_exists: bool = True):
+                                         output_dir: Path, skip_if_exists: bool = True,
+                                         cities_per_page: int = 10):
     """
     Create grouped stacked bar charts showing hotspot area distribution by contour level,
-    stacked by Cluster25 landscape classes. NO CONFIRMED method (only P90 and GI_STAR).
+    stacked by Cluster25 landscape classes. Only P90 and GI_STAR methods (excl. VALIDATED).
     
-    Visualization:
-    - 3 facets (Day, Night, Persistent)
+    Paginated: *cities_per_page* cities per figure page (default 10).
+    Multi-page PDF via ``PdfPages``; individual PNGs per page.
+    
+    Visualization (per page):
+    - 3 vertically stacked facets (Day, Night, Persistent)
     - Per city: 6 bars (2 methods × 3 contours)
-      - P90: [90%] [75%] [50%]
-      - Gi*: [90%] [75%] [50%]
-    - Each bar stacked by 25 unique Cluster25 colors
-    - Patch count annotated at top of each bar
-    - NO LEGEND - colors shown in Table 2
+    - Each bar stacked by Cluster25 landscape colours
+    - Patch count annotated above each bar
     
     Args:
         hotspot_polygons_enriched: GeoDataFrame with city, method, period, contour_level, Cluster25, area_km2
         landscape_gdf_4326: GeoDataFrame with Cluster25 classification details
         output_dir: Directory to save plots (figures/)
         skip_if_exists: Skip if outputs already exist
+        cities_per_page: Number of cities per figure page (default: 10)
     
     Returns:
         dict with paths to saved files
     """
     from matplotlib.patches import Patch
+    from matplotlib.backends.backend_pdf import PdfPages
     import matplotlib.pyplot as plt
     import numpy as np
     import pandas as pd
@@ -6803,11 +6809,9 @@ def create_hotspot_area_by_contour_plots(hotspot_polygons_enriched, landscape_gd
     )
     
     # =============================================================================
-    # CREATE FIGURE - Single chart, 3 row panels (Day, Night, Persistent)
-    # X-axis hierarchy: City (top) > Method > Contour (bar base)
-    # Y-axis: Period label + shared Total Area scale
-    # Vertical dividers between cities; dashed dividers between methods
-    # Compact sizing, no vertical gaps between panels
+    # CREATE PAGINATED FIGURES - cities_per_page cities per page
+    # Each page: 3 row panels (Day, Night, Persistent)
+    # Multi-page PDF via PdfPages; individual PNGs numbered by page
     # =============================================================================
     
     n_cities = len(cities)
@@ -6816,47 +6820,6 @@ def create_hotspot_area_by_contour_plots(hotspot_polygons_enriched, landscape_gd
     bars_per_method = n_contours                   # 3
     bars_per_city = n_methods * n_contours          # 6
     
-    # --- x-position geometry (compact) -----------------------------------------
-    bar_w = 0.38                     # narrower bars
-    intra_gap = 0.04                 # minimal gap between contour bars
-    inter_gap = bar_w * 0.45         # visible gap between P90 and Gi* groups
-    city_gap = bar_w * 1.4           # gap between cities
-    
-    # Build x-positions and collect label / divider metadata
-    x_positions = []
-    contour_labels_x = []
-    method_labels_x = []
-    city_labels_x = []
-    city_dividers = []     # solid lines between cities
-    method_dividers = []   # dashed lines between methods within a city
-    
-    cursor = 0.0
-    for ci, city in enumerate(cities):
-        city_start = cursor
-        for mi, method in enumerate(methods):
-            method_start = cursor
-            for coi, contour in enumerate(contour_levels):
-                x_positions.append(cursor)
-                pct = int(contour * 100)
-                contour_labels_x.append((cursor, f'{pct}%'))
-                cursor += bar_w + intra_gap
-            cursor -= intra_gap  # remove trailing intra-gap
-            method_center = (method_start + cursor) / 2
-            method_label = 'P90' if method == 'P90' else 'Gi*'
-            method_labels_x.append((method_center, method_label))
-            if mi < n_methods - 1:
-                # dashed divider between methods (placed in the inter_gap)
-                method_dividers.append(cursor + inter_gap / 2)
-            cursor += inter_gap
-        cursor -= inter_gap  # remove trailing inter-gap
-        city_center = (city_start + cursor) / 2
-        city_labels_x.append((city_center, city))
-        cursor += city_gap
-        if ci < n_cities - 1:
-            city_dividers.append(cursor - city_gap / 2)
-    
-    total_width = cursor - city_gap
-    
     # Display order: Day (top), Night (middle), Persistent (bottom)
     display_order = [p for p in ['Day', 'Night', 'Persistent'] if p in periods]
     for p in periods:
@@ -6864,148 +6827,190 @@ def create_hotspot_area_by_contour_plots(hotspot_polygons_enriched, landscape_gd
             display_order.append(p)
     n_panels = len(display_order)
     
-    # --- Compact figure sizing -------------------------------------------------
-    fig_w = max(10, total_width * 0.85 + 1.5)
-    panel_h = max(2.5, fig_w * 0.14)
-    fig_h = panel_h * n_panels + 1.8  # tight: panels + title + x-labels
+    # Chunk cities into pages
+    city_chunks = [cities[i:i + cities_per_page] for i in range(0, n_cities, cities_per_page)]
+    n_pages = len(city_chunks)
     
-    fig, axes = plt.subplots(n_panels, 1, figsize=(fig_w, fig_h),
-                             sharex=True, sharey=True)
-    if n_panels == 1:
-        axes = [axes]
+    # Collect per-page PNG paths
+    png_paths = []
     
-    # Eliminate vertical space between panels
-    fig.subplots_adjust(hspace=0)
+    with PdfPages(str(pdf_path)) as pdf_pages:
+        for page_idx, page_cities in enumerate(city_chunks):
+            n_page_cities = len(page_cities)
+            
+            # --- x-position geometry (compact) ---------------------------------
+            bar_w = 0.38
+            intra_gap = 0.04
+            inter_gap = bar_w * 0.45
+            city_gap = bar_w * 1.4
+            
+            x_positions = []
+            contour_labels_x = []
+            method_labels_x = []
+            city_labels_x = []
+            city_dividers = []
+            method_dividers = []
+            
+            cursor = 0.0
+            for ci, city in enumerate(page_cities):
+                city_start = cursor
+                for mi, method in enumerate(methods):
+                    method_start = cursor
+                    for coi, contour in enumerate(contour_levels):
+                        x_positions.append(cursor)
+                        pct = int(contour * 100)
+                        contour_labels_x.append((cursor, f'{pct}%'))
+                        cursor += bar_w + intra_gap
+                    cursor -= intra_gap
+                    method_center = (method_start + cursor) / 2
+                    method_label = 'P90' if method == 'P90' else 'Gi*'
+                    method_labels_x.append((method_center, method_label))
+                    if mi < n_methods - 1:
+                        method_dividers.append(cursor + inter_gap / 2)
+                    cursor += inter_gap
+                cursor -= inter_gap
+                city_center = (city_start + cursor) / 2
+                city_labels_x.append((city_center, city))
+                cursor += city_gap
+                if ci < n_page_cities - 1:
+                    city_dividers.append(cursor - city_gap / 2)
+            
+            total_width = cursor - city_gap
+            
+            # --- Compact figure sizing -----------------------------------------
+            fig_w = max(10, total_width * 0.85 + 1.5)
+            panel_h = max(2.5, fig_w * 0.14)
+            fig_h = panel_h * n_panels + 1.8
+            
+            fig, axes = plt.subplots(n_panels, 1, figsize=(fig_w, fig_h),
+                                     sharex=True, sharey=True)
+            if n_panels == 1:
+                axes = [axes]
+            
+            fig.subplots_adjust(hspace=0)
+            
+            page_label = f' (Page {page_idx + 1}/{n_pages})' if n_pages > 1 else ''
+            fig.suptitle(
+                f'Hotspot Area Distribution by Contour Level & Landscape Character (Cluster25){page_label}',
+                fontsize=13, fontweight='bold', y=0.97)
+            
+            # --- Draw each panel -----------------------------------------------
+            for ax_idx, ax in enumerate(axes):
+                if ax_idx >= len(display_order):
+                    ax.set_visible(False)
+                    continue
+                
+                period = display_order[ax_idx]
+                
+                try:
+                    period_area = pivot_area.xs(period, level='period')
+                except KeyError:
+                    ax.text(0.5, 0.5, f'No Data for {period}',
+                           ha='center', va='center', fontsize=11, transform=ax.transAxes)
+                    ax.set_ylabel(f'{period}\n\nArea (km²)',
+                                 fontsize=10, fontweight='bold', labelpad=6)
+                    continue
+                
+                period_patches = patch_counts[patch_counts['period'] == period]
+                
+                bar_idx = 0
+                for ci, city in enumerate(page_cities):
+                    for mi, method in enumerate(methods):
+                        for coi, contour in enumerate(contour_levels):
+                            x = x_positions[bar_idx]
+                            bar_idx += 1
+                            
+                            bottom = 0
+                            for cluster in cluster25_classes:
+                                if (city, method, contour) in period_area.index:
+                                    area = period_area.loc[(city, method, contour), cluster]
+                                    if area > 0:
+                                        ax.bar(x, area, bar_w, bottom=bottom,
+                                               color=cluster_colors[cluster],
+                                               edgecolor='white', linewidth=0.2)
+                                        bottom += area
+                
+                ax.autoscale(axis='y')
+                y_lo, y_hi = ax.get_ylim()
+                nudge = y_hi * 0.018 if y_hi > 0 else 0.3
+                
+                # Patch-count annotations
+                bar_idx = 0
+                for ci, city in enumerate(page_cities):
+                    for mi, method in enumerate(methods):
+                        for coi, contour in enumerate(contour_levels):
+                            x = x_positions[bar_idx]
+                            bar_idx += 1
+                            
+                            bar_top = 0
+                            if (city, method, contour) in period_area.index:
+                                bar_top = period_area.loc[(city, method, contour)].sum()
+                            
+                            patch_row = period_patches[
+                                (period_patches['city'] == city) &
+                                (period_patches['method'] == method) &
+                                (period_patches['contour_level'] == contour)
+                            ]
+                            if not patch_row.empty and bar_top > 0:
+                                n_patches = patch_row.iloc[0]['total_patches']
+                                ax.text(x, bar_top + nudge, str(n_patches),
+                                       ha='center', va='bottom', fontsize=8,
+                                       fontweight='bold', color='#333333')
+                
+                # --- Styling ---
+                ax.set_ylabel(f'{period}\n\nArea (km²)',
+                             fontsize=10, fontweight='bold', labelpad=6)
+                ax.grid(axis='y', alpha=0.25, linestyle='--', zorder=0)
+                ax.set_xlim(-bar_w * 0.8, total_width + bar_w * 0.8)
+                ax.tick_params(axis='y', labelsize=9)
+                ax.axhline(0, color='black', linewidth=0.8, zorder=2)
+                
+                for xd in city_dividers:
+                    ax.axvline(xd, color='#666666', linewidth=0.9, linestyle='-', alpha=0.6, zorder=0)
+                for xd in method_dividers:
+                    ax.axvline(xd, color='#aaaaaa', linewidth=0.6, linestyle='--', alpha=0.5, zorder=0)
+                
+                if ax_idx < n_panels - 1:
+                    ax.tick_params(axis='x', labelbottom=False, length=0)
+                if ax_idx > 0:
+                    ax.spines['top'].set_visible(False)
+                if ax_idx < n_panels - 1:
+                    ax.spines['bottom'].set_visible(False)
+            
+            # --- X-axis label hierarchy (bottom panel only) --------------------
+            bottom_ax = axes[-1]
+            
+            bottom_ax.set_xticks([pos for pos, _ in contour_labels_x])
+            bottom_ax.set_xticklabels([lbl for _, lbl in contour_labels_x],
+                                       fontsize=9, rotation=0)
+            bottom_ax.tick_params(axis='x', which='major', pad=2, length=3)
+            
+            for mx, mlbl in method_labels_x:
+                bottom_ax.text(mx, -0.10, mlbl,
+                              ha='center', va='top', fontsize=10, fontweight='bold',
+                              transform=bottom_ax.get_xaxis_transform())
+            
+            for cx, clbl in city_labels_x:
+                bottom_ax.text(cx, -0.20, clbl,
+                              ha='center', va='top', fontsize=11, fontweight='bold',
+                              transform=bottom_ax.get_xaxis_transform())
+            
+            plt.tight_layout(rect=[0, 0.07, 1, 0.95])
+            fig.subplots_adjust(hspace=0)
+            
+            # Save page to multi-page PDF
+            pdf_pages.savefig(fig, dpi=300, bbox_inches='tight')
+            
+            # Save individual PNG per page
+            if n_pages == 1:
+                page_png = png_path
+            else:
+                page_png = output_dir / f'hotspot_area_by_contour_cluster25_page{page_idx + 1}.png'
+            plt.savefig(page_png, dpi=300, bbox_inches='tight')
+            png_paths.append(page_png)
+            plt.close(fig)
     
-    fig.suptitle('Hotspot Area Distribution by Contour Level & Landscape Character (Cluster25)',
-                 fontsize=13, fontweight='bold', y=0.97)
-    
-    # --- Draw each panel -------------------------------------------------------
-    for ax_idx, ax in enumerate(axes):
-        if ax_idx >= len(display_order):
-            ax.set_visible(False)
-            continue
-        
-        period = display_order[ax_idx]
-        
-        # Get data for this period
-        try:
-            period_area = pivot_area.xs(period, level='period')
-        except KeyError:
-            ax.text(0.5, 0.5, f'No Data for {period}',
-                   ha='center', va='center', fontsize=11, transform=ax.transAxes)
-            ax.set_ylabel(f'{period}\n\nArea (km²)',
-                         fontsize=10, fontweight='bold', labelpad=6)
-            continue
-        
-        period_patches = patch_counts[patch_counts['period'] == period]
-        
-        bar_idx = 0
-        for ci, city in enumerate(cities):
-            for mi, method in enumerate(methods):
-                for coi, contour in enumerate(contour_levels):
-                    x = x_positions[bar_idx]
-                    bar_idx += 1
-                    
-                    bottom = 0
-                    for cluster in cluster25_classes:
-                        if (city, method, contour) in period_area.index:
-                            area = period_area.loc[(city, method, contour), cluster]
-                            if area > 0:
-                                ax.bar(x, area, bar_w, bottom=bottom,
-                                       color=cluster_colors[cluster],
-                                       edgecolor='white', linewidth=0.2)
-                                bottom += area
-        
-        # y-limits before annotating
-        ax.autoscale(axis='y')
-        y_lo, y_hi = ax.get_ylim()
-        nudge = y_hi * 0.018 if y_hi > 0 else 0.3
-        
-        # Patch-count annotations
-        bar_idx = 0
-        for ci, city in enumerate(cities):
-            for mi, method in enumerate(methods):
-                for coi, contour in enumerate(contour_levels):
-                    x = x_positions[bar_idx]
-                    bar_idx += 1
-                    
-                    bar_top = 0
-                    if (city, method, contour) in period_area.index:
-                        bar_top = period_area.loc[(city, method, contour)].sum()
-                    
-                    patch_row = period_patches[
-                        (period_patches['city'] == city) &
-                        (period_patches['method'] == method) &
-                        (period_patches['contour_level'] == contour)
-                    ]
-                    if not patch_row.empty and bar_top > 0:
-                        n_patches = patch_row.iloc[0]['total_patches']
-                        ax.text(x, bar_top + nudge, str(n_patches),
-                               ha='center', va='bottom', fontsize=8,
-                               fontweight='bold', color='#333333')
-        
-        # --- Styling ---
-        ax.set_ylabel(f'{period}\n\nArea (km²)',
-                     fontsize=10, fontweight='bold', labelpad=6)
-        ax.grid(axis='y', alpha=0.25, linestyle='--', zorder=0)
-        ax.set_xlim(-bar_w * 0.8, total_width + bar_w * 0.8)
-        ax.tick_params(axis='y', labelsize=9)
-        
-        # Black baseline at y = 0
-        ax.axhline(0, color='black', linewidth=0.8, zorder=2)
-        
-        # City dividers (solid)
-        for xd in city_dividers:
-            ax.axvline(xd, color='#666666', linewidth=0.9, linestyle='-', alpha=0.6, zorder=0)
-        
-        # Method dividers (dashed, lighter)
-        for xd in method_dividers:
-            ax.axvline(xd, color='#aaaaaa', linewidth=0.6, linestyle='--', alpha=0.5, zorder=0)
-        
-        # Remove x-tick labels on non-bottom panels; keep shared spine
-        if ax_idx < n_panels - 1:
-            ax.tick_params(axis='x', labelbottom=False, length=0)
-        
-        # Remove inner spines so panels look seamless
-        if ax_idx > 0:
-            ax.spines['top'].set_visible(False)
-        if ax_idx < n_panels - 1:
-            ax.spines['bottom'].set_visible(False)
-    
-    # --- X-axis label hierarchy (bottom panel only) ----------------------------
-    bottom_ax = axes[-1]
-    
-    # Level 1 (closest to bars): Contour % labels
-    bottom_ax.set_xticks([pos for pos, _ in contour_labels_x])
-    bottom_ax.set_xticklabels([lbl for _, lbl in contour_labels_x],
-                               fontsize=9, rotation=0)
-    bottom_ax.tick_params(axis='x', which='major', pad=2, length=3)
-    
-    # Level 2: Method labels
-    for mx, mlbl in method_labels_x:
-        bottom_ax.text(mx, -0.10, mlbl,
-                      ha='center', va='top', fontsize=10, fontweight='bold',
-                      transform=bottom_ax.get_xaxis_transform())
-    
-    # Level 3: City labels
-    for cx, clbl in city_labels_x:
-        bottom_ax.text(cx, -0.20, clbl,
-                      ha='center', va='top', fontsize=11, fontweight='bold',
-                      transform=bottom_ax.get_xaxis_transform())
-    
-    plt.tight_layout(rect=[0, 0.07, 1, 0.95])
-    fig.subplots_adjust(hspace=0)  # re-enforce after tight_layout
-    
-    # =============================================================================
-    # SAVE PLOT
-    # =============================================================================
-    
-    plt.savefig(pdf_path, dpi=300, bbox_inches='tight')
-    plt.savefig(png_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    
-    print(f"✓ Saved hotspot area plots: {pdf_path.name}")
+    print(f"✓ Saved hotspot area plots: {pdf_path.name} ({n_pages} page{'s' if n_pages > 1 else ''})")
     
     # =============================================================================
     # GENERATE TABLE 1: Hotspot Characterization
@@ -7629,6 +7634,10 @@ def create_national_summary_map(
     max_pop = city_stats['Total'].max()
     
     # Draw proportional symbols
+    label_texts = []  # collect for adjustText de-cluttering
+    label_x = []
+    label_y = []
+    
     for city in city_stats.index:
         row = city_stats.loc[city]
         lat, lon = row['lat'], row['lon']
@@ -7649,25 +7658,44 @@ def create_national_summary_map(
         night_start = day_end
         night_end = 450  # 90 + 360 (full circle back to start)
         
+        # Adaptive edge linewidth (thinner for smaller circles)
+        edge_lw = max(0.5, min(2.0, radius_deg * 3))
+        
         # Day wedge (proportional)
         if day_pop > 0:
             ax.add_patch(Wedge((lon, lat), radius_deg, day_start, day_end,
                                facecolor=day_color, edgecolor='white',
-                               linewidth=2, alpha=0.9, zorder=5))
+                               linewidth=edge_lw, alpha=0.9, zorder=5))
         
         # Night wedge (proportional)
         if night_pop > 0:
             ax.add_patch(Wedge((lon, lat), radius_deg, night_start, night_end,
                                facecolor=night_color, edgecolor='white',
-                               linewidth=2, alpha=0.9, zorder=5))
+                               linewidth=edge_lw, alpha=0.9, zorder=5))
         
         # City centroid as black dot
-        ax.plot(lon, lat, 'ko', markersize=4, zorder=7)
+        ax.plot(lon, lat, 'ko', markersize=3, zorder=7)
         
-        # City name with population in parentheses below
+        # City name with population — collect for adjustText
         label_text = f"{city}\n({format_population(total_pop)})"
-        ax.text(lon, lat - radius_deg - 0.15, label_text, ha='center', va='top',
-                fontsize=9, fontweight='bold', color='#000', zorder=6, linespacing=0.9)
+        txt = ax.text(lon, lat - radius_deg - 0.12, label_text,
+                     ha='center', va='top',
+                     fontsize=7.5, fontweight='bold', color='#000',
+                     zorder=6, linespacing=0.9)
+        label_texts.append(txt)
+        label_x.append(lon)
+        label_y.append(lat - radius_deg - 0.12)
+    
+    # De-clutter overlapping labels using adjustText
+    try:
+        from adjustText import adjust_text
+        adjust_text(label_texts, x=label_x, y=label_y, ax=ax,
+                    force_text=(0.4, 0.6), force_points=(0.3, 0.5),
+                    expand_text=(1.1, 1.2), expand_points=(1.1, 1.2),
+                    arrowprops=dict(arrowstyle='-', color='#888888', lw=0.5),
+                    ensure_inside_axes=True, max_move=2.0)
+    except ImportError:
+        pass  # adjustText not installed — labels stay at default positions
     
     # Title
     ax.set_title('Urban Heat Island Hotspots — Population Exposure by City',
@@ -10034,3 +10062,134 @@ def create_daynight_scatter_pie(cities_data, base_dir=None, study_year=2024, dpi
         print(f"Saved: DayNight_Scatter_PieDuration_{study_year}.png/pdf")
 
     return fig
+
+
+# ======================================================================
+# NB05 — Quick-look KDE polygon diagnostic grid
+# ======================================================================
+
+def plot_kde_quicklook(
+    hotspot_polygons_gdf,
+    persistent_heat_rasters: dict,
+    cities: list,
+    all_cities: list | None = None,
+    output_dir=None,
+    method: str = 'P90',
+    period: str = 'Day',
+    dpi: int = 200,
+):
+    """Create a quick-look grid of KDE contour polygons over LST rasters.
+
+    Parameters
+    ----------
+    hotspot_polygons_gdf : GeoDataFrame
+        Full hotspot polygon GeoDataFrame with 'method', 'period', 'city',
+        'contour_level' columns.
+    persistent_heat_rasters : dict
+        ``{city: {'day': {'data': np.ndarray, 'transform': Affine}, ...}}``
+    cities : list[str]
+        Cities to display **inline** (typically TEST_CITIES subset).
+    all_cities : list[str] | None
+        All cities for the saved file version.  If *None*, defaults to *cities*.
+    output_dir : Path | str | None
+        If provided, saves the full-city grid (PNG + PDF) here.
+    method, period : str
+        Filter values for the polygon GeoDataFrame.
+    dpi : int
+        Figure resolution.
+
+    Returns
+    -------
+    matplotlib.figure.Figure or None
+    """
+    import math
+    from pathlib import Path
+    from rasterio.transform import array_bounds
+
+    if all_cities is None:
+        all_cities = cities
+
+    sample_gdf = hotspot_polygons_gdf[
+        (hotspot_polygons_gdf['method'] == method) &
+        (hotspot_polygons_gdf['period'] == period)
+    ].copy()
+
+    if len(sample_gdf) == 0:
+        print(f"⚠  No {method} {period} polygons to visualize")
+        return None
+
+    # --- Helper: draw one grid ------------------------------------------
+    def _draw_grid(city_list, tag=''):
+        n = len(city_list)
+        if n == 0:
+            return None
+        max_cols = min(5, n)
+        n_rows = math.ceil(n / max_cols)
+        fig, axes = plt.subplots(n_rows, max_cols,
+                                 figsize=(4 * max_cols, 4 * n_rows))
+        if n == 1:
+            axes = np.array([axes])
+        axes = np.array(axes).flatten()
+
+        for i in range(n, len(axes)):
+            axes[i].set_visible(False)
+
+        colors = {0.50: 'yellow', 0.75: 'orange', 0.90: 'red'}
+
+        for idx, city in enumerate(city_list):
+            ax = axes[idx]
+            city_polys = sample_gdf[sample_gdf['city'] == city]
+
+            if len(city_polys) == 0:
+                ax.text(0.5, 0.5, f'{city}\nNo {method} {period}\npolygons',
+                        ha='center', va='center', transform=ax.transAxes,
+                        fontsize=9)
+                ax.set_title(city, fontsize=10)
+                ax.axis('off')
+                continue
+
+            # LST background
+            if city in persistent_heat_rasters:
+                per = period.lower()
+                rdata = persistent_heat_rasters[city][per]['data']
+                rtx = persistent_heat_rasters[city][per]['transform']
+                display = rdata.copy().astype(float)
+                display[rdata <= 0] = np.nan
+                bounds = array_bounds(rdata.shape[0], rdata.shape[1], rtx)
+                extent = [bounds[0], bounds[2], bounds[1], bounds[3]]
+                ax.imshow(display, cmap='RdYlBu_r', alpha=0.5,
+                          extent=extent, aspect='auto', origin='upper')
+
+            for level in [0.50, 0.75, 0.90]:
+                lp = city_polys[city_polys['contour_level'] == level]
+                if len(lp) > 0:
+                    lp.plot(ax=ax, facecolor='none', edgecolor=colors[level],
+                            linewidth=2, label=f'{level:.0%}')
+
+            ax.set_title(f'{city} – {method} {period}\n{len(city_polys)} polys',
+                         fontsize=10)
+            ax.set_xlabel('Longitude', fontsize=8)
+            ax.set_ylabel('Latitude', fontsize=8)
+            if idx == 0:
+                ax.legend(loc='upper left', fontsize=8, title='Contour')
+
+        fig.suptitle(f'KDE Quick-Look: {method} {period} ({len(city_list)} cities){tag}',
+                     fontsize=13, y=1.01)
+        fig.tight_layout()
+        return fig
+
+    # --- Save full-city grid to disk ------------------------------------
+    if output_dir is not None:
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        fig_all = _draw_grid(all_cities, tag=' [all]')
+        if fig_all is not None:
+            for ext in ('png', 'pdf'):
+                fig_all.savefig(out / f'kde_quicklook_{method}_{period}.{ext}',
+                                dpi=dpi, bbox_inches='tight')
+            plt.close(fig_all)
+            print(f"💾 Saved kde_quicklook_{method}_{period}.png/pdf → {out.name}/")
+
+    # --- Return inline figure (display subset only) ---------------------
+    fig_inline = _draw_grid(cities)
+    return fig_inline
