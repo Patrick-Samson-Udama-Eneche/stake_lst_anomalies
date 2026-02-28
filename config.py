@@ -152,7 +152,7 @@ TEST_CITIES: List[str] = [
 #   - Example: ["Lagos", "Abuja", "Enugu", "Maiduguri"]
 
 
-CITY_SELECTION_MODE: str = "ALL"  # Options: "ALL", "ABOVE_1M", "TEST", or "SPECIFIC"
+CITY_SELECTION_MODE: str = "TEST"  # Options: "ALL", "ABOVE_1M", "TEST", or "SPECIFIC"
 
 
 SELECTED_CITIES: List[str] = [
