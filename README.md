@@ -76,7 +76,7 @@ See [docs/SECURITY_SETUP.md](docs/SECURITY_SETUP.md) for detailed instructions.
 **Option A — Interactive (Jupyter Lab):**
 ```powershell
 jupyter lab
-# Run notebooks in order: 01 → 01a → 02 → 03 → 04 → 05 → 061 → 062 → 063
+# Run notebooks in order: 01 → 01a → 02 → 03 → 04 → 05 → 06
 ```
 
 **Option B — Automated (Master Runner Script):**
@@ -135,11 +135,7 @@ Notebooks must be run in order — each builds on outputs from previous stages.
         │
         └──► 05_hotspot_analysis
                 │
-                └──► 061_lst_model_variables
-                        │
-                        └──► 062_lst_modelling
-                                │
-                                └──► 063_lst_model_validation
+                └──► 06_hotspot_modelling
 ```
 
 | # | Notebook | Purpose | External APIs | Inputs |
@@ -150,9 +146,7 @@ Notebooks must be run in order — each builds on outputs from previous stages.
 | 03 | `03_temporal_analysis_months_annual.ipynb` | Monthly/annual LST extraction and trend analysis (2006–2024) | GEE (MODIS) | Notebook 01 AOI outputs |
 | 04 | `04_temporal_analysis_daily.ipynb` | Daily LST analysis: MODIS + ERA5 hot events, SEVIRI persistent heat rasters | GEE, EUMETSAT | Notebook 01 AOI outputs |
 | 05 | `05_hotspot_analysis.ipynb` | UHI hotspot detection (Gi\*), KDE delineation, landscape enrichment, population exposure, stakeholder validation | GEE (GHSL) | Notebooks 03 + 04 outputs, landscape/survey data |
-| 061 | `061_lst_model_variables.ipynb` | Feature engineering — extract predictor variables (NDVI, NDBI, elevation, distance to water/roads, population density) per pixel | GEE | Notebook 05 hotspot outputs |
-| 062 | `062_lst_modelling.ipynb` | Train Random Forest and Gradient Boosting regression models for LST prediction | — | Notebook 061 feature dataset |
-| 063 | `063_lst_model_validation.ipynb` | Model evaluation: hold-out test set, spatial cross-validation, stakeholder comparison | — | Notebook 062 trained models |
+| 06 | `06_hotspot_modelling.ipynb` | Landscape-oriented modelling: hotspot occurrence (logistic), extent (OLS), intensity (OLS) with hierarchical block entry and city-clustered SEs | — | Notebook 05 hotspot outputs, landscape data |
 
 ### Execution Times (Benchmark)
 
@@ -238,9 +232,7 @@ stake_lst_modelling/
 │   ├── 03_temporal_analysis_months_annual.ipynb
 │   ├── 04_temporal_analysis_daily.ipynb
 │   ├── 05_hotspot_analysis.ipynb
-│   ├── 061_lst_model_variables.ipynb
-│   ├── 062_lst_modelling.ipynb
-│   └── 063_lst_model_validation.ipynb
+│   └── 06_hotspot_modelling.ipynb
 │
 ├── src/                       # Reusable Python modules
 │   ├── aoi_utils.py           # AOI processing (buffers, boundaries, statistics)
@@ -250,6 +242,7 @@ stake_lst_modelling/
 │   ├── temporal_analysis_utils.py  # Daily LST helper functions
 │   ├── decision_tree_utils.py # Heat event decision tree logic
 │   ├── seviri_processing_utils.py  # EUMETSAT SEVIRI download and processing
+│   ├── modelling_utils.py     # Hierarchical regression, panel charts (NB06)
 │   └── visualization.py       # All plotting functions (~8,000 lines)
 │
 ├── data/
@@ -263,9 +256,7 @@ stake_lst_modelling/
 │       ├── 03_trend_analysis_monthly_annual/  # LST rasters and trend figures
 │       ├── 04_trend_analysis_daily/  # Daily time series, SEVIRI heat rasters
 │       ├── 05_hotspot_analysis/     # Hotspot polygons, KDE maps, charts
-│       ├── 061_lst_model_variables/ # Feature engineering outputs
-│       ├── 062_lst_modelling/       # Trained models & LST predictions
-│       └── 063_lst_model_validation/ # Validation reports & figures
+│       └── 06_hotspot_modelling/    # Model tables (CSV) and figures (PNG/PDF)
 │
 ├── secrets/                   # API credentials (git-ignored)
 │   ├── gee_service_account.json
@@ -290,8 +281,8 @@ stake_lst_modelling/
 | `RESAMPLE_CONFIG.resolution_m` | 250 | Resampled binary mask resolution |
 | `AOI_BUFFER_DISTANCE` | 5000m | Buffer around urban polygons |
 | `FIGURE_DPI` | 300 | Publication-quality output |
-| `MODEL_TRAINING_CONFIG.models` | RF, GBR | Regression models for LST prediction |
-| `MODEL_VALIDATION_CONFIG.spatial_cv` | leave-one-city-out | Spatial cross-validation strategy |
+| `HIERARCHY_BLOCKS` | Climate → Geology → Elevation | Hierarchical regression block order |
+| `OLS_CLUSTERED_CONFIG.cluster_variable` | city | City-level clustered standard errors |
 
 The `CITIES` list is populated dynamically by scanning Notebook 04 SEVIRI outputs (via `load_cities_from_daily_analysis()`). For Notebook 01, cities are selected interactively or via CLI.
 
@@ -308,6 +299,14 @@ The `CITIES` list is populated dynamically by scanning Notebook 04 SEVIRI output
 - **National summary map** — proportional symbol map across all study cities
 - **Stakeholder perception charts** — reasons/mitigation by Cluster25 landscape type
 - **Tree species heatmaps** — 4 variants (by cluster/city × top-15/all species)
+
+### Notebook 06 — Hotspot Modelling Outputs
+- **Skewness diagnostics** — 2×2 Day|Night panels with normal distribution overlay
+- **Model comparison tables** (CSV) — hierarchical block R², ΔR², AIC, BIC per analysis
+- **Coefficient tables** (CSV) — OLS coefficients with clustered SEs and % change
+- **Variance partitioning panels** — Day|Night stacked bar charts (logistic pseudo-R², OLS R²)
+- **Coefficient forest plots** — Day|Night horizontal panel with significance colouring
+- **Model metadata** (JSON) — reproducibility records per analysis/period
 
 ---
 
@@ -330,7 +329,7 @@ The `CITIES` list is populated dynamically by scanning Notebook 04 SEVIRI output
 | **Phase 2** | Complete | Monthly/annual LST temporal analysis |
 | **Phase 3** | Complete | Daily LST analysis (MODIS, ERA5, SEVIRI) |
 | **Phase 4** | Complete | UHI hotspot detection and stakeholder validation |
-| **Phase 5** | In Progress | LST feature engineering and predictive modeling (Notebooks 061–063) |
+| **Phase 5** | Complete | Landscape-oriented hotspot modelling — occurrence, extent, and intensity (Notebook 06) |
 
 ---
 

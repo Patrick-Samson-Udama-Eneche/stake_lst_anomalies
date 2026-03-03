@@ -152,7 +152,7 @@ TEST_CITIES: List[str] = [
 #   - Example: ["Lagos", "Abuja", "Enugu", "Maiduguri"]
 
 
-CITY_SELECTION_MODE: str = "TEST"  # Options: "ALL", "ABOVE_1M", "TEST", or "SPECIFIC"
+CITY_SELECTION_MODE: str = "ALL"  # Options: "ALL", "ABOVE_1M", "TEST", or "SPECIFIC"
 
 
 SELECTED_CITIES: List[str] = [
@@ -1188,117 +1188,67 @@ VALIDATION_CONFIG = {
 }
 
 # =============================================================================
-# LST MODELLING CONFIGURATION (Notebook 06)
+# HOTSPOT MODELLING CONFIGURATION (Notebook 06)
 # =============================================================================
-# Notebook 06 is split into three sub-stages:
-#   061 — Feature engineering (extract predictor variables per pixel/zone)
-#   062 — Model training (Random Forest / Gradient Boosting regression)
-#   063 — Model validation (hold-out test set, spatial cross-validation)
+# Notebook 06 investigates which physiographic landscape elements predict
+# hotspot occurrence (binary logistic), hotspot spatial extent (OLS with
+# city-clustered SEs), and hotspot intensity (OLS with city-clustered SEs
+# using mean LST).  Results are produced separately for Day and Night.
 #
-# This section configures feature selection, model hyperparameters, and
-# validation strategy.  All parameters are also overridable via env vars.
+# Analysis 1: Hotspot Occurrence — Hierarchical Logistic Regression
+#   Dataset: 50 city AOIs, DV = Hotspot_present (0/1), method = Gi*
+# Analysis 2: Hotspot Extent — Hierarchical OLS with Clustered SEs
+#   Dataset: P90 hotspot polygons, DV = log(area_km2)
+# Analysis 3: Hotspot Intensity — Hierarchical OLS with Clustered SEs
+#   Dataset: P90 hotspot polygons, DV = mean LST (°C) within polygon
 
-# Output directories for each modelling sub-stage
-MODEL_OUTPUT_DIRS = {
-    'features':   OUTPUT_DIR / '061_lst_model_variables',   # Predictor variables
-    'models':     OUTPUT_DIR / '062_lst_modelling',          # Trained models & predictions
-    'validation': OUTPUT_DIR / '063_lst_model_validation',   # Validation reports & plots
+# Output directory
+MODEL_OUTPUT_DIR = OUTPUT_DIR / '06_hotspot_modelling'
+
+# Hierarchical block order for both analyses.
+# Each element is a landscape class attribute column from the landscape GDF.
+# Blocks are added cumulatively: Block 1 = [0], Block 2 = [0,1], etc.
+HIERARCHY_BLOCKS = [
+    'Climate_Class',                                       # ← CHANGE THIS  (Block 1)
+    'Geology_Class',                                       # ← CHANGE THIS  (Block 2 = Climate + Geology)
+    'Elevation_Class',                                     # ← CHANGE THIS  (Block 3 = Climate + Geology + Elevation)
+]
+
+# Analysis 1 configuration (binary logistic)
+LOGISTIC_CONFIG = {
+    'hotspot_method': 'GI_STAR',                           # ← CHANGE THIS  (detection method for binary DV)
+    'periods': ['Day', 'Night'],                           # Separate models per period
+    'contour_levels': 'all',                               # 'all' or list like [0.5, 0.75, 0.9]
+    'significance_level': 0.05,                            # ← CHANGE THIS  (alpha for p-values)
 }
 
-# Feature engineering (Notebook 061)
-# These are candidate predictor variables extracted per pixel or AOI zone.
-# Add/remove features as needed for your study area.
-MODEL_FEATURES_CONFIG = {
-    # Land cover / land use features
-    'landcover_features': [
-        'NDVI',                     # Normalised Difference Vegetation Index
-        'NDBI',                     # Normalised Difference Built-up Index
-        'NDWI',                     # Normalised Difference Water Index
-        'impervious_fraction',      # Fraction of impervious surface
-    ],                                                     # ← CHANGE THIS  (add/remove predictor names)
-    
-    # Physiographic / landscape features
-    'physiographic_features': [
-        'elevation_m',              # DEM elevation (metres)
-        'slope_degrees',            # Terrain slope
-        'aspect',                   # Terrain aspect (0–360°)
-        'distance_to_water_m',      # Distance to nearest water body
-        'distance_to_road_m',       # Distance to nearest major road
-    ],                                                     # ← CHANGE THIS
-    
-    # Climate / atmospheric features
-    'climate_features': [
-        'air_temp_2m',              # ERA5-Land 2 m air temperature
-        'wind_speed',               # ERA5-Land 10 m wind speed
-        'relative_humidity',        # ERA5-Land surface relative humidity
-    ],                                                     # ← CHANGE THIS
-    
-    # Population / urban density
-    'population_features': [
-        'population_density',       # GHSL population per km²
-    ],
-    
-    # GEE data sources for feature extraction
-    'gee_datasets': {
-        'dem':       'USGS/SRTMGL1_003',                   # SRTM 30 m DEM
-        'landcover': 'ESA/WorldCover/v200',                # ESA WorldCover 10 m
-        'ndvi':      'MODIS/061/MOD13A2',                  # MODIS 16-day NDVI
-    },
-    
-    # Spatial resolution for feature rasters (metres)
-    'resolution_m': 1000,                                  # ← CHANGE THIS  (should match LST resolution)
+# Analysis 2 configuration (OLS with clustered SEs — hotspot extent)
+OLS_CLUSTERED_CONFIG = {
+    'hotspot_method': 'P90',                               # ← CHANGE THIS  (detection method for extent DV)
+    'dependent_variable': 'area_km2',                      # Raw DV (log-transform applied if skewed)
+    'skewness_threshold': 1.0,                             # ← CHANGE THIS  (apply log-transform if skew > this)
+    'cluster_variable': 'city',                            # Clustering unit for robust SEs
+    'periods': ['Day', 'Night'],                           # Separate models per period
+    'contour_levels': 'all',                               # 'all' or list like [0.5, 0.75, 0.9]
+    'significance_level': 0.05,                            # ← CHANGE THIS
 }
 
-# Model training (Notebook 062)
-MODEL_TRAINING_CONFIG = {
-    # Target variable
-    'target_variable': 'lst_day_median',                   # ← CHANGE THIS  ('lst_day_median', 'lst_night_median', etc.)
-    
-    # Models to train (all will be compared)
-    'models': {
-        'random_forest': {
-            'n_estimators': 500,                           # ← CHANGE THIS  (number of trees)
-            'max_depth': None,                             # None = no limit; set int to control overfitting
-            'min_samples_split': 5,
-            'min_samples_leaf': 2,
-            'max_features': 'sqrt',                        # 'sqrt', 'log2', or float fraction
-            'random_state': RANDOM_STATE,
-            'n_jobs': N_JOBS,
-        },
-        'gradient_boosting': {
-            'n_estimators': 300,                           # ← CHANGE THIS
-            'learning_rate': 0.05,                         # ← CHANGE THIS  (lower = slower but more robust)
-            'max_depth': 6,
-            'subsample': 0.8,
-            'random_state': RANDOM_STATE,
-        },
-    },
-    
-    # Feature importance threshold — drop features below this
-    'importance_threshold': 0.01,                          # ← CHANGE THIS  (0 = keep all)
-    
-    # Test set fraction (also see global TEST_SIZE above)
-    'test_size': TEST_SIZE,
-    'cv_folds': CV_FOLDS,
-    'stratify_by': 'landscape_cluster',                    # ← CHANGE THIS  (column for stratified split; None = random)
+# Analysis 3 configuration (OLS with clustered SEs — hotspot intensity)
+OLS_INTENSITY_CONFIG = {
+    'hotspot_method': 'P90',                               # ← CHANGE THIS  (detection method)
+    'dependent_variable_day': 'LST_day_mean',              # Mean LST within hotspot polygon (Day)
+    'dependent_variable_night': 'LST_night_mean',          # Mean LST within hotspot polygon (Night)
+    'skewness_threshold': 1.0,                             # ← CHANGE THIS  (apply log-transform if skew > this)
+    'cluster_variable': 'city',                            # Clustering unit for robust SEs
+    'periods': ['Day', 'Night'],                           # Separate models per period
+    'contour_levels': 'all',                               # 'all' or list like [0.5, 0.75, 0.9]
+    'significance_level': 0.05,                            # ← CHANGE THIS
 }
 
-# Model validation (Notebook 063)
-MODEL_VALIDATION_CONFIG = {
-    # Metrics to compute
-    'metrics': ['r2', 'rmse', 'mae', 'mape'],              # ← CHANGE THIS  (add/remove as needed)
-    
-    # Spatial cross-validation
-    'spatial_cv': {
-        'enabled': True,                                   # ← CHANGE THIS  (True = leave-one-city-out CV)
-        'method': 'leave_one_city_out',                    # Options: 'leave_one_city_out', 'spatial_kfold'
-        'n_splits': 5,                                     # Only used if method = 'spatial_kfold'
-    },
-    
-    # Comparison with stakeholder perceptions
-    'stakeholder_comparison': True,                        # Compare model predictions with survey hotspots
-    
-    # Output formats
-    'export_predictions': True,                            # Save predicted LST rasters
-    'export_format': 'geotiff',                            # 'geotiff' or 'netcdf'
+# Export settings for Notebook 06
+MODEL_EXPORT_CONFIG = {
+    'tables_subdir': 'tables',
+    'figures_subdir': 'figures',
+    'figure_formats': ['png', 'pdf'],
+    'figure_dpi': 300,                                     # ← CHANGE THIS
 }

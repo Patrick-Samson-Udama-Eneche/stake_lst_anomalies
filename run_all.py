@@ -126,34 +126,14 @@ NOTEBOOK_REGISTRY = [
         "depends_on": ["04"],
     },
     {
-        "id": "061",
-        "file": "061_lst_model_variables.ipynb",
-        "name": "LST Model Variables",
-        "description": "Feature engineering — extract predictor variables per pixel/zone",
-        "requires_gee": True,          # DEM, land cover, NDVI from GEE
+        "id": "06",
+        "file": "06_hotspot_modelling.ipynb",
+        "name": "Hotspot Modelling",
+        "description": "Landscape-oriented modelling of hotspot occurrence (logistic) and extent (OLS clustered)",
+        "requires_gee": False,
         "requires_eumetsat": False,
-        "accepts_cities": False,       # Auto-discovers from 05 hotspot outputs
+        "accepts_cities": False,
         "depends_on": ["05"],
-    },
-    {
-        "id": "062",
-        "file": "062_lst_modelling.ipynb",
-        "name": "LST Modelling",
-        "description": "Train Random Forest / Gradient Boosting regression models",
-        "requires_gee": False,
-        "requires_eumetsat": False,
-        "accepts_cities": False,
-        "depends_on": ["061"],
-    },
-    {
-        "id": "063",
-        "file": "063_lst_model_validation.ipynb",
-        "name": "LST Model Validation",
-        "description": "Cross-validation, spatial CV, and stakeholder comparison",
-        "requires_gee": False,
-        "requires_eumetsat": False,
-        "accepts_cities": False,
-        "depends_on": ["062"],
     },
 ]
 

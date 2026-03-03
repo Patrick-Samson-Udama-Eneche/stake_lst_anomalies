@@ -65,10 +65,10 @@ Notebook 01: AOI Delineation
       └── Notebook 05: Hotspot Analysis
             P90 → Gi* → KDE polygons → landscape/population enrichment → validation
             │
-            └── Notebook 06: LST Modelling (061 → 062 → 063)
-                  061: Feature engineering (NDVI, NDBI, elevation, distance, population)
-                  062: Model training (Random Forest, Gradient Boosting regression)
-                  063: Model validation (hold-out, spatial CV, stakeholder comparison)
+            └── Notebook 06: Hotspot Modelling
+                  A1: Hotspot occurrence — hierarchical logistic regression (Gi*)
+                  A2: Hotspot extent — hierarchical OLS with city-clustered SEs (P90)
+                  A3: Hotspot intensity — hierarchical OLS on mean LST (P90)
 ```
 
 ### 2.3 Hotspot Identification
@@ -95,13 +95,15 @@ Each hotspot polygon is enriched with:
 - **Population exposure:** GHSL 2020 population count within polygon boundaries
 - **Stakeholder validation:** Hit-rate analysis with configurable buffer zone
 
-### 2.6 LST Predictive Modelling
+### 2.6 Landscape-Oriented Hotspot Modelling
 
-Notebook 06 builds regression models to predict LST from physiographic and urban variables:
+Notebook 06 uses **hierarchical (sequential) regression** to examine which physiographic landscape elements predict hotspot characteristics.  Blocks are entered cumulatively (Climate Zone → Geology → Elevation) and each block’s incremental contribution is tested:
 
-1. **Feature engineering (061):** Extract per-pixel predictor variables (NDVI, NDBI, NDWI, impervious fraction, elevation, slope, distance to water/roads, population density, air temperature) from GEE and local rasters
-2. **Model training (062):** Fit Random Forest and Gradient Boosting regressors; evaluate feature importance; hyperparameter tuning via cross-validation
-3. **Model validation (063):** Hold-out test set metrics (R², RMSE, MAE), leave-one-city-out spatial CV, comparison of model-predicted hotspots with stakeholder survey locations
+1. **Analysis 1 — Occurrence (Logistic):** City-level binary DV (hotspot present 0/1, Gi* method, n=50).  McFadden pseudo-R², LR χ² tests.
+2. **Analysis 2 — Extent (OLS Clustered):** Polygon-level log(area), P90 method, city-clustered SEs, R²/Adj-R², partial F-tests.
+3. **Analysis 3 — Intensity (OLS Clustered):** Polygon-level mean LST (°C), P90 method, city-clustered SEs, R²/Adj-R², partial F-tests.
+
+All results produced separately for Day and Night, visualised in Day|Night panels.
 
 ### 2.7 Stakeholder Validation
 
@@ -135,6 +137,7 @@ All parameters are centralised in `config.py`:
 | `decision_tree_utils.py` | Duration-priority event selection logic |
 | `seviri_processing_utils.py` | EUMETSAT download, MSG native processing, reprojection |
 | `visualization.py` | All plotting functions (maps, charts, heatmaps, ~8,000 lines) |
+| `modelling_utils.py` | Hierarchical regression, panel Day|Night charts, skewness diagnostic (NB06) |
 
 ### City Selection Flow
 
@@ -207,8 +210,7 @@ Each cluster represents a distinct combination of climate zone, geological subst
 | 3 — Monthly/Annual LST | **Complete** | MODIS trends for 5 cities (2006–2024) |
 | 4 — Daily LST & SEVIRI | **Complete** | Hot events detected, persistent heat rasters generated |
 | 5 — Hotspot Analysis | **Complete** | P90/Gi\*/KDE hotspots delineated, enriched, validated |
-| 6 — LST Modelling | **In Progress** | Feature engineering + predictive models (RF, GBR) |
-| 7 — Model Validation | **Planned** | Spatial cross-validation and stakeholder comparison |
+| 6 — Hotspot Modelling | **Complete** | Hierarchical regression: occurrence, extent, intensity (Day/Night) |
 
 ---
 
