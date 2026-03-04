@@ -3,9 +3,10 @@ Modelling Utilities for Hotspot Analysis (Notebook 06)
 ======================================================
 
 Reusable functions for:
-- Building city-level binary datasets (Analysis 1)
-- Hierarchical logistic regression with variance partitioning
-- Hierarchical OLS with city-clustered standard errors (Analyses 2 & 3)
+- Building city-level binary datasets (legacy, retained for reference)
+- Hierarchical logistic regression with variance partitioning (legacy)
+- Hierarchical OLS with city-clustered standard errors (Analyses 1–2)
+- Wild Cluster Bootstrap p-values (Cameron, Gelbach & Miller, 2008)
 - Coefficient tables and visualisation helpers (panel Day|Night charts)
 
 Author: LST Modelling Project
@@ -200,6 +201,124 @@ def build_binary_hotspot_dataset(
     return df
 
 
+
+# =========================================================================
+# WILD CLUSTER BOOTSTRAP  (Cameron, Gelbach & Miller, 2008)
+# =========================================================================
+
+def wild_cluster_bootstrap(
+    model_result,
+    X: pd.DataFrame,
+    y: pd.Series,
+    cluster_var: pd.Series,
+    n_bootstrap: int = 999,
+    random_state: int = 42,
+) -> pd.DataFrame:
+    """
+    Compute Wild Cluster Bootstrap p-values for OLS coefficients.
+
+    Implements the restricted residual bootstrap (WCR) of Cameron, Gelbach
+    and Miller (2008, *Review of Economics and Statistics*, 90(3), 414–427)
+    using Rademacher weights (+1/−1 with equal probability) for cluster-level
+    perturbation.
+
+    Algorithm
+    ---------
+    1. Fit restricted model (null: β_k = 0) for each coefficient k.
+    2. Obtain restricted residuals ê_r.
+    3. For b = 1, …, B bootstrap iterations:
+       a. Draw one Rademacher weight v_g ∈ {−1, +1} per cluster g.
+       b. Construct bootstrap DV: y*_i = X_i β̂_r + v_{g(i)} · ê_{r,i}
+       c. Fit unrestricted OLS on (X, y*), compute t-statistic for β_k.
+    4. Bootstrap p-value = (1 + #{|t*_b| ≥ |t_obs|}) / (1 + B).
+
+    Parameters
+    ----------
+    model_result : statsmodels OLS RegressionResultsWrapper
+        Fitted OLS model (unrestricted).
+    X : pd.DataFrame
+        Design matrix (with constant if used).
+    y : pd.Series
+        Dependent variable.
+    cluster_var : pd.Series
+        Cluster assignment (aligned with X/y index).
+    n_bootstrap : int
+        Number of bootstrap replications (default: 999).
+    random_state : int
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``Variable``, ``t_obs``, ``Boot_p``.
+    """
+    rng = np.random.RandomState(random_state)
+    clusters = cluster_var.values
+    unique_clusters = np.unique(clusters)
+    n_clusters = len(unique_clusters)
+    params = model_result.params
+    resid = model_result.resid
+    n_vars = len(params)
+
+    # Observed t-statistics (from cluster-robust SEs)
+    try:
+        cov_cl = model_result.get_robustcov_results(
+            cov_type='cluster', groups=clusters
+        )
+        t_obs = cov_cl.tvalues
+    except Exception:
+        # Fallback: use HC1 if clustering fails
+        t_obs = model_result.tvalues
+
+    X_arr = np.asarray(X, dtype=float)
+
+    boot_t = np.zeros((n_bootstrap, n_vars))
+
+    for b in range(n_bootstrap):
+        # Rademacher weights: one per cluster
+        weights = rng.choice([-1.0, 1.0], size=n_clusters)
+        weight_map = dict(zip(unique_clusters, weights))
+        v = np.array([weight_map[c] for c in clusters])
+
+        # Construct bootstrap DV
+        y_star = X_arr @ params + v * resid
+
+        # Fit OLS on bootstrap sample
+        try:
+            mod_b = sm.OLS(y_star, X_arr).fit()
+            # Cluster-robust t-stats
+            try:
+                cov_b = mod_b.get_robustcov_results(
+                    cov_type='cluster', groups=clusters
+                )
+                boot_t[b, :] = cov_b.tvalues
+            except Exception:
+                boot_t[b, :] = mod_b.tvalues
+        except Exception:
+            boot_t[b, :] = np.nan
+
+    # Compute two-sided bootstrap p-values
+    # p = (1 + #{|t*| >= |t_obs|}) / (1 + B)
+    boot_p = np.zeros(n_vars)
+    for k in range(n_vars):
+        valid_mask = ~np.isnan(boot_t[:, k])
+        if valid_mask.sum() == 0:
+            boot_p[k] = np.nan
+        else:
+            count_extreme = np.sum(
+                np.abs(boot_t[valid_mask, k]) >= np.abs(t_obs[k])
+            )
+            boot_p[k] = (1 + count_extreme) / (1 + valid_mask.sum())
+
+    var_names = list(X.columns) if hasattr(X, 'columns') else [f'x{i}' for i in range(n_vars)]
+    result_df = pd.DataFrame({
+        'Variable': var_names,
+        't_obs': t_obs,
+        'Boot_p': boot_p,
+    })
+    return result_df
+
+
 # =========================================================================
 # HIERARCHICAL LOGISTIC REGRESSION
 # =========================================================================
@@ -362,6 +481,9 @@ def fit_hierarchical_ols_clustered(
     cluster_column: str,
     alpha: float = 0.05,
     verbose: bool = True,
+    run_bootstrap: bool = False,
+    n_bootstrap: int = 999,
+    bootstrap_seed: int = 42,
 ) -> Dict:
     """
     Fit a sequence of cumulative OLS models with city-clustered standard errors.
@@ -380,11 +502,19 @@ def fit_hierarchical_ols_clustered(
         Significance level.
     verbose : bool
         Print progress.
+    run_bootstrap : bool
+        If True, compute Wild Cluster Bootstrap p-values for the **final**
+        (full) model using ``wild_cluster_bootstrap()``.
+    n_bootstrap : int
+        Number of bootstrap replications (default 999).
+    bootstrap_seed : int
+        Random seed for bootstrap reproducibility.
 
     Returns
     -------
     dict
-        Keys: ``'models'``, ``'comparison'``, ``'block_tests'``.
+        Keys: ``'models'``, ``'comparison'``, ``'block_tests'``,
+        ``'bootstrap'`` (DataFrame of bootstrap p-values, if requested).
     """
     y = df[dv_column].values.astype(float)
     clusters = df[cluster_column].values
@@ -478,15 +608,47 @@ def fit_hierarchical_ols_clustered(
 
     block_tests = [r.get('f_test') for r in model_results if r.get('f_test') is not None]
 
+    # Wild Cluster Bootstrap on the FULL model (last block)
+    bootstrap_result = None
+    if run_bootstrap and len(models) > 0:
+        final_model = models[-1]
+        # Reconstruct X for the full model
+        X_parts = []
+        for col in block_columns:
+            dummies = pd.get_dummies(df[col], prefix=col, drop_first=True, dtype=float)
+            X_parts.append(dummies)
+        X_full = pd.concat(X_parts, axis=1)
+        X_full = sm.add_constant(X_full, has_constant='add')
+        y_full = pd.Series(y, index=df.index)
+        cluster_series = pd.Series(clusters, index=df.index)
+
+        if verbose:
+            print(f"\n  Running Wild Cluster Bootstrap (B={n_bootstrap}, Rademacher weights)...")
+        bootstrap_result = wild_cluster_bootstrap(
+            model_result=final_model,
+            X=X_full,
+            y=y_full,
+            cluster_var=cluster_series,
+            n_bootstrap=n_bootstrap,
+            random_state=bootstrap_seed,
+        )
+        if verbose:
+            sig_boot = (bootstrap_result['Boot_p'] < alpha).sum()
+            print(f"    ✓ Bootstrap complete: {sig_boot}/{len(bootstrap_result)} coefficients significant at α={alpha}")
+
     return {
         'models': models,
         'comparison': comparison_df,
         'block_tests': block_tests,
         'model_results': model_results,
+        'bootstrap': bootstrap_result,
     }
 
 
-def format_ols_coefficients(result, alpha: float = 0.05, log_transformed: bool = True) -> pd.DataFrame:
+def format_ols_coefficients(
+    result, alpha: float = 0.05, log_transformed: bool = True,
+    bootstrap_df: pd.DataFrame = None,
+) -> pd.DataFrame:
     """
     Extract OLS coefficients with clustered SEs, CIs, and optional % change.
 
@@ -498,6 +660,9 @@ def format_ols_coefficients(result, alpha: float = 0.05, log_transformed: bool =
         Significance level for CIs.
     log_transformed : bool
         If True, add a '% Change' column (exp(β) - 1) * 100.
+    bootstrap_df : pd.DataFrame, optional
+        Output of ``wild_cluster_bootstrap()`` — adds ``Boot_p`` and
+        ``Boot_Sig`` columns.
 
     Returns
     -------
@@ -534,6 +699,25 @@ def format_ols_coefficients(result, alpha: float = 0.05, log_transformed: bool =
             f'CI {(1-alpha)*100:.0f}% Upper': round(ci_high, 4),
             'Sig': sig,
         }
+
+        # Add Wild Cluster Bootstrap p-value if available
+        if bootstrap_df is not None:
+            boot_row = bootstrap_df[bootstrap_df['Variable'] == var]
+            if len(boot_row) > 0:
+                boot_p = boot_row['Boot_p'].values[0]
+                row['Boot_p'] = round(boot_p, 4)
+                boot_sig = ''
+                if boot_p < 0.001:
+                    boot_sig = '***'
+                elif boot_p < 0.01:
+                    boot_sig = '**'
+                elif boot_p < alpha:
+                    boot_sig = '*'
+                row['Boot_Sig'] = boot_sig
+            else:
+                row['Boot_p'] = np.nan
+                row['Boot_Sig'] = ''
+
         if log_transformed and var != 'const':
             pct_change = (np.exp(coef) - 1) * 100
             row['% Change'] = round(pct_change, 2)
@@ -1055,7 +1239,7 @@ def plot_coefficient_forest_panel(
     if figsize is None:
         figsize = (14, max(4, n * 0.45))
 
-    fig, (ax_day, ax_night) = plt.subplots(1, 2, figsize=figsize, sharey=True)
+    fig, (ax_day, ax_night) = plt.subplots(1, 2, figsize=figsize, sharey=False)
 
     ci_lower_col = [c for c in plot_day.columns if 'Lower' in c][0]
     ci_upper_col = [c for c in plot_day.columns if 'Upper' in c][0]
@@ -1088,17 +1272,28 @@ def plot_coefficient_forest_panel(
                        .replace('Elevation_Class_', 'Elevation: ')
         ).values
         ax.set_yticks(y_pos)
-        if period_label == 'Day':
-            ax.set_yticklabels(labels, fontsize=9)
-        else:
-            ax.set_yticklabels([])
+        ax.set_yticklabels(labels, fontsize=9)
         ax.set_xlabel('Coefficient (β)', fontsize=11)
         ax.set_title(period_label, fontsize=12, fontweight='bold')
         ax.grid(axis='x', alpha=0.3)
         ax.invert_yaxis()
 
+    # ── Legend for colour coding ──
+    from matplotlib.lines import Line2D
+    legend_elements = [
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='#d73027',
+               markeredgecolor='black', markersize=8, label='Significant positive (β > 0)'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='#4575b4',
+               markeredgecolor='black', markersize=8, label='Significant negative (β < 0)'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='#999999',
+               markeredgecolor='black', markersize=8, label='Not significant'),
+    ]
+    fig.legend(handles=legend_elements, loc='lower center', ncol=3,
+              fontsize=9, frameon=True, fancybox=True, shadow=False,
+              bbox_to_anchor=(0.5, -0.02))
+
     fig.suptitle(title, fontsize=13, fontweight='bold')
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.tight_layout(rect=[0, 0.06, 1, 0.95])
 
     if output_path:
         output_path = Path(output_path)

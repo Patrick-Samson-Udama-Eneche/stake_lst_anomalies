@@ -1191,15 +1191,13 @@ VALIDATION_CONFIG = {
 # HOTSPOT MODELLING CONFIGURATION (Notebook 06)
 # =============================================================================
 # Notebook 06 investigates which physiographic landscape elements predict
-# hotspot occurrence (binary logistic), hotspot spatial extent (OLS with
-# city-clustered SEs), and hotspot intensity (OLS with city-clustered SEs
-# using mean LST).  Results are produced separately for Day and Night.
+# hotspot spatial extent (OLS with city-clustered SEs) and hotspot intensity
+# (OLS with city-clustered SEs using mean LST).
+# Results are produced separately for Day and Night.
 #
-# Analysis 1: Hotspot Occurrence — Hierarchical Logistic Regression
-#   Dataset: 50 city AOIs, DV = Hotspot_present (0/1), method = Gi*
-# Analysis 2: Hotspot Extent — Hierarchical OLS with Clustered SEs
+# Analysis 1: Hotspot Extent — Hierarchical OLS with Clustered SEs
 #   Dataset: P90 hotspot polygons, DV = log(area_km2)
-# Analysis 3: Hotspot Intensity — Hierarchical OLS with Clustered SEs
+# Analysis 2: Hotspot Intensity — Hierarchical OLS with Clustered SEs
 #   Dataset: P90 hotspot polygons, DV = mean LST (°C) within polygon
 
 # Output directory
@@ -1214,15 +1212,15 @@ HIERARCHY_BLOCKS = [
     'Elevation_Class',                                     # ← CHANGE THIS  (Block 3 = Climate + Geology + Elevation)
 ]
 
-# Analysis 1 configuration (binary logistic)
-LOGISTIC_CONFIG = {
-    'hotspot_method': 'GI_STAR',                           # ← CHANGE THIS  (detection method for binary DV)
-    'periods': ['Day', 'Night'],                           # Separate models per period
-    'contour_levels': 'all',                               # 'all' or list like [0.5, 0.75, 0.9]
-    'significance_level': 0.05,                            # ← CHANGE THIS  (alpha for p-values)
+# Wild Cluster Bootstrap configuration (Cameron, Gelbach & Miller, 2008)
+WILD_BOOTSTRAP_CONFIG = {
+    'enabled': True,                                       # Run bootstrap for all OLS models
+    'n_bootstrap': 999,                                    # Number of replications (B)
+    'weights': 'rademacher',                               # Weight type (+1/-1 with equal prob)
+    'random_state': 42,                                    # Reproducibility seed
 }
 
-# Analysis 2 configuration (OLS with clustered SEs — hotspot extent)
+# Analysis 1 configuration (OLS with clustered SEs — hotspot extent)
 OLS_CLUSTERED_CONFIG = {
     'hotspot_method': 'P90',                               # ← CHANGE THIS  (detection method for extent DV)
     'dependent_variable': 'area_km2',                      # Raw DV (log-transform applied if skewed)
@@ -1233,7 +1231,7 @@ OLS_CLUSTERED_CONFIG = {
     'significance_level': 0.05,                            # ← CHANGE THIS
 }
 
-# Analysis 3 configuration (OLS with clustered SEs — hotspot intensity)
+# Analysis 2 configuration (OLS with clustered SEs — hotspot intensity)
 OLS_INTENSITY_CONFIG = {
     'hotspot_method': 'P90',                               # ← CHANGE THIS  (detection method)
     'dependent_variable_day': 'LST_day_mean',              # Mean LST within hotspot polygon (Day)

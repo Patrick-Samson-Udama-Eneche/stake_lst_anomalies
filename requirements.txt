@@ -25,6 +25,7 @@ eumdac>=2.0.0
 
 # Statistical analysis
 scipy>=1.10.0
+statsmodels>=0.14.0
 
 # Parallel processing
 dask[distributed]>=2023.5.0

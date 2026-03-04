@@ -139,10 +139,9 @@ class TestConfigConstants:
         assert levels == sorted(levels)
         assert all(0 < lev <= 1 for lev in levels)
 
-    def test_model_output_dirs_exist_as_keys(self):
-        assert 'features' in config.MODEL_OUTPUT_DIRS
-        assert 'models' in config.MODEL_OUTPUT_DIRS
-        assert 'validation' in config.MODEL_OUTPUT_DIRS
+    def test_model_output_dir_exists_as_path(self):
+        assert hasattr(config, 'MODEL_OUTPUT_DIR')
+        assert str(config.MODEL_OUTPUT_DIR).endswith('06_hotspot_modelling')
 
     def test_test_size_fraction(self):
         assert 0 < config.TEST_SIZE < 1

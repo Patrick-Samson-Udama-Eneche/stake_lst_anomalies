@@ -4,7 +4,7 @@
 
 Reproducible Land Surface Temperature (LST) modeling and Urban Heat Island (UHI) hotspot analysis for Nigerian cities. The project integrates multi-source satellite data (MODIS, ERA5-Land, MSG SEVIRI), stakeholder survey data from workshops organized, and landscape assessment to identify, quantify, and validate persistent heat events across multiple study cities.
 
-**Study cities:** 16 Nigerian cities with population ≥ 1 million (configurable in `config.py`)  
+**Study cities:** 50 Nigerian cities (configurable in `config.py`)  
 **Test cities:** Lagos, Abuja, Kano, Jos, Port Harcourt  
 **Workshop cities:** Individuals from 28 cities across Nigeria were in attendance (stakeholder survey)  
 **Study year:** 2024/2025  
@@ -146,7 +146,7 @@ Notebooks must be run in order — each builds on outputs from previous stages.
 | 03 | `03_temporal_analysis_months_annual.ipynb` | Monthly/annual LST extraction and trend analysis (2006–2024) | GEE (MODIS) | Notebook 01 AOI outputs |
 | 04 | `04_temporal_analysis_daily.ipynb` | Daily LST analysis: MODIS + ERA5 hot events, SEVIRI persistent heat rasters | GEE, EUMETSAT | Notebook 01 AOI outputs |
 | 05 | `05_hotspot_analysis.ipynb` | UHI hotspot detection (Gi\*), KDE delineation, landscape enrichment, population exposure, stakeholder validation | GEE (GHSL) | Notebooks 03 + 04 outputs, landscape/survey data |
-| 06 | `06_hotspot_modelling.ipynb` | Landscape-oriented modelling: hotspot occurrence (logistic), extent (OLS), intensity (OLS) with hierarchical block entry and city-clustered SEs | — | Notebook 05 hotspot outputs, landscape data |
+| 06 | `06_hotspot_modelling.ipynb` | Landscape-oriented modelling: extent (OLS) and intensity (OLS) with hierarchical block entry, city-clustered SEs, and Wild Cluster Bootstrap inference (B = 999) | — | Notebook 05 hotspot outputs, landscape data |
 
 ### Execution Times (Benchmark)
 
@@ -283,6 +283,7 @@ stake_lst_modelling/
 | `FIGURE_DPI` | 300 | Publication-quality output |
 | `HIERARCHY_BLOCKS` | Climate → Geology → Elevation | Hierarchical regression block order |
 | `OLS_CLUSTERED_CONFIG.cluster_variable` | city | City-level clustered standard errors |
+| `WILD_BOOTSTRAP_CONFIG.n_bootstrap` | 999 | Wild Cluster Bootstrap replications (Rademacher weights) |
 
 The `CITIES` list is populated dynamically by scanning Notebook 04 SEVIRI outputs (via `load_cities_from_daily_analysis()`). For Notebook 01, cities are selected interactively or via CLI.
 
@@ -301,11 +302,12 @@ The `CITIES` list is populated dynamically by scanning Notebook 04 SEVIRI output
 - **Tree species heatmaps** — 4 variants (by cluster/city × top-15/all species)
 
 ### Notebook 06 — Hotspot Modelling Outputs
+- **Data composition charts** — donut and Sankey diagrams showing sample composition by landscape class
 - **Skewness diagnostics** — 2×2 Day|Night panels with normal distribution overlay
 - **Model comparison tables** (CSV) — hierarchical block R², ΔR², AIC, BIC per analysis
-- **Coefficient tables** (CSV) — OLS coefficients with clustered SEs and % change
-- **Variance partitioning panels** — Day|Night stacked bar charts (logistic pseudo-R², OLS R²)
-- **Coefficient forest plots** — Day|Night horizontal panel with significance colouring
+- **Coefficient tables** (CSV) — OLS coefficients with clustered SEs, Wild Cluster Bootstrap *p*-values, and % change
+- **Variance partitioning panels** — Day|Night stacked bar charts showing block-level R² contributions
+- **Coefficient forest plots** — Day|Night horizontal panel with significance colouring (OLS and bootstrap)
 - **Model metadata** (JSON) — reproducibility records per analysis/period
 
 ---
@@ -313,6 +315,8 @@ The `CITIES` list is populated dynamically by scanning Notebook 04 SEVIRI output
 ## Documentation
 
 - [docs/PROJECT_CONCEPT_NOTE.md](docs/PROJECT_CONCEPT_NOTE.md) — Unified project concept note (research context, methodology, architecture, outputs)
+- [docs/MANUSCRIPT_DRAFT.md](docs/MANUSCRIPT_DRAFT.md) — Nature Cities manuscript draft (complete with all numerical results)
+- [docs/manuscript_draft_elsevier.md](docs/manuscript_draft_elsevier.md) — Urban Climate / Elsevier manuscript draft (complete with all numerical results)
 - [docs/SECURITY_SETUP.md](docs/SECURITY_SETUP.md) — Credential management and setup instructions
 - [docs/Idea_mapping_formatted.md](docs/Idea_mapping_formatted.md) — Original research strategy document
 - [secrets/README.md](secrets/README.md) — API credential file formats and setup guide
