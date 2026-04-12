@@ -1,4 +1,4 @@
-"""
+﻿"""
 Visualization Utilities
 =======================
 
@@ -16,8 +16,10 @@ import geopandas as gpd
 import folium
 from folium import plugins
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple
 import warnings
+
+from src.data_io import export_figure_set
 
 try:
     import config
@@ -118,24 +120,29 @@ def create_aoi_map(aoi_results: Dict[str, Any], current_city: str,
     legend.get_frame().set_facecolor('white')
     legend.get_frame().set_alpha(0.9)
     
-    # Add north arrow
+    # Add north arrow using arrowprops only (robust across SVG/PDF encodings)
     ax.annotate('N', xy=(0.9, 0.9), xycoords='axes fraction', fontsize=16, fontweight='bold',
                ha='center', va='center',
                bbox=dict(boxstyle='circle', facecolor='white', edgecolor='black'))
-    ax.annotate('↑', xy=(0.9, 0.84), xycoords='axes fraction', fontsize=18, fontweight='bold',
-               ha='center', va='center')
+    ax.annotate('', xy=(0.9, 0.88), xytext=(0.9, 0.83), xycoords='axes fraction',
+               arrowprops=dict(arrowstyle='->', lw=1.8, color='black'))
     
     plt.tight_layout()
     
     # Save if path provided
     if save_path:
         save_path = Path(save_path)
-        # Save PNG
-        fig.savefig(save_path, dpi=config.FIGURE_DPI, bbox_inches='tight')
-        # Save PDF
+        export_figure_set(
+            fig,
+            save_path,
+            dpi=config.FIGURE_DPI,
+            include_svg=True,
+            include_pdf=True,
+            bbox_inches='tight',
+        )
         pdf_path = save_path.with_suffix('.pdf')
-        fig.savefig(pdf_path, format='pdf', bbox_inches='tight')
-        print(f"AOI map saved: {save_path.name} + {pdf_path.name}")
+        svg_path = save_path.with_suffix('.svg')
+        print(f"AOI map saved: {save_path.name} + {svg_path.name} + {pdf_path.name}")
     
     return fig
 
@@ -269,32 +276,15 @@ def create_population_trends_plot(aoi_results: Dict[str, Any], current_city: str
         print("No population data available for plotting.")
         return None
     
-    # Prepare year series
-    pop_years = [str(y) for y in range(1950, 2036, 5)]
+    # Prepare year series — detect available range from data
+    all_year_cols = sorted([c for c in cities_in_aoi_df.columns if c.isdigit()])
+    pop_years = [y for y in all_year_cols if int(y) % 5 == 0]
     years_int = list(map(int, pop_years))
     
     # Create figure
     fig, ax = plt.subplots(figsize=figsize)
     
-    # Plot city series
-    palette = plt.cm.Set3(np.linspace(0, 1, len(cities_in_aoi_df)))
-    
-    for i, (_, city) in enumerate(cities_in_aoi_df.iterrows()):
-        name = city["Urban Agglomeration"]
-        populations = [city[yr] for yr in pop_years if yr in city.index]
-        
-        if name == current_city:  # target city
-            ax.plot(years_int[:len(populations)], populations,
-                    label=f"{name} (Target)",
-                    color="red", marker="o",
-                    linewidth=1, markersize=4, alpha=0.75)
-        else:  # other cities
-            ax.plot(years_int[:len(populations)], populations,
-                    label=name,
-                    color=palette[i], marker="o",
-                    linewidth=1.2, markersize=4, alpha=0.75)
-    
-    # Total AOI population trend
+    # Total AOI population trend (single line per AOI)
     total_pop = [cities_in_aoi_df[yr].sum() for yr in pop_years if yr in cities_in_aoi_df.columns]
     ax.plot(years_int[:len(total_pop)], total_pop,
             label="Total AOI Population",
@@ -307,26 +297,72 @@ def create_population_trends_plot(aoi_results: Dict[str, Any], current_city: str
     ax.scatter(2024, y_2024, marker="D", s=70,
                color="crimson", edgecolors="black", linewidth=1, zorder=5)
     
-    # Vertical 2024 label
-    ax.text(2024, ax.get_ylim()[1] * 0.9,
+    # 2050 marker and vertical line
+    y_2050 = cities_in_aoi_df["2050"].sum()
+    ax.axvline(2050, color="darkgreen", linestyle="--", linewidth=1)
+    ax.scatter(2050, y_2050, marker="D", s=70,
+               color="darkgreen", edgecolors="black", linewidth=1, zorder=5)
+    
+    # Vertical 2024 label (bottom of line)
+    y_max = max(total_pop) * 1.1
+    ax.text(2024, y_max * 0.05,
             "2024", rotation=90,
             ha="right", va="bottom", fontsize=8, color="crimson")
     
-    # Population annotation
+    # Vertical 2050 label (middle of line)
+    ax.text(2050, y_max * 0.5,
+            "2050", rotation=90,
+            ha="right", va="center", fontsize=8, color="darkgreen")
+    
+    # 2024 population annotation
     ax.annotate(f"Total Pop 2024:\n{y_2024:,.0f},000",
                 xy=(2024, y_2024),
                 xycoords="data",
-                xytext=(0.5, 0.50),
+                xytext=(0.45, 0.50),
                 textcoords="axes fraction",
                 fontsize=8, fontweight="bold", color="crimson",
                 ha="left", va="center",
                 arrowprops=dict(arrowstyle="->", color="black", lw=1))
     
+    # 2050 population annotation
+    ax.annotate(f"Total Pop 2050:\n{y_2050:,.0f},000",
+                xy=(2050, y_2050),
+                xycoords="data",
+                xytext=(0.45, 0.65),
+                textcoords="axes fraction",
+                fontsize=8, fontweight="bold", color="darkgreen",
+                ha="left", va="center",
+                arrowprops=dict(arrowstyle="->", color="black", lw=1))
+    
+    # Population breakdown box (per-city contributions within AOI)
+    if len(cities_in_aoi_df) > 1 and '2024' in cities_in_aoi_df.columns:
+        breakdown_lines = ["Population Breakdown (2024):"]
+        sorted_cities = cities_in_aoi_df.sort_values('2024', ascending=False, na_position='last')
+        max_show = 8
+        for i, (_, row) in enumerate(sorted_cities.iterrows()):
+            if i >= max_show:
+                remaining = len(sorted_cities) - max_show
+                breakdown_lines.append(f"  ...+{remaining} more")
+                break
+            name = row['Urban Agglomeration']
+            pop = row['2024']
+            suffix = " \u2605" if name == current_city else ""
+            pop_str = f"{pop:,.0f}k" if pd.notna(pop) else "n/a"
+            breakdown_lines.append(f"  {name}: {pop_str}{suffix}")
+        breakdown_lines.append(f"  Total: {y_2024:,.0f}k")
+
+        ax.text(0.98, 0.02,
+                "\n".join(breakdown_lines),
+                transform=ax.transAxes, va="bottom", ha="right",
+                fontsize=6.5,
+                bbox=dict(boxstyle="round,pad=0.4",
+                          facecolor="#fff9db", edgecolor="#8b6914", alpha=0.9))
+
     # Linear trend & regression equation
     slope, intercept = np.polyfit(years_int[:len(total_pop)], total_pop, 1)
     ax.plot(years_int[:len(total_pop)], np.poly1d([slope, intercept])(years_int[:len(total_pop)]),
             linestyle="--", color="grey", linewidth=1.2,
-            label=f"Linear Trend (slope ≈ {slope:,.0f}k/yr)")
+            label=f"Linear Trend (slope  {slope:,.0f}k/yr)")
     
     # Equation text
     eqn = f"y = {slope:,.0f}·x + {intercept:,.0f}"
@@ -339,28 +375,42 @@ def create_population_trends_plot(aoi_results: Dict[str, Any], current_city: str
     growth_rates = []
     for i in range(0, len(years_int[:len(total_pop)])-2, 2):
         if i+2 < len(total_pop):
-            r = ((total_pop[i+2] / total_pop[i]) ** 0.1 - 1) * 100
-            growth_rates.append(f"{years_int[i]}-{years_int[i+2]}: {r:5.2f}%/yr")
+            if total_pop[i] > 0:
+                r = ((total_pop[i+2] / total_pop[i]) ** 0.1 - 1) * 100
+                growth_rates.append(f"{years_int[i]}-{years_int[i+2]}: {r:5.2f}%/yr")
+    # Overall growth rate — start from first non-zero population year
+    if len(total_pop) >= 2:
+        first_nz = next((j for j, p in enumerate(total_pop) if p > 0), None)
+        if first_nz is not None and first_nz < len(total_pop) - 1:
+            overall_span = years_int[len(total_pop)-1] - years_int[first_nz]
+            overall_r = ((total_pop[-1] / total_pop[first_nz]) ** (1/overall_span) - 1) * 100
+            growth_rates.append(f"Overall ({years_int[first_nz]}-{years_int[len(total_pop)-1]}): {overall_r:5.2f}%/yr")
     
-    ax.text(0.02, 0.98,
-            "Growth Rates (10-yr):\n" + "\n".join(growth_rates),
+    growth_text = "Growth Rates (10-yr):\n" + "\n".join(growth_rates)
+    gr_box = ax.text(0.02, 0.98,
+            growth_text,
             transform=ax.transAxes, va="top",
             fontsize=7.5,
             bbox=dict(boxstyle="round,pad=0.4",
                       facecolor="#d9ecff", edgecolor="#003d7a", alpha=0.9))
     
     # Formatting
-    ax.set_title(f"Population Trends in {current_city} AOI (1950-2035)",
+    _yr0, _yr1 = years_int[0], years_int[-1]
+    ax.set_title(f"Population Trends in {current_city} AOI ({_yr0}\u2013{_yr1})",
                  fontsize=12, fontweight="bold", pad=10)
     ax.set_xlabel("Year", fontsize=8)
     ax.set_ylabel("Population (thousands)", fontsize=8)
     ax.grid(True, alpha=0.25)
     ax.set_ylim(0, max(total_pop) * 1.1)
     
-    # Legend
+    # Legend — placed below the growth rate box with ~1cm gap
+    # Estimate box height: (n_lines * ~line_height) in axes fraction
+    n_gr_lines = len(growth_rates) + 1  # +1 for header
+    gr_box_bottom = 0.98 - n_gr_lines * 0.055  # ~0.055 per line in axes frac
+    legend_top = gr_box_bottom - 0.04  # ~1cm gap
     ax.legend(title="Legend",
               fontsize=7.5, title_fontsize=8.5,
-              loc="upper left", bbox_to_anchor=(0.25, 1),
+              loc="upper left", bbox_to_anchor=(0.02, legend_top),
               frameon=True)
     
     plt.tight_layout()
@@ -426,6 +476,228 @@ def save_figures(aoi_results: Dict[str, Any], current_city: str,
     
     return saved_figures
 
+
+def create_composite_population_trend(all_cities_results: Dict[str, Any],
+                                      save_dir: Optional[str] = None,
+                                      figsize: Tuple[float, float] = (10, 6),
+                                      dpi: int = 300,
+                                      mode: str = 'aoi',
+                                      target_cities: Optional[List[str]] = None) -> Tuple[plt.Figure, Dict[str, Any]]:
+    """
+    Create composite population trend plot for all selected cities.
+
+    Dynamically detects the available year range from the data (works
+    with both the legacy 1950–2035 CSV and the new 1975–2050 WUP 2025 CSV).
+
+    Aggregates population across all cities and plots:
+    - Total population curve with study-year and projection markers
+    - Top-5 city individual lines (with 2024 population in legend)
+    - Linear regression with R² annotation
+    - 10-year growth rates
+    - Projection shading for 2025–last year
+
+    Args:
+        all_cities_results: Dictionary of AOI results keyed by city name.
+        save_dir: Directory to save SVG. If None, files are not saved.
+        figsize: Figure size (width, height).
+        dpi: Resolution for saved PNG.
+        mode: 'aoi' for total AOI population (all cities in buffer),
+              'individual' for target city population only.
+        target_cities: Optional list of city names to include in
+              mode='individual'. If None, all unique cities are included.
+
+    Returns:
+        Tuple of (matplotlib Figure, summary statistics dict).
+    """
+    # Aggregate population
+    aoi_pop_records = []
+    target_set = set(target_cities) if target_cities else None
+    if mode == 'individual':
+        # Collect ALL unique individual cities across all AOIs
+        seen_cities = set()
+        for city_name, aoi_results in all_cities_results.items():
+            aoi_df = aoi_results['cities_in_aoi_df']
+            year_cols_all = sorted([c for c in aoi_df.columns if c.isdigit()])
+            for _, row in aoi_df.iterrows():
+                indiv_city = row['Urban Agglomeration']
+                if indiv_city in seen_cities:
+                    continue
+                if target_set and indiv_city not in target_set:
+                    continue
+                seen_cities.add(indiv_city)
+                record = {'AOI': indiv_city}
+                for y in year_cols_all:
+                    record[y] = row[y]
+                aoi_pop_records.append(record)
+    else:
+        # Default: sum all cities within each AOI
+        for city_name, aoi_results in all_cities_results.items():
+            aoi_df = aoi_results['cities_in_aoi_df']
+            year_cols_all = sorted([c for c in aoi_df.columns if c.isdigit()])
+            record = {'AOI': city_name}
+            for y in year_cols_all:
+                record[y] = aoi_df[y].sum()
+            aoi_pop_records.append(record)
+
+    composite_df = pd.DataFrame(aoi_pop_records)
+
+    # Year columns — detect from data
+    all_year_cols = sorted([c for c in composite_df.columns if c.isdigit()])
+    year_cols = [y for y in all_year_cols if y in composite_df.columns]
+    years_int = list(map(int, year_cols))
+    first_year = years_int[0]
+    last_year = years_int[-1]
+
+    # Sort by 2024 population
+    composite_df_sorted = composite_df.sort_values('2024', ascending=False)
+
+    # Total population per year (millions)
+    total_pop = [composite_df[y].sum() / 1000 for y in year_cols]
+
+    # Top-5 AOIs
+    top5 = composite_df_sorted.head(5)
+
+    #  Create figure 
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Projection shading
+    ax.axvspan(2025, last_year, alpha=0.08, color='grey', zorder=0)
+    proj_mid = (2025 + last_year) / 2
+    ax.text(proj_mid, max(total_pop) * 1.03, 'Projected', ha='center',
+            fontsize=10.4, fontstyle='italic', color='#666')
+
+    # Top-5 AOI lines
+    palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
+    for i, (_, aoi_row) in enumerate(top5.iterrows()):
+        name = aoi_row['AOI']
+        pop_2024_aoi = aoi_row['2024'] / 1000
+        aoi_pop = [aoi_row[y] / 1000 for y in year_cols]
+        ax.plot(years_int, aoi_pop, label=f'{name} ({pop_2024_aoi:.1f} M)',
+                color=palette[i], linewidth=1.0, alpha=0.65, markersize=0)
+
+    # Total population line
+    total_label = 'Total (all cities)' if mode == 'individual' else 'Total (all AOIs)'
+    ax.plot(years_int, total_pop, label=total_label,
+            color='navy', marker='s', linewidth=2.2, markersize=3, alpha=0.9, zorder=4)
+
+    # 2024 marker
+    idx_2024 = years_int.index(2024)
+    y_2024 = total_pop[idx_2024]
+    ax.axvline(2024, color='crimson', linestyle='--', linewidth=1, zorder=3)
+    ax.scatter(2024, y_2024, marker='D', s=80,
+               color='crimson', edgecolors='black', linewidth=1, zorder=6)
+    ax.text(2024, ax.get_ylim()[1] * 0.92 if ax.get_ylim()[1] > 0 else y_2024 * 1.1,
+            '2024', rotation=90, ha='right', va='bottom',
+            fontsize=10.4, color='crimson')
+
+    # Last-year marker
+    idx_last = years_int.index(last_year)
+    y_last = total_pop[idx_last]
+    ax.scatter(last_year, y_last, marker='D', s=80,
+               color='darkgreen', edgecolors='black', linewidth=1, zorder=6)
+
+    # Population annotations
+    ax.annotate(f"Total Pop 2024:\n{y_2024:.1f} M",
+                xy=(2024, y_2024), xycoords='data',
+                xytext=(0.50, 0.45), textcoords='axes fraction',
+                fontsize=11.7, fontweight='bold', color='crimson',
+                ha='left', va='center',
+                arrowprops=dict(arrowstyle='->', color='black', lw=1))
+    ax.annotate(f"Total Pop {last_year}:\n{y_last:.1f} M",
+                xy=(last_year, y_last), xycoords='data',
+                xytext=(0.50, 0.60), textcoords='axes fraction',
+                fontsize=11.7, fontweight='bold', color='darkgreen',
+                ha='left', va='center',
+                arrowprops=dict(arrowstyle='->', color='black', lw=1))
+
+    # Linear regression with R²
+    slope, intercept = np.polyfit(years_int, total_pop, 1)
+    y_pred = np.poly1d([slope, intercept])(years_int)
+    ss_res = np.sum((np.array(total_pop) - y_pred) ** 2)
+    ss_tot = np.sum((np.array(total_pop) - np.mean(total_pop)) ** 2)
+    r_squared = 1 - ss_res / ss_tot
+
+    ax.plot(years_int, y_pred, linestyle='--', color='grey', linewidth=1.2,
+            label=f'Linear Trend \n(slope  {slope:,.2f} M/yr)')
+
+    eqn = f'y = {slope:,.2f}·x + {intercept:,.1f}\n(R² = {r_squared:.4f})'
+    ax.text(0.22, 0.15, eqn, transform=ax.transAxes,
+            fontsize=10.4, color='grey', ha='left', va='bottom',
+            bbox=dict(boxstyle='round,pad=0.25',
+                      facecolor='white', edgecolor='grey', alpha=0.7))
+
+    # 10-year growth rates
+    milestone_years = list(range(first_year, last_year + 1, 10))
+    if last_year not in milestone_years:
+        milestone_years.append(last_year)
+    growth_rates = []
+    for i in range(len(milestone_years) - 1):
+        y0, y1 = milestone_years[i], milestone_years[i + 1]
+        if str(y0) in year_cols and str(y1) in year_cols:
+            p0 = composite_df[str(y0)].sum()
+            p1 = composite_df[str(y1)].sum()
+            if p0 > 0:
+                r = ((p1 / p0) ** (1 / (y1 - y0)) - 1) * 100
+                growth_rates.append(f'{y0}–{y1}: {r:5.2f}%/yr')
+
+    ax.text(0.02, 0.98,
+            '10-yr Growth Rate:\n' + '\n'.join(growth_rates),
+            transform=ax.transAxes, va='top', fontsize=9.75,
+            bbox=dict(boxstyle='round,pad=0.4',
+                      facecolor='#d9ecff', edgecolor='#003d7a', alpha=0.9))
+
+    # Formatting
+    n_aois = len(composite_df)
+    if mode == 'individual':
+        title_label = f'Composite Population Trend — {n_aois} Nigerian Cities (Individual, {first_year}–{last_year})'
+    else:
+        title_label = f'Composite Population Trend — {n_aois} Nigerian AOIs ({first_year}–{last_year})'
+    ax.set_title(title_label, fontsize=16.9, fontweight='bold', pad=12)
+    ax.set_xlabel('Year', fontsize=13)
+    ax.set_ylabel('Population (Millions)', fontsize=13)
+    ax.grid(True, alpha=0.25)
+    ax.set_xlim(first_year - 2, last_year + 2)
+    ax.set_ylim(0, max(total_pop) * 1.12)
+    ax.legend(title='Legend', fontsize=10.4, title_fontsize=11.7,
+              loc='upper left', bbox_to_anchor=(0.22, 1.0),
+              frameon=True, framealpha=0.9)
+    plt.tight_layout()
+
+    # Save
+    if save_dir is not None:
+        save_path = Path(save_dir)
+        save_path.mkdir(parents=True, exist_ok=True)
+        suffix = '_Individual' if mode == 'individual' else ''
+        base = save_path / f'Composite_Population_Trend{suffix}'
+        fig.savefig(base.with_suffix('.png'), dpi=dpi, bbox_inches='tight', facecolor='white')
+        fig.savefig(base.with_suffix('.pdf'), format='pdf', bbox_inches='tight', facecolor='white')
+        fig.savefig(base.with_suffix('.svg'), format='svg', bbox_inches='tight', facecolor='white')
+        print(f" Saved: {base.with_suffix('.png').name}")
+        print(f" Saved: {base.with_suffix('.pdf').name}")
+        print(f" Saved: {base.with_suffix('.svg').name}")
+
+    # Summary statistics
+    pop_first_k = composite_df[str(first_year)].sum()
+    pop_2024_k = composite_df['2024'].sum() if '2024' in composite_df.columns else 0
+    pop_last_k = composite_df[str(last_year)].sum()
+    stats = {
+        'n_aois': n_aois,
+        'n_cities': n_aois,  # backward compat
+        'first_year': first_year,
+        'last_year': last_year,
+        'pop_first_k': pop_first_k,
+        'pop_2024_k': pop_2024_k,
+        'pop_last_k': pop_last_k,
+        # Legacy keys for backward compatibility
+        'pop_1950_k': pop_first_k,
+        'pop_2035_k': pop_last_k,
+        'slope_M_per_yr': slope,
+        'r_squared': r_squared,
+    }
+
+    return fig, stats
+
+
 # ==============================================================================
 # LST TEMPORAL ANALYSIS VISUALIZATIONS
 # ==============================================================================
@@ -468,7 +740,7 @@ def create_combined_lst_heatmap(day_data, night_data, time_dim='year', output_pa
         annot=True,
         fmt='.1f',
         cmap='YlOrRd',
-        cbar_kws={'label': 'LST (�C)'},
+        cbar_kws={'label': 'LST (°C)'},
         linewidths=0.5,
         linecolor='gray',
         ax=ax1
@@ -478,14 +750,14 @@ def create_combined_lst_heatmap(day_data, night_data, time_dim='year', output_pa
     ax1.set_ylabel('City', fontsize=12)
     ax1.tick_params(axis='x', rotation=45)
     
-    # Night-time heatmap
+    # Night-time heatmap (use warm LST palette)
     ax2 = fig.add_subplot(gs[0, 1])
     sns.heatmap(
         night_data,
         annot=True,
         fmt='.1f',
-        cmap='PuBu',
-        cbar_kws={'label': 'LST (�C)'},
+        cmap='YlOrRd',
+        cbar_kws={'label': 'LST (°C)'},
         linewidths=0.5,
         linecolor='gray',
         ax=ax2
@@ -513,7 +785,7 @@ def create_combined_lst_heatmap(day_data, night_data, time_dim='year', output_pa
         # Save PDF
         pdf_path = output_path.with_suffix('.pdf')
         plt.savefig(pdf_path, format='pdf', bbox_inches='tight')
-        print(f'✅ Saved combined heatmap to {output_path.name} + {pdf_path.name}')
+        print(f' Saved combined heatmap to {output_path.name} + {pdf_path.name}')
     
     return fig
 
@@ -549,7 +821,7 @@ def create_lst_heatmap(data, lst_time, time_dim='year', output_path=None, dpi=30
     import math
     
     if data.empty:
-        print(f"⚠️ No data to plot for {lst_time}-time {time_dim}")
+        print(f" No data to plot for {lst_time}-time {time_dim}")
         return None
     
     # Sort ALL cities by mean temperature (warmest first)
@@ -665,9 +937,12 @@ def _create_single_heatmap(data, lst_time, time_dim, output_path, dpi,
     # Create figure
     fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=dpi)
     
-    # Choose colormap based on day/night
-    cmap = 'YlOrRd' if lst_time == 'day' else 'PuBu'
+    # Use the same warm LST palette for day/night and data-driven thresholds.
+    cmap = 'YlOrRd'
     cbar_label = 'LST (\u00b0C)'
+    vals = data.values.flatten()
+    vals = vals[~np.isnan(vals)]
+    vmin, vmax = (np.nanmin(vals), np.nanmax(vals)) if len(vals) else (None, None)
     
     # Create heatmap with colorbar on right
     heatmap = sns.heatmap(
@@ -675,6 +950,8 @@ def _create_single_heatmap(data, lst_time, time_dim, output_path, dpi,
         annot=True,
         fmt='.1f',
         cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
         cbar_kws={
             'label': cbar_label,
             'shrink': 0.7 if not compact else 0.55,
@@ -717,7 +994,7 @@ def _create_single_heatmap(data, lst_time, time_dim, output_path, dpi,
         fig.savefig(output_path, dpi=dpi, bbox_inches='tight')
         pdf_path = output_path.replace('.png', '.pdf')
         fig.savefig(pdf_path, format='pdf', bbox_inches='tight')
-        print(f'✅ Saved: {output_path.split("/")[-1].split(chr(92))[-1]}')
+        print(f' Saved: {output_path.split("/")[-1].split(chr(92))[-1]}')
         plt.close(fig)
         return None
     
@@ -748,7 +1025,7 @@ def create_lst_heatmap_with_validation(data, lst_time, time_dim, validation_df,
     from matplotlib.gridspec import GridSpec
     
     if data.empty:
-        print(f"⚠️ No data to plot for {lst_time}-time {time_dim}")
+        print(f" No data to plot for {lst_time}-time {time_dim}")
         return None
     
     # Sort cities by mean temperature
@@ -798,9 +1075,12 @@ def create_lst_heatmap_with_validation(data, lst_time, time_dim, validation_df,
     # Heatmap subplot
     ax_heatmap = fig.add_subplot(gs[0, 0])
     
-    # Choose colormap
-    cmap = 'YlOrRd' if lst_time == 'day' else 'PuBu'
+    # Use warm LST palette for consistency with LST/QA figures.
+    cmap = 'YlOrRd'
     cbar_label = 'LST (\u00b0C)'
+    vals = data.values.flatten()
+    vals = vals[~np.isnan(vals)]
+    vmin, vmax = (np.nanmin(vals), np.nanmax(vals)) if len(vals) else (None, None)
     
     # Create heatmap
     heatmap = sns.heatmap(
@@ -808,6 +1088,8 @@ def create_lst_heatmap_with_validation(data, lst_time, time_dim, validation_df,
         annot=True,
         fmt='.1f',
         cmap=cmap,
+        vmin=vmin,
+        vmax=vmax,
         cbar_kws={'label': cbar_label, 'shrink': 0.5, 'aspect': 30, 'pad': 0.01},
         linewidths=0.15,
         linecolor='gray',
@@ -907,7 +1189,7 @@ def create_lst_heatmap_with_validation(data, lst_time, time_dim, validation_df,
         fig.savefig(output_path, dpi=dpi, bbox_inches='tight')
         pdf_path = output_path.replace('.png', '.pdf')
         fig.savefig(pdf_path, format='pdf', bbox_inches='tight')
-        print(f'✅ Saved {lst_time}-time {time_dim} heatmap with validation (PNG + PDF)')
+        print(f' Saved {lst_time}-time {time_dim} heatmap with validation (SVG)')
         plt.close(fig)
         return None
     
@@ -1111,7 +1393,7 @@ def plot_multi_city_dataset_comparison(
     dataset1_name, dataset2_name : str
         Human-readable dataset labels (axes / title).
     output_dir : str or Path, optional
-        Directory to save figures (PNG + PDF per page).
+        Directory to save figures (SVG per page).
     figsize : tuple, optional
         Per-page size (auto-calculated if *None*).
     dpi : int
@@ -1399,7 +1681,7 @@ def plot_target_diagram(
     # Automatic label control for large datasets
     if show_labels and n_cities > 20:
         show_labels = False
-        print(f"ℹ️  City labels disabled (n={n_cities} > 20). Use legend instead.")
+        print(f"  City labels disabled (n={n_cities} > 20). Use legend instead.")
     
     # Create figure
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
@@ -1531,8 +1813,8 @@ def plot_target_diagram(
         
         fig.savefig(png_path, dpi=dpi, bbox_inches='tight', facecolor='white')
         fig.savefig(pdf_path, format='pdf', bbox_inches='tight', facecolor='white')
-        print(f"   ✓ Saved: {png_path.name}")
-        print(f"   ✓ Saved: {pdf_path.name}")
+        print(f"    Saved: {png_path.name}")
+        print(f"    Saved: {pdf_path.name}")
     
     # Generate summary statistics
     summary = {
@@ -2536,7 +2818,7 @@ def create_persistent_heat_event_maps(
         ADJUSTTEXT_AVAILABLE = True
     except ImportError:
         ADJUSTTEXT_AVAILABLE = False
-        print("⚠️  adjustText not available - text overlap may occur")
+        print("  adjustText not available - text overlap may occur")
         print("    Install with: pip install adjustText")
     
     # Filter cities with data for this period
@@ -2545,14 +2827,14 @@ def create_persistent_heat_event_maps(
     
     n_cities = len(available_cities)
     if n_cities == 0:
-        print(f"⚠️  No {period} data available")
+        print(f"  No {period} data available")
         return None
     
     # Decide which cities go on the combined figure
     sorted_city_names = sorted(available_cities.keys())
     if n_cities > max_combined_cities:
         combined_city_names = sorted_city_names[:max_combined_cities]
-        print(f"\n⚠️  {n_cities} cities available — combined figure limited "
+        print(f"\n  {n_cities} cities available — combined figure limited "
               f"to first {max_combined_cities}.")
         print(f"    Individual maps will be saved for ALL {n_cities} cities.")
     else:
@@ -2654,7 +2936,7 @@ def create_persistent_heat_event_maps(
     
     # Helper function to filter places by buffer with better spatial distribution
     def filter_places_by_buffer(places_gdf, buffer_km=4.87, max_labels=10):
-        """Filter places to ~1 per 75 sq km (pi * 4.87^2 ≈ 75) with max label limit
+        """Filter places to ~1 per 75 sq km (pi * 4.87^2  75) with max label limit
         Uses improved spatial distribution to cover map area better
         
         Args:
@@ -2729,7 +3011,7 @@ def create_persistent_heat_event_maps(
         event_period = city_data.get(f'{period}_event', 'N/A')
         
         if not lst_file or not Path(lst_file).exists():
-            print(f"  ⚠️  LST file not found")
+            print(f"    LST file not found")
             continue
         
         try:
@@ -2769,14 +3051,14 @@ def create_persistent_heat_event_maps(
                             water_clipped.plot(ax=ax, facecolor='steelblue', 
                                            edgecolor='darkblue', linewidth=0.5, 
                                            alpha=0.7, zorder=3)
-                            print(f"  ✓ Water: {len(water_clipped)} bodies (clipped)")
+                            print(f"   Water: {len(water_clipped)} bodies (clipped)")
                     
                     # Roads removed from visualization
                     # if 'roads' in features and not features['roads'].empty:
                     #     roads_proj = features['roads'].to_crs(lst_crs)
                     #     roads_proj.plot(ax=ax, color='grey', linewidth=0.15, 
                     #                    alpha=0.3, zorder=0.5)
-                    #     print(f"  ✓ Roads: {len(roads_proj)} segments")
+                    #     print(f"   Roads: {len(roads_proj)} segments")
                     
                     # Plot Main boundary (hollow, thick black line) - clipped to LST extent
                     if 'main' in features and not features['main'].empty:
@@ -2785,7 +3067,7 @@ def create_persistent_heat_event_maps(
                         if not main_clipped.empty:
                             main_clipped.boundary.plot(ax=ax, color='black', 
                                                    linewidth=2.5, zorder=5)
-                            print(f"  ✓ Main boundary (clipped)")
+                            print(f"   Main boundary (clipped)")
                     
                     # Plot Adjacent boundaries (hollow, dashed black line) - clipped to LST extent
                     if 'adjacent' in features and not features['adjacent'].empty:
@@ -2794,7 +3076,7 @@ def create_persistent_heat_event_maps(
                         if not adj_clipped.empty:
                             adj_clipped.boundary.plot(ax=ax, color='black', 
                                                   linewidth=1.5, linestyle='--', zorder=5)
-                            print(f"  ✓ Adjacent boundaries: {len(adj_clipped)} (clipped)")
+                            print(f"   Adjacent boundaries: {len(adj_clipped)} (clipped)")
                     
                     # Plot place labels (max 10 labels, ~1 per 75 sq km) - only within LST bounds
                     if 'places' in features and not features['places'].empty:
@@ -2838,7 +3120,7 @@ def create_persistent_heat_event_maps(
                                           force_text=(0.5, 0.5),
                                           lim=500)  # Limit iterations
                             
-                            print(f"  ✓ Places: {len(places_proj)} labels (max 10)")
+                            print(f"   Places: {len(places_proj)} labels (max 10)")
                 
                 # Set axis limits
                 ax.set_xlim(src.bounds.left, src.bounds.right)
@@ -2951,7 +3233,7 @@ def create_persistent_heat_event_maps(
                     legend_collected = True
                 
         except Exception as e:
-            print(f"  ✗ Error: {e}")
+            print(f"   Error: {e}")
             continue
     
     # Hide empty subplots
@@ -3008,8 +3290,8 @@ def create_persistent_heat_event_maps(
                    facecolor='white', pad_inches=0.1)
         
         print(f"\n{'='*80}")
-        print(f"✅ Saved combined: {png_path.name}")
-        print(f"✅ Saved combined: {pdf_path.name}")
+        print(f" Saved combined: {png_path.name}")
+        print(f" Saved combined: {pdf_path.name}")
         print(f"{'='*80}")
     
     # -----------------------------------------------------------------
@@ -3032,7 +3314,7 @@ def create_persistent_heat_event_maps(
             event_period = city_data_ind.get(f'{period}_event', 'N/A')
             
             if not lst_file or not Path(lst_file).exists():
-                print(f"  ⚠️  {city_name}: LST file not found — skipping")
+                print(f"    {city_name}: LST file not found — skipping")
                 continue
             
             try:
@@ -3154,14 +3436,14 @@ def create_persistent_heat_event_maps(
                                     facecolor='white', pad_inches=0.1)
                     plt.close(ind_fig)
                     
-                    print(f"  ✓ {city_name}: {ind_png.name}")
+                    print(f"   {city_name}: {ind_png.name}")
                     
             except Exception as e:
-                print(f"  ✗ {city_name}: {e}")
+                print(f"   {city_name}: {e}")
                 continue
         
         print(f"\n{'='*80}")
-        print(f"✅ Individual maps complete — {n_cities} cities")
+        print(f" Individual maps complete — {n_cities} cities")
         print(f"{'='*80}")
     
     return fig
@@ -3193,7 +3475,7 @@ def visualize_seviri_all_cities(cities_data, period='day', base_dir=None, study_
     --------
     matplotlib.figure.Figure or None
     """
-    print("\n⚠️  Note: visualize_seviri_all_cities() is deprecated.")
+    print("\n  Note: visualize_seviri_all_cities() is deprecated.")
     print("    Use create_persistent_heat_event_maps() for publication maps.\n")
     
     # Call the new function
@@ -3218,7 +3500,7 @@ def visualize_seviri_all_cities(cities_data, period='day', base_dir=None, study_
     
     n_cities = len(available_cities)
     if n_cities == 0:
-        print(f"⚠️  No {period} data available")
+        print(f"  No {period} data available")
         return None
     
     # Fixed temperature scales and colormap
@@ -3248,7 +3530,7 @@ def visualize_seviri_all_cities(cities_data, period='day', base_dir=None, study_
     def load_city_boundaries(city_name):
         """Load main and adjacent city boundary files"""
         if aoi_dir is None:
-            print(f"    ⚠️  AOI directory not provided for {city_name}")
+            print(f"      AOI directory not provided for {city_name}")
             return None, None
             
         city_aoi_dir = Path(aoi_dir) / f'City_{city_name}'
@@ -3261,18 +3543,18 @@ def visualize_seviri_all_cities(cities_data, period='day', base_dir=None, study_
         if main_file.exists():
             try:
                 main_gdf = gpd.read_file(str(main_file))
-                print(f"    ✅ Loaded main boundary for {city_name}")
+                print(f"     Loaded main boundary for {city_name}")
             except Exception as e:
-                print(f"    ⚠️  Error loading main boundary for {city_name}: {e}")
+                print(f"      Error loading main boundary for {city_name}: {e}")
         else:
-            print(f"    ⚠️  Main boundary file not found: {main_file}")
+            print(f"      Main boundary file not found: {main_file}")
         
         if adjacent_file.exists():
             try:
                 adjacent_gdf = gpd.read_file(str(adjacent_file))
-                print(f"    ✅ Loaded adjacent boundaries for {city_name}")
+                print(f"     Loaded adjacent boundaries for {city_name}")
             except Exception as e:
-                print(f"    ⚠️  Error loading adjacent boundaries for {city_name}: {e}")
+                print(f"      Error loading adjacent boundaries for {city_name}: {e}")
         
         return main_gdf, adjacent_gdf
     
@@ -3396,7 +3678,7 @@ def visualize_seviri_all_cities(cities_data, period='day', base_dir=None, study_
         fig.savefig(png_path, dpi=dpi, bbox_inches='tight', pad_inches=0.1)
         fig.savefig(pdf_path, format='pdf', bbox_inches='tight', pad_inches=0.1)
         
-        print(f"✅ Saved: {png_path.name} + {pdf_path.name}")
+        print(f" Saved: {png_path.name} + {pdf_path.name}")
     
     plt.show()
     plt.close()
@@ -3516,7 +3798,7 @@ def plot_lst_with_osm_overlay(lst_raster_path: str, city_name: str, period: str,
     # Save figure
     if output_path:
         plt.savefig(output_path, dpi=dpi, bbox_inches='tight')
-        print(f"✅ Saved: {Path(output_path).name}")
+        print(f" Saved: {Path(output_path).name}")
     
     plt.show()
     
@@ -3794,7 +4076,7 @@ def create_geospatial_features_map(
                 
                 # For 1 suburb per 2 sq km, calculate buffer radius
                 # Area = π * r² = 2 km²
-                # r = sqrt(2/π) ≈ 0.8 km radius for 2 sq km coverage
+                # r = sqrt(2/π)  0.8 km radius for 2 sq km coverage
                 buffer_degrees = (label_buffer_km / 111.0) * 0.8  # Convert km to degrees (~111 km per degree)
                 
                 # Priority-based sorting: prioritize larger place types and longer names
@@ -3883,12 +4165,12 @@ def create_geospatial_features_map(
         
         # Save PNG
         fig.savefig(save_path, dpi=dpi, bbox_inches='tight', facecolor='white')
-        print(f"  ✓ Saved: {save_path.name}")
+        print(f"   Saved: {save_path.name}")
         
         # Save PDF
         pdf_path = save_path.with_suffix('.pdf')
         fig.savefig(pdf_path, format='pdf', bbox_inches='tight', facecolor='white')
-        print(f"  ✓ Saved: {pdf_path.name}")
+        print(f"   Saved: {pdf_path.name}")
     
     return fig
 
@@ -4317,7 +4599,7 @@ def create_publication_study_area_map(
     nigeria_path : Path
         Path to Nigeria boundary GeoJSON file
     save_path : Path, optional
-        Base path to save figure (will save .png and .pdf)
+        Base path to save figure (will save .svg)
     title : str, optional
         Figure title
     figsize : tuple, optional
@@ -4448,7 +4730,7 @@ def create_publication_study_area_map(
     
     # North arrow
     _add_publication_north_arrow(fig)
-    print("\n✓ Added compact North Arrow")
+    print("\n Added compact North Arrow")
     
     # Save
     if save_path:
@@ -4459,12 +4741,409 @@ def create_publication_study_area_map(
         fig.savefig(png_path, dpi=dpi, bbox_inches='tight', facecolor='white')
         fig.savefig(pdf_path, format='pdf', bbox_inches='tight', facecolor='white')
         
-        print(f"\n✓ Panel labels: A (Nigeria), B-{panel_labels[n_cities]} (Cities)")
-        print("✓ Scale bars inside all map frames (bottom-left)")
-        print("✓ Hollow circle in Nigeria legend")
-        print("✓ Compact North Arrow")
-        print(f"✓ Saved: {png_path.name}, {pdf_path.name}")
+        print(f"\n Panel labels: A (Nigeria), B-{panel_labels[n_cities]} (Cities)")
+        print(" Scale bars inside all map frames (bottom-left)")
+        print(" Hollow circle in Nigeria legend")
+        print(" Compact North Arrow")
+        print(f" Saved: {png_path.name}, {pdf_path.name}")
     
+    return fig
+
+
+# 
+# Nigeria Cities + Landscape Map (Cluster25 background + proportional pop)
+# 
+
+
+def create_nigeria_cities_landscape_map(
+    aoi_dict: Dict[str, gpd.GeoDataFrame],
+    cities_csv_path: Path,
+    landscape_path: Path,
+    nigeria_path: Path,
+    cluster25_colors: Dict[int, str],
+    study_year: int = 2024,
+    save_path: Path = None,
+    title: str = 'Study Cities on Landscape Classification — Nigeria',
+    figsize: tuple = (10, 10),
+    dpi: int = 300,
+    pop_scale: float = 0.6,
+    show_plot: bool = True,
+) -> plt.Figure:
+    """
+    Create a Nigeria map displaying:
+      1. National boundary
+      2. Cluster25 landscape classification (filled polygons)
+      3. Proportional circles sized by city population at the study year
+      4. Black point markers at city locations
+      5. City name labels
+
+    Parameters
+    ----------
+    aoi_dict : dict
+        City name → AOI GeoDataFrame (used for centroid positions).
+    cities_csv_path : Path
+        Path to the UN population CSV ('Urban Agglomeration', 'Latitude',
+        'Longitude', and year columns with population in thousands).
+    landscape_path : Path
+        Path to landscape GeoJSON with a 'Cluster25' column.
+    nigeria_path : Path
+        Path to Nigeria boundary GeoJSON.
+    cluster25_colors : dict
+        Mapping of Cluster25 integer class → hex colour string.
+    study_year : int
+        Year column to use for population (default 2024).
+    save_path : Path, optional
+        Base path (without extension). .svg will be saved.
+    title : str
+        Figure title.
+    figsize : tuple
+        Figure size in inches.
+    dpi : int
+        DPI for PNG output.
+    pop_scale : float
+        Visual scaling factor for proportional circles (degrees).
+    show_plot : bool
+        Whether to call plt.show().
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    import matplotlib.patches as mpatches
+
+    # ------------------------------------------------------------------
+    # Load data
+    # ------------------------------------------------------------------
+    nigeria_gdf = gpd.read_file(nigeria_path).to_crs('EPSG:4326')
+    landscape_gdf = gpd.read_file(landscape_path).to_crs('EPSG:4326')
+
+    # Support both CSV and XLSX formats
+    cities_csv_path_p = Path(cities_csv_path)
+    if cities_csv_path_p.suffix.lower() in ('.xlsx', '.xls'):
+        cities_df = pd.read_excel(cities_csv_path, sheet_name='Data')
+    else:
+        cities_df = pd.read_csv(cities_csv_path, thousands=',')
+
+    # Rename WUP 2025 columns to legacy schema if present
+    if 'City_Name' in cities_df.columns:
+        cities_df = cities_df.rename(columns={
+            'City_Name': 'Urban Agglomeration',
+            'PWCent_Latitude': 'Latitude',
+            'PWCent_Longitude': 'Longitude',
+        })
+        cities_df['Urban Agglomeration'] = cities_df['Urban Agglomeration'].str.strip()
+
+    # Build population lookup (values in thousands → actual)
+    year_col = str(study_year)
+    pop_lookup = {}
+    coord_lookup = {}
+    for _, row in cities_df.iterrows():
+        name = row['Urban Agglomeration']
+        if pd.notna(name) and year_col in cities_df.columns:
+            pop_val = row[year_col]
+            pop_lookup[name] = float(pop_val) * 1_000 if pd.notna(pop_val) else 0
+            coord_lookup[name] = (float(row['Longitude']), float(row['Latitude']))
+
+    # Restrict to cities in aoi_dict
+    cities = sorted(aoi_dict.keys())
+
+    # ------------------------------------------------------------------
+    # Prepare landscape base layer
+    # ------------------------------------------------------------------
+    landscape_merged = landscape_gdf.dissolve(by='Cluster25', as_index=False)
+    landscape_merged['color'] = landscape_merged['Cluster25'].map(cluster25_colors)
+
+    # ------------------------------------------------------------------
+    # Create figure
+    # ------------------------------------------------------------------
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Layer 1 — Cluster25 landscape
+    landscape_merged.plot(
+        ax=ax, color=landscape_merged['color'],
+        edgecolor='white', linewidth=0.2, alpha=0.6, zorder=1,
+    )
+
+    # Layer 2 — Nigeria boundary
+    nigeria_gdf.plot(
+        ax=ax, facecolor='none', edgecolor='#333333',
+        linewidth=1.5, zorder=2,
+    )
+
+    # ------------------------------------------------------------------
+    # Proportional circles + city points + labels
+    # ------------------------------------------------------------------
+    max_pop = max((pop_lookup.get(c, 0) for c in cities), default=1) or 1
+
+    label_texts, label_x, label_y = [], [], []
+
+    def _fmt_pop(p):
+        if p >= 1_000_000:
+            return f'{p / 1_000_000:.1f} M'
+        if p >= 1_000:
+            return f'{p / 1_000:.0f}k'
+        return f'{p:.0f}'
+
+    for city in cities:
+        lon, lat = coord_lookup.get(city, (None, None))
+        if lon is None:
+            continue
+
+        pop = pop_lookup.get(city, 0)
+        radius = pop_scale * np.sqrt(pop / max_pop) if pop > 0 else 0
+
+        # Layer 3 — proportional population circle
+        if radius > 0:
+            circle = plt.Circle(
+                (lon, lat), radius,
+                facecolor='#555555', edgecolor='white',
+                linewidth=0.8, alpha=0.75, zorder=4,
+            )
+            ax.add_patch(circle)
+
+        # Layer 4 — black city point
+        ax.plot(lon, lat, 'ko', markersize=3, zorder=6)
+
+        # Layer 5 — city name label
+        label = f'{city}\n({_fmt_pop(pop)})'
+        txt = ax.text(
+            lon, lat - radius - 0.12, label,
+            ha='center', va='top', fontsize=6.5,
+            fontweight='bold', color='#000',
+            zorder=7, linespacing=0.85,
+        )
+        label_texts.append(txt)
+        label_x.append(lon)
+        label_y.append(lat - radius - 0.12)
+
+    # De-clutter labels
+    try:
+        from adjustText import adjust_text
+        adjust_text(
+            label_texts, x=label_x, y=label_y, ax=ax,
+            force_text=(0.4, 0.6), force_points=(0.3, 0.5),
+            expand_text=(1.1, 1.2), expand_points=(1.1, 1.2),
+            arrowprops=dict(arrowstyle='-', color='#888', lw=0.5,
+                            shrinkA=10, shrinkB=5),
+            ensure_inside_axes=True, max_move=2.0,
+        )
+    except ImportError:
+        pass
+
+    # ------------------------------------------------------------------
+    # Title, legend, axes
+    # ------------------------------------------------------------------
+    ax.set_title(title, fontsize=13, fontweight='bold', pad=14)
+
+    legend_elements = [
+        plt.Line2D([0], [0], marker='o', color='w',
+                   markerfacecolor='#555555', markeredgecolor='white',
+                   markersize=12, alpha=0.75, label='Population (proportional)'),
+        plt.Line2D([0], [0], marker='o', color='w',
+                   markerfacecolor='black', markersize=5, label='City location'),
+        mpatches.Patch(facecolor='none', edgecolor='#333',
+                       linewidth=1.5, label='National boundary'),
+    ]
+    ax.legend(
+        handles=legend_elements, loc='lower right', fontsize=8,
+        framealpha=0.95, edgecolor='#999',
+        title='Legend', title_fontsize=9,
+    )
+
+    ax.set_xlabel('Longitude', fontsize=10)
+    ax.set_ylabel('Latitude', fontsize=10)
+    ax.grid(True, alpha=0.15, linestyle='--', linewidth=0.5, zorder=0)
+    ax.set_aspect('equal')
+
+    bounds = nigeria_gdf.total_bounds
+    ax.set_xlim(bounds[0] - 0.5, bounds[2] + 0.5)
+    ax.set_ylim(bounds[1] - 1.0, bounds[3] + 0.5)
+
+    # Scale bar (100 km  0.9° at ~9°N)
+    sc_cx = (bounds[0] + bounds[2]) / 2
+    sc_lat = bounds[1] - 0.7
+    ax.plot([sc_cx - 0.45, sc_cx + 0.45], [sc_lat, sc_lat],
+            'k-', linewidth=3, zorder=8)
+    ax.plot([sc_cx - 0.45, sc_cx - 0.45],
+            [sc_lat - 0.1, sc_lat + 0.1], 'k-', linewidth=2, zorder=8)
+    ax.plot([sc_cx + 0.45, sc_cx + 0.45],
+            [sc_lat - 0.1, sc_lat + 0.1], 'k-', linewidth=2, zorder=8)
+    ax.text(sc_cx, sc_lat + 0.15, '100 km',
+            ha='center', va='bottom', fontsize=8, fontweight='bold', zorder=8)
+
+    # North arrow
+    arrow_props = dict(arrowstyle='->', lw=2, color='black')
+    ax.annotate('N', xy=(0.96, 0.96), xytext=(0.96, 0.91),
+                xycoords='axes fraction', fontsize=12, ha='center',
+                fontweight='bold', arrowprops=arrow_props, zorder=10)
+
+    fig.tight_layout()
+
+    # ------------------------------------------------------------------
+    # Save
+    # ------------------------------------------------------------------
+    if save_path:
+        save_path = Path(save_path)
+        png_p = save_path.with_suffix('.png')
+        pdf_p = save_path.with_suffix('.pdf')
+        fig.savefig(png_p, dpi=dpi, bbox_inches='tight', facecolor='white')
+        fig.savefig(pdf_p, format='pdf', bbox_inches='tight', facecolor='white')
+        print(f"   Saved: {png_p.name}, {pdf_p.name}")
+
+    if show_plot:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return fig
+
+
+def create_cluster25_classification_table(
+    landscape_path: Path,
+    cluster25_colors: Dict[int, str],
+    save_path: Path = None,
+    title: str = 'Cluster25 Landscape Classification',
+    figsize: tuple = (14, 8),
+    dpi: int = 300,
+    show_plot: bool = True,
+) -> plt.Figure:
+    """
+    Plot a publication-ready table of the 25 landscape clusters with
+    colour swatches, climate, geology, and elevation class columns.
+
+    Parameters
+    ----------
+    landscape_path : Path
+        Path to landscape GeoJSON with Cluster25, Climate_Class,
+        Geology_Class, and Elevation_Class columns.
+    cluster25_colors : dict
+        Mapping of Cluster25 integer class → hex colour string.
+    save_path : Path, optional
+        Base path (without extension). .svg will be saved.
+    title : str
+        Table title.
+    figsize : tuple
+        Figure size in inches.
+    dpi : int
+        DPI for PNG output.
+    show_plot : bool
+        Whether to call plt.show().
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    import matplotlib.patches as mpatches
+
+    landscape_gdf = gpd.read_file(landscape_path)
+
+    # Build unique cluster table, sorted by Cluster25
+    cluster_table = (
+        landscape_gdf
+        .groupby('Cluster25')
+        .agg(
+            Climate_Class=('Climate_Class', 'first'),
+            Geology_Class=('Geology_Class', 'first'),
+            Elevation_Class=('Elevation_Class', 'first'),
+        )
+        .reset_index()
+        .sort_values('Cluster25')
+    )
+
+    n_rows = len(cluster_table)
+
+    #  Build cell text (S/No, Colour swatch, Cluster, Climate, Geology, Elevation) 
+    col_labels = ['S/No', ' ', 'Cluster', 'Climate Class', 'Geology Class',
+                  'Elevation Class']
+    cell_text = []
+    row_colors_hex = []
+    for sno, (_, r) in enumerate(cluster_table.iterrows(), 1):
+        c25 = int(r['Cluster25'])
+        hex_c = cluster25_colors.get(c25, '#CCCCCC')
+        cell_text.append([
+            str(sno),
+            '',           # colour swatch — filled via cell facecolor
+            f'CL-{c25}',
+            r['Climate_Class'],
+            r['Geology_Class'],
+            r['Elevation_Class'],
+        ])
+        row_colors_hex.append(hex_c)
+
+    #  Create figure 
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.axis('off')
+    ax.set_title(title, fontsize=14, fontweight='bold', pad=18)
+
+    table = ax.table(
+        cellText=cell_text,
+        colLabels=col_labels,
+        loc='center',
+        cellLoc='center',
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1.0, 1.45)  # row height expansion
+
+    #  Style header row 
+    for j in range(len(col_labels)):
+        cell = table[0, j]
+        cell.set_facecolor('#2c3e50')
+        cell.set_text_props(color='white', fontweight='bold', fontsize=10)
+        cell.set_edgecolor('white')
+        cell.set_linewidth(1.5)
+
+    #  Style data rows 
+    # Columns that should be left-aligned (Climate, Geology, Elevation)
+    left_align_cols = {3, 4, 5}
+    colour_swatch_col = 1  # column index for colour swatch
+    for i in range(1, n_rows + 1):
+        hex_c = row_colors_hex[i - 1]
+        for j in range(len(col_labels)):
+            cell = table[i, j]
+            cell.set_edgecolor('#ddd')
+            cell.set_linewidth(0.8)
+            # Alternate row background for readability
+            if j == colour_swatch_col:
+                # Fill swatch cell with cluster colour
+                cell.set_facecolor(hex_c)
+                cell.set_edgecolor('#999')
+            elif i % 2 == 0:
+                cell.set_facecolor('#f9f9f9')
+            else:
+                cell.set_facecolor('white')
+            # Left-align text columns
+            if j in left_align_cols:
+                cell.get_text().set_ha('left')
+                cell.PAD = 0.05
+
+    # Left-align header cells for text columns too
+    for j in left_align_cols:
+        table[0, j].get_text().set_ha('left')
+        table[0, j].PAD = 0.05
+
+    #  Adjust column widths 
+    col_widths = [0.06, 0.04, 0.08, 0.30, 0.28, 0.24]
+    for j, w in enumerate(col_widths):
+        for i in range(n_rows + 1):
+            table[i, j].set_width(w)
+
+    fig.tight_layout()
+
+    #  Save 
+    if save_path:
+        save_path = Path(save_path)
+        png_p = save_path.with_suffix('.png')
+        pdf_p = save_path.with_suffix('.pdf')
+        fig.savefig(png_p, dpi=dpi, bbox_inches='tight', facecolor='white')
+        fig.savefig(pdf_p, format='pdf', bbox_inches='tight', facecolor='white')
+        print(f"   Saved: {png_p.name}, {pdf_p.name}")
+
+    if show_plot:
+        plt.show()
+    else:
+        plt.close(fig)
+
     return fig
 
 
@@ -4489,7 +5168,7 @@ def create_nigeria_overview_map(
     nigeria_path : Path
         Path to Nigeria boundary GeoJSON file
     save_path : Path, optional
-        Base path to save figure (will save .png and .pdf)
+        Base path to save figure (will save .svg)
     title : str, optional
         Figure title
     figsize : tuple, optional
@@ -4520,7 +5199,7 @@ def create_nigeria_overview_map(
         pdf_path = save_path.with_suffix('.pdf')
         fig.savefig(png_path, dpi=dpi, bbox_inches='tight', facecolor='white')
         fig.savefig(pdf_path, format='pdf', bbox_inches='tight', facecolor='white')
-        print(f"  ✓ Saved: {png_path.name}, {pdf_path.name}")
+        print(f"   Saved: {png_path.name}, {pdf_path.name}")
     
     return fig
 
@@ -4555,7 +5234,7 @@ def create_individual_city_study_area_map(
     nigeria_path : Path
         Path to Nigeria boundary GeoJSON
     save_path : Path, optional
-        Base path to save (will save .png and .pdf)
+        Base path to save (will save .svg)
     figsize : tuple, optional
         Figure size in inches (default: A4 landscape)
     dpi : int, optional
@@ -4654,7 +5333,7 @@ def create_individual_city_study_area_map(
         pdf_path = save_path.with_suffix('.pdf')
         fig.savefig(png_path, dpi=dpi, bbox_inches='tight', facecolor='white')
         fig.savefig(pdf_path, format='pdf', bbox_inches='tight', facecolor='white')
-        print(f"  ✓ Saved: {png_path.name}, {pdf_path.name}")
+        print(f"   Saved: {png_path.name}, {pdf_path.name}")
     
     return fig
 
@@ -4802,8 +5481,8 @@ def create_stakeholder_map_with_bar_chart(cities_gdf, boundary_gdf, workshop_pro
                    fontsize=12, fontweight='bold', ha='center', va='center',
                    bbox=dict(boxstyle='circle', facecolor='white', 
                             edgecolor='black', linewidth=1))
-    ax_map.annotate('↑', xy=(0.95, 0.91), xycoords='axes fraction',
-                   fontsize=14, fontweight='bold', ha='center', va='center')
+    ax_map.annotate('', xy=(0.95, 0.93), xytext=(0.95, 0.89), xycoords='axes fraction',
+                   arrowprops=dict(arrowstyle='->', lw=1.5, color='black'))
     
     # Scale bar
     scale_x_start = 0.05
@@ -4963,8 +5642,15 @@ def create_city_classification_donut(cities_gdf, survey_df, workshop_total,
     
     # Calculate city sets
     target_cities = set(cities_gdf['city'].unique())  # Target cities from population CSV
-    registered_cities = set(survey_df['matched_city_x'].dropna().unique())  # Cities with stakeholders
-    attended_cities = set(workshop_total['city'].unique())  # Cities with workshop attendance
+    attended_cities = set(workshop_total['city'].dropna().unique())  # Cities with workshop attendance
+
+    # Some workshop cities can appear only in matched_city_y (attendance location)
+    # and not in matched_city_x (city association/registration linkage). Include
+    # them here so Ring 3 attendance totals reconcile with workshop city counts.
+    registered_cities = (
+        set(survey_df['matched_city_x'].dropna().unique()) |
+        attended_cities
+    )
     
     # Center: Total unique cities (union of target and registered)
     total_unique_cities = len(target_cities | registered_cities)
@@ -5362,7 +6048,7 @@ def create_perception_chart_with_donuts(
              fontsize=18, fontweight='bold', color='black')
     ax3.text(0, -0.15, 'Participants', ha='center', va='center', 
              fontsize=9, fontweight='normal', color='#666666')
-    ax3.set_title('A) Overall Warming Perception\n(Has city warmed in 10 years?)', 
+    ax3.set_title('A) Overall Warming Perception\n(Has city warmed in 10 years)', 
                   fontsize=11, fontweight='bold')
     # Legend with response title
     ax3.legend(wedges3, warming_labels, 
@@ -5386,7 +6072,7 @@ def create_perception_chart_with_donuts(
              fontsize=18, fontweight='bold', color='black')
     ax4.text(0, -0.15, 'Participants', ha='center', va='center', 
              fontsize=9, fontweight='normal', color='#666666')
-    ax4.set_title('B) Overall Diurnal Heating Pattern\n(When is heat most severe?)', 
+    ax4.set_title('B) Overall Diurnal Heating Pattern\n(When is heat most severe)', 
                   fontsize=11, fontweight='bold')
     # Legend with response title
     ax4.legend(wedges4, diurnal_labels,
@@ -5397,7 +6083,7 @@ def create_perception_chart_with_donuts(
                   fontsize=13, fontweight='bold', y=1.02)
     plt.tight_layout()
     
-    print("✅ Perception charts created successfully!")
+    print(" Perception charts created successfully!")
     print(f"   - Main chart with embedded donuts")
     print(f"   - Separate standalone donut chart")
     
@@ -5505,7 +6191,7 @@ def create_persistent_heat_event_summary_chart(cities_data, base_dir=None, study
     night_valid = night_means[~np.isnan(night_means)]
     
     if len(day_valid) == 0 and len(night_valid) == 0:
-        print("⚠️  No valid data for summary chart")
+        print("  No valid data for summary chart")
         return None
     
     day_overall_mean = np.mean(day_valid) if len(day_valid) > 0 else np.nan
@@ -5698,8 +6384,8 @@ def create_persistent_heat_event_summary_chart(cities_data, base_dir=None, study
         fig.savefig(pdf_path, format='pdf', bbox_inches='tight',
                    facecolor='white', pad_inches=0.1)
         
-        print(f"✅ Saved: {png_path.name}")
-        print(f"✅ Saved: {pdf_path.name}")
+        print(f" Saved: {png_path.name}")
+        print(f" Saved: {pdf_path.name}")
         print(f"{'='*80}\n")
     
     return fig
@@ -5817,7 +6503,7 @@ def create_persistent_heat_event_variability_chart(cities_data, base_dir=None, s
     night_valid_std = night_stds[~np.isnan(night_stds)]
     
     if len(day_valid_std) == 0 and len(night_valid_std) == 0:
-        print("⚠️  No valid data for SD variability chart")
+        print("  No valid data for SD variability chart")
         return None
     
     day_mean_std = np.mean(day_valid_std) if len(day_valid_std) > 0 else np.nan
@@ -5963,8 +6649,8 @@ def create_persistent_heat_event_variability_chart(cities_data, base_dir=None, s
         fig.savefig(pdf_path, format='pdf', bbox_inches='tight',
                    facecolor='white', pad_inches=0.1)
         
-        print(f"✅ Saved: {png_path.name}")
-        print(f"✅ Saved: {pdf_path.name}")
+        print(f" Saved: {png_path.name}")
+        print(f" Saved: {pdf_path.name}")
         print(f"{'='*80}\n")
     
     return fig
@@ -6034,8 +6720,8 @@ def create_persistent_heat_event_variability_chart(cities_data, base_dir=None, s
         fig.savefig(pdf_path, format='pdf', bbox_inches='tight',
                    facecolor='white', pad_inches=0.1)
         
-        print(f"✅ Saved: {png_path.name}")
-        print(f"✅ Saved: {pdf_path.name}")
+        print(f" Saved: {png_path.name}")
+        print(f" Saved: {pdf_path.name}")
         print(f"{'='*80}\n")
     
     return fig
@@ -6105,18 +6791,18 @@ def create_city_hotspot_grid_maps(city_name, hotspot_polygons, survey_points, la
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Define expected output files
+    # Define expected output files (vector only)
     pdf_path = output_dir / f'{city_name}_hotspot_grid_1x3.pdf'
-    png_path = output_dir / f'{city_name}_hotspot_grid_1x3.png'
+    svg_path = output_dir / f'{city_name}_hotspot_grid_1x3.svg'
     legend_pdf = output_dir / f'{city_name}_legend.pdf'
-    legend_png = output_dir / f'{city_name}_legend.png'
+    legend_svg = output_dir / f'{city_name}_legend.svg'
     tracking_file = output_dir / f'{city_name}_map_params.json'
     
     # =============================================================================
     # SKIP LOGIC: Check if maps exist and parameters match
     # =============================================================================
     
-    if skip_if_exists and pdf_path.exists() and png_path.exists():
+    if skip_if_exists and pdf_path.exists() and svg_path.exists() and legend_pdf.exists() and legend_svg.exists():
         # Check if tracking file exists
         if tracking_file.exists():
             with open(tracking_file, 'r') as f:
@@ -6142,9 +6828,11 @@ def create_city_hotspot_grid_maps(city_name, hotspot_polygons, survey_points, la
                     return {
                         'city': city_name,
                         'pdf': pdf_path,
-                        'png': png_path,
+                        'svg': svg_path,
                         'legend_pdf': legend_pdf,
-                        'legend_png': legend_png,
+                        'legend_svg': legend_svg,
+                        'PDF': pdf_path,
+                        'SVG': svg_path,
                         'skipped': True,
                         'reason': f'Maps exist and AOI unchanged (area change: {area_change_pct:.2f}%)',
                         'success': True
@@ -6152,6 +6840,20 @@ def create_city_hotspot_grid_maps(city_name, hotspot_polygons, survey_points, la
             except Exception as e:
                 # If we can't check parameters, regenerate to be safe
                 pass
+        else:
+            # Backward-compatible fast skip when outputs exist but tracking file is absent.
+            return {
+                'city': city_name,
+                'pdf': pdf_path,
+                'svg': svg_path,
+                'legend_pdf': legend_pdf,
+                'legend_svg': legend_svg,
+                'PDF': pdf_path,
+                'SVG': svg_path,
+                'skipped': True,
+                'reason': 'Maps exist (tracking metadata not found)',
+                'success': True
+            }
     
     # =============================================================================
     # CONFIGURATION: Colors, Styles, Periods
@@ -6217,7 +6919,7 @@ def create_city_hotspot_grid_maps(city_name, hotspot_polygons, survey_points, la
         else:
             adjacent_polygons = gpd.GeoDataFrame()
     except Exception as e:
-        print(f"✗ Error loading boundaries for {city_name}: {e}")
+        print(f" Error loading boundaries for {city_name}: {e}")
         return None
     
     # Load OSM features (separate try/except so roads still display when
@@ -6409,8 +7111,8 @@ def create_city_hotspot_grid_maps(city_name, hotspot_polygons, survey_points, la
     # SAVE MAIN MAP
     # =============================================================================
     
-    plt.savefig(pdf_path, dpi=300, bbox_inches='tight')
-    plt.savefig(png_path, dpi=300, bbox_inches='tight')
+    plt.savefig(svg_path, dpi=300, format='svg', bbox_inches='tight')
+    plt.savefig(pdf_path, dpi=300, format='pdf', bbox_inches='tight')
     plt.close()
     
     # =============================================================================
@@ -6460,8 +7162,8 @@ def create_city_hotspot_grid_maps(city_name, hotspot_polygons, survey_points, la
               fontsize=12, frameon=True, fancybox=True, shadow=True)
     legend.get_title().set_fontweight('bold')
     
-    legend_fig.savefig(legend_pdf, dpi=300, bbox_inches='tight')
-    legend_fig.savefig(legend_png, dpi=300, bbox_inches='tight')
+    legend_fig.savefig(legend_svg, dpi=300, format='svg', bbox_inches='tight')
+    legend_fig.savefig(legend_pdf, dpi=300, format='pdf', bbox_inches='tight')
     plt.close(legend_fig)
     
     # =============================================================================
@@ -6488,9 +7190,11 @@ def create_city_hotspot_grid_maps(city_name, hotspot_polygons, survey_points, la
     return {
         'city': city_name, 
         'pdf': pdf_path, 
-        'png': png_path, 
+        'svg': svg_path, 
         'legend_pdf': legend_pdf, 
-        'legend_png': legend_png, 
+        'legend_svg': legend_svg, 
+        'PDF': pdf_path,
+        'SVG': svg_path,
         'skipped': False,
         'success': True
     }
@@ -6542,19 +7246,21 @@ def create_gi_star_distribution_plots(city_name, output_dir, skip_if_exists=True
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Define expected output files
+    # Define expected output files (vector only)
     pdf_path = output_dir / f'{city_name}_gi_star_distributions.pdf'
-    png_path = output_dir / f'{city_name}_gi_star_distributions.png'
+    svg_path = output_dir / f'{city_name}_gi_star_distributions.svg'
     
     # =============================================================================
     # SKIP LOGIC: Check if plots exist
     # =============================================================================
     
-    if skip_if_exists and pdf_path.exists() and png_path.exists():
+    if skip_if_exists and pdf_path.exists() and svg_path.exists():
         return {
             'city': city_name,
             'pdf': pdf_path,
-            'png': png_path,
+            'svg': svg_path,
+            'PDF': pdf_path,
+            'SVG': svg_path,
             'skipped': True,
             'reason': 'Plots already exist',
             'success': True
@@ -6572,7 +7278,7 @@ def create_gi_star_distribution_plots(city_name, output_dir, skip_if_exists=True
     hotspot_results = frame.f_globals.get('hotspot_results')
     
     if hotspot_results is None or city_name not in hotspot_results:
-        print(f"✗ Hotspot results not found for {city_name}")
+        print(f" Hotspot results not found for {city_name}")
         return None
     
     # Only Day and Night (Persistent has no LST data)
@@ -6582,7 +7288,7 @@ def create_gi_star_distribution_plots(city_name, output_dir, skip_if_exists=True
     # Check if required periods have data
     city_data = hotspot_results[city_name]
     if not all(period in city_data for period in periods):
-        print(f"✗ Missing period data for {city_name}")
+        print(f" Missing period data for {city_name}")
         return None
     
     # =============================================================================
@@ -6685,14 +7391,16 @@ def create_gi_star_distribution_plots(city_name, output_dir, skip_if_exists=True
     # SAVE PLOTS
     # =============================================================================
     
-    plt.savefig(pdf_path, dpi=300, bbox_inches='tight')
-    plt.savefig(png_path, dpi=300, bbox_inches='tight')
+    plt.savefig(svg_path, dpi=300, format='svg', bbox_inches='tight')
+    plt.savefig(pdf_path, dpi=300, format='pdf', bbox_inches='tight')
     plt.close()
     
     return {
         'city': city_name,
         'pdf': pdf_path,
-        'png': png_path,
+        'svg': svg_path,
+        'PDF': pdf_path,
+        'SVG': svg_path,
         'skipped': False,
         'success': True
     }
@@ -6706,7 +7414,7 @@ def create_hotspot_area_by_contour_plots(hotspot_polygons_enriched, landscape_gd
     stacked by Cluster25 landscape classes. Only P90 and GI_STAR methods (excl. VALIDATED).
     
     Paginated: *cities_per_page* cities per figure page (default 10).
-    Multi-page PDF via ``PdfPages``; individual PNGs per page.
+    Multi-page PDF via ``PdfPages``; individual SVGs per page.
     
     Visualization (per page):
     - 3 vertically stacked facets (Day, Night, Persistent)
@@ -6732,16 +7440,18 @@ def create_hotspot_area_by_contour_plots(hotspot_polygons_enriched, landscape_gd
     
     # Define output paths
     pdf_path = output_dir / 'hotspot_area_by_contour_cluster25.pdf'
-    png_path = output_dir / 'hotspot_area_by_contour_cluster25.png'
+    svg_path = output_dir / 'hotspot_area_by_contour_cluster25.svg'
     table1_path = output_dir / 'table1_hotspot_characterization.csv'
     table2_path = output_dir / 'table2_cluster25_colors.csv'
     
     # Check if outputs exist
-    if skip_if_exists and all(p.exists() for p in [pdf_path, png_path, table1_path, table2_path]):
-        print(f"✓ Plots already exist, skipping")
+    if skip_if_exists and all(p.exists() for p in [pdf_path, svg_path, table1_path, table2_path]):
+        print(f" Plots already exist, skipping")
         return {
             'pdf': pdf_path,
-            'png': png_path,
+            'svg': svg_path,
+            'PDF': pdf_path,
+            'SVG': svg_path,
             'table1': table1_path,
             'table2': table2_path,
             'skipped': True,
@@ -6759,7 +7469,7 @@ def create_hotspot_area_by_contour_plots(hotspot_polygons_enriched, landscape_gd
     ].copy()
     
     if df.empty:
-        print(f"✗ No data for P90 or GI_STAR methods")
+        print(f" No data for P90 or GI_STAR methods")
         return None
     
     # Get unique values
@@ -6811,7 +7521,7 @@ def create_hotspot_area_by_contour_plots(hotspot_polygons_enriched, landscape_gd
     # =============================================================================
     # CREATE PAGINATED FIGURES - cities_per_page cities per page
     # Each page: 3 row panels (Day, Night, Persistent)
-    # Multi-page PDF via PdfPages; individual PNGs numbered by page
+    # Multi-page PDF via PdfPages; individual SVGs numbered by page
     # =============================================================================
     
     n_cities = len(cities)
@@ -6831,186 +7541,212 @@ def create_hotspot_area_by_contour_plots(hotspot_polygons_enriched, landscape_gd
     city_chunks = [cities[i:i + cities_per_page] for i in range(0, n_cities, cities_per_page)]
     n_pages = len(city_chunks)
     
-    # Collect per-page PNG paths
-    png_paths = []
+    # Collect per-page SVG paths
+    svg_paths = []
     
-    with PdfPages(str(pdf_path)) as pdf_pages:
-        for page_idx, page_cities in enumerate(city_chunks):
-            n_page_cities = len(page_cities)
-            
-            # --- x-position geometry (compact) ---------------------------------
-            bar_w = 0.38
-            intra_gap = 0.04
-            inter_gap = bar_w * 0.45
-            city_gap = bar_w * 1.4
-            
-            x_positions = []
-            contour_labels_x = []
-            method_labels_x = []
-            city_labels_x = []
-            city_dividers = []
-            method_dividers = []
-            
-            cursor = 0.0
-            for ci, city in enumerate(page_cities):
-                city_start = cursor
-                for mi, method in enumerate(methods):
-                    method_start = cursor
-                    for coi, contour in enumerate(contour_levels):
-                        x_positions.append(cursor)
-                        pct = int(contour * 100)
-                        contour_labels_x.append((cursor, f'{pct}%'))
-                        cursor += bar_w + intra_gap
-                    cursor -= intra_gap
-                    method_center = (method_start + cursor) / 2
-                    method_label = 'P90' if method == 'P90' else 'Gi*'
-                    method_labels_x.append((method_center, method_label))
-                    if mi < n_methods - 1:
-                        method_dividers.append(cursor + inter_gap / 2)
-                    cursor += inter_gap
-                cursor -= inter_gap
-                city_center = (city_start + cursor) / 2
-                city_labels_x.append((city_center, city))
-                cursor += city_gap
-                if ci < n_page_cities - 1:
-                    city_dividers.append(cursor - city_gap / 2)
-            
-            total_width = cursor - city_gap
-            
-            # --- Compact figure sizing -----------------------------------------
-            fig_w = max(10, total_width * 0.85 + 1.5)
-            panel_h = max(2.5, fig_w * 0.14)
-            fig_h = panel_h * n_panels + 1.8
-            
-            fig, axes = plt.subplots(n_panels, 1, figsize=(fig_w, fig_h),
-                                     sharex=True, sharey=True)
-            if n_panels == 1:
-                axes = [axes]
-            
-            fig.subplots_adjust(hspace=0)
-            
-            page_label = f' (Page {page_idx + 1}/{n_pages})' if n_pages > 1 else ''
-            fig.suptitle(
-                f'Hotspot Area Distribution by Contour Level & Landscape Character (Cluster25){page_label}',
-                fontsize=13, fontweight='bold', y=0.97)
-            
-            # --- Draw each panel -----------------------------------------------
-            for ax_idx, ax in enumerate(axes):
-                if ax_idx >= len(display_order):
-                    ax.set_visible(False)
-                    continue
-                
-                period = display_order[ax_idx]
-                
-                try:
-                    period_area = pivot_area.xs(period, level='period')
-                except KeyError:
-                    ax.text(0.5, 0.5, f'No Data for {period}',
-                           ha='center', va='center', fontsize=11, transform=ax.transAxes)
-                    ax.set_ylabel(f'{period}\n\nArea (km²)',
-                                 fontsize=10, fontweight='bold', labelpad=6)
-                    continue
-                
-                period_patches = patch_counts[patch_counts['period'] == period]
-                
-                bar_idx = 0
-                for ci, city in enumerate(page_cities):
-                    for mi, method in enumerate(methods):
-                        for coi, contour in enumerate(contour_levels):
-                            x = x_positions[bar_idx]
-                            bar_idx += 1
-                            
-                            bottom = 0
-                            for cluster in cluster25_classes:
-                                if (city, method, contour) in period_area.index:
-                                    area = period_area.loc[(city, method, contour), cluster]
-                                    if area > 0:
-                                        ax.bar(x, area, bar_w, bottom=bottom,
-                                               color=cluster_colors[cluster],
-                                               edgecolor='white', linewidth=0.2)
-                                        bottom += area
-                
-                ax.autoscale(axis='y')
-                y_lo, y_hi = ax.get_ylim()
-                nudge = y_hi * 0.018 if y_hi > 0 else 0.3
-                
-                # Patch-count annotations
-                bar_idx = 0
-                for ci, city in enumerate(page_cities):
-                    for mi, method in enumerate(methods):
-                        for coi, contour in enumerate(contour_levels):
-                            x = x_positions[bar_idx]
-                            bar_idx += 1
-                            
-                            bar_top = 0
-                            if (city, method, contour) in period_area.index:
-                                bar_top = period_area.loc[(city, method, contour)].sum()
-                            
-                            patch_row = period_patches[
-                                (period_patches['city'] == city) &
-                                (period_patches['method'] == method) &
-                                (period_patches['contour_level'] == contour)
-                            ]
-                            if not patch_row.empty and bar_top > 0:
-                                n_patches = patch_row.iloc[0]['total_patches']
-                                ax.text(x, bar_top + nudge, str(n_patches),
-                                       ha='center', va='bottom', fontsize=8,
-                                       fontweight='bold', color='#333333')
-                
-                # --- Styling ---
+    pdf_pages = None
+    pdf_export_ok = True
+    try:
+        pdf_pages = PdfPages(str(pdf_path))
+    except Exception as e:
+        pdf_export_ok = False
+        print(f"Warning: PDF export disabled for this run ({e}). Continuing with SVG exports.")
+
+    for page_idx, page_cities in enumerate(city_chunks):
+        n_page_cities = len(page_cities)
+
+        # --- x-position geometry (compact) ---------------------------------
+        bar_w = 0.38
+        intra_gap = 0.04
+        inter_gap = bar_w * 0.45
+        city_gap = bar_w * 1.4
+
+        x_positions = []
+        contour_labels_x = []
+        method_labels_x = []
+        city_labels_x = []
+        city_dividers = []
+        method_dividers = []
+
+        cursor = 0.0
+        for ci, city in enumerate(page_cities):
+            city_start = cursor
+            for mi, method in enumerate(methods):
+                method_start = cursor
+                for coi, contour in enumerate(contour_levels):
+                    x_positions.append(cursor)
+                    pct = int(contour * 100)
+                    contour_labels_x.append((cursor, f'{pct}%'))
+                    cursor += bar_w + intra_gap
+                cursor -= intra_gap
+                method_center = (method_start + cursor) / 2
+                method_label = 'P90' if method == 'P90' else 'Gi*'
+                method_labels_x.append((method_center, method_label))
+                if mi < n_methods - 1:
+                    method_dividers.append(cursor + inter_gap / 2)
+                cursor += inter_gap
+            cursor -= inter_gap
+            city_center = (city_start + cursor) / 2
+            city_labels_x.append((city_center, city))
+            cursor += city_gap
+            if ci < n_page_cities - 1:
+                city_dividers.append(cursor - city_gap / 2)
+
+        total_width = cursor - city_gap
+
+        # --- Compact figure sizing -----------------------------------------
+        fig_w = max(10, total_width * 0.85 + 1.5)
+        panel_h = max(2.5, fig_w * 0.14)
+        fig_h = panel_h * n_panels + 1.8
+
+        fig, axes = plt.subplots(n_panels, 1, figsize=(fig_w, fig_h),
+                                 sharex=True, sharey=True)
+        if n_panels == 1:
+            axes = [axes]
+
+        fig.subplots_adjust(hspace=0)
+
+        page_label = f' (Page {page_idx + 1}/{n_pages})' if n_pages > 1 else ''
+        fig.suptitle(
+            f'Hotspot Area Distribution by Contour Level & Landscape Character (Cluster25){page_label}',
+            fontsize=13, fontweight='bold', y=0.97)
+
+        # --- Draw each panel -----------------------------------------------
+        for ax_idx, ax in enumerate(axes):
+            if ax_idx >= len(display_order):
+                ax.set_visible(False)
+                continue
+
+            period = display_order[ax_idx]
+
+            try:
+                period_area = pivot_area.xs(period, level='period')
+            except KeyError:
+                ax.text(0.5, 0.5, f'No Data for {period}',
+                       ha='center', va='center', fontsize=11, transform=ax.transAxes)
                 ax.set_ylabel(f'{period}\n\nArea (km²)',
                              fontsize=10, fontweight='bold', labelpad=6)
-                ax.grid(axis='y', alpha=0.25, linestyle='--', zorder=0)
-                ax.set_xlim(-bar_w * 0.8, total_width + bar_w * 0.8)
-                ax.tick_params(axis='y', labelsize=9)
-                ax.axhline(0, color='black', linewidth=0.8, zorder=2)
-                
-                for xd in city_dividers:
-                    ax.axvline(xd, color='#666666', linewidth=0.9, linestyle='-', alpha=0.6, zorder=0)
-                for xd in method_dividers:
-                    ax.axvline(xd, color='#aaaaaa', linewidth=0.6, linestyle='--', alpha=0.5, zorder=0)
-                
-                if ax_idx < n_panels - 1:
-                    ax.tick_params(axis='x', labelbottom=False, length=0)
-                if ax_idx > 0:
-                    ax.spines['top'].set_visible(False)
-                if ax_idx < n_panels - 1:
-                    ax.spines['bottom'].set_visible(False)
-            
-            # --- X-axis label hierarchy (bottom panel only) --------------------
-            bottom_ax = axes[-1]
-            
-            bottom_ax.set_xticks([pos for pos, _ in contour_labels_x])
-            bottom_ax.set_xticklabels([lbl for _, lbl in contour_labels_x],
-                                       fontsize=9, rotation=0)
-            bottom_ax.tick_params(axis='x', which='major', pad=2, length=3)
-            
-            for mx, mlbl in method_labels_x:
-                bottom_ax.text(mx, -0.10, mlbl,
-                              ha='center', va='top', fontsize=10, fontweight='bold',
-                              transform=bottom_ax.get_xaxis_transform())
-            
-            for cx, clbl in city_labels_x:
-                bottom_ax.text(cx, -0.20, clbl,
-                              ha='center', va='top', fontsize=11, fontweight='bold',
-                              transform=bottom_ax.get_xaxis_transform())
-            
-            plt.tight_layout(rect=[0, 0.07, 1, 0.95])
-            fig.subplots_adjust(hspace=0)
-            
-            # Save page to multi-page PDF
-            pdf_pages.savefig(fig, dpi=300, bbox_inches='tight')
-            
-            # Save individual PNG per page
-            if n_pages == 1:
-                page_png = png_path
-            else:
-                page_png = output_dir / f'hotspot_area_by_contour_cluster25_page{page_idx + 1}.png'
-            plt.savefig(page_png, dpi=300, bbox_inches='tight')
-            png_paths.append(page_png)
-            plt.close(fig)
-    
-    print(f"✓ Saved hotspot area plots: {pdf_path.name} ({n_pages} page{'s' if n_pages > 1 else ''})")
+                continue
+
+            period_patches = patch_counts[patch_counts['period'] == period]
+
+            bar_idx = 0
+            for ci, city in enumerate(page_cities):
+                for mi, method in enumerate(methods):
+                    for coi, contour in enumerate(contour_levels):
+                        x = x_positions[bar_idx]
+                        bar_idx += 1
+
+                        bottom = 0
+                        for cluster in cluster25_classes:
+                            if (city, method, contour) in period_area.index:
+                                area = period_area.loc[(city, method, contour), cluster]
+                                if area > 0:
+                                    ax.bar(x, area, bar_w, bottom=bottom,
+                                           color=cluster_colors[cluster],
+                                           edgecolor='white', linewidth=0.2)
+                                    bottom += area
+
+            ax.autoscale(axis='y')
+            y_lo, y_hi = ax.get_ylim()
+            nudge = y_hi * 0.018 if y_hi > 0 else 0.3
+
+            # Patch-count annotations
+            bar_idx = 0
+            for ci, city in enumerate(page_cities):
+                for mi, method in enumerate(methods):
+                    for coi, contour in enumerate(contour_levels):
+                        x = x_positions[bar_idx]
+                        bar_idx += 1
+
+                        bar_top = 0
+                        if (city, method, contour) in period_area.index:
+                            bar_top = period_area.loc[(city, method, contour)].sum()
+
+                        patch_row = period_patches[
+                            (period_patches['city'] == city) &
+                            (period_patches['method'] == method) &
+                            (period_patches['contour_level'] == contour)
+                        ]
+                        if not patch_row.empty and bar_top > 0:
+                            n_patches = patch_row.iloc[0]['total_patches']
+                            ax.text(x, bar_top + nudge, str(n_patches),
+                                   ha='center', va='bottom', fontsize=8,
+                                   fontweight='bold', color='#333333')
+
+            # --- Styling ---
+            ax.set_ylabel(f'{period}\n\nArea (km²)',
+                         fontsize=10, fontweight='bold', labelpad=6)
+            ax.grid(axis='y', alpha=0.25, linestyle='--', zorder=0)
+            ax.set_xlim(-bar_w * 0.8, total_width + bar_w * 0.8)
+            ax.tick_params(axis='y', labelsize=9)
+            ax.axhline(0, color='black', linewidth=0.8, zorder=2)
+
+            for xd in city_dividers:
+                ax.axvline(xd, color='#666666', linewidth=0.9, linestyle='-', alpha=0.6, zorder=0)
+            for xd in method_dividers:
+                ax.axvline(xd, color='#aaaaaa', linewidth=0.6, linestyle='--', alpha=0.5, zorder=0)
+
+            if ax_idx < n_panels - 1:
+                ax.tick_params(axis='x', labelbottom=False, length=0)
+            if ax_idx > 0:
+                ax.spines['top'].set_visible(False)
+            if ax_idx < n_panels - 1:
+                ax.spines['bottom'].set_visible(False)
+
+        # --- X-axis label hierarchy (bottom panel only) --------------------
+        bottom_ax = axes[-1]
+
+        bottom_ax.set_xticks([pos for pos, _ in contour_labels_x])
+        bottom_ax.set_xticklabels([lbl for _, lbl in contour_labels_x],
+                                   fontsize=9, rotation=0)
+        bottom_ax.tick_params(axis='x', which='major', pad=2, length=3)
+
+        for mx, mlbl in method_labels_x:
+            bottom_ax.text(mx, -0.10, mlbl,
+                          ha='center', va='top', fontsize=10, fontweight='bold',
+                          transform=bottom_ax.get_xaxis_transform())
+
+        for cx, clbl in city_labels_x:
+            bottom_ax.text(cx, -0.20, clbl,
+                          ha='center', va='top', fontsize=11, fontweight='bold',
+                          transform=bottom_ax.get_xaxis_transform())
+
+        plt.tight_layout(rect=[0, 0.07, 1, 0.95])
+        fig.subplots_adjust(hspace=0)
+
+        # Save page to multi-page PDF (best-effort; continue if backend is incompatible)
+        if pdf_pages is not None:
+            try:
+                pdf_pages.savefig(fig, dpi=300, bbox_inches='tight')
+            except Exception as e:
+                pdf_export_ok = False
+                print(f"Warning: PDF page export skipped due to backend incompatibility ({e}).")
+                try:
+                    pdf_pages.close()
+                except Exception:
+                    pass
+                pdf_pages = None
+
+        # Save individual SVG per page
+        if n_pages == 1:
+            page_svg = svg_path
+        else:
+            page_svg = output_dir / f'hotspot_area_by_contour_cluster25_page{page_idx + 1}.svg'
+        plt.savefig(page_svg, dpi=300, format='svg', bbox_inches='tight')
+        svg_paths.append(page_svg)
+        plt.close(fig)
+
+    if pdf_pages is not None:
+        try:
+            pdf_pages.close()
+        except Exception:
+            pass
+
+    if pdf_export_ok and pdf_path.exists():
+        print(f" Saved hotspot area plots: {pdf_path.name} ({n_pages} page{'s' if n_pages > 1 else ''})")
+    else:
+        print(" Saved hotspot area plots without PDF (SVG exports completed).")
     
     # =============================================================================
     # GENERATE TABLE 1: Hotspot Characterization
@@ -7058,7 +7794,7 @@ def create_hotspot_area_by_contour_plots(hotspot_polygons_enriched, landscape_gd
     table1_df = pd.DataFrame(characterization_rows)
     table1_df = table1_df.sort_values(['City', 'Period', 'Method', 'Contour'])
     table1_df.to_csv(table1_path, index=False)
-    print(f"✓ Saved Table 1: {table1_path.name}")
+    print(f" Saved Table 1: {table1_path.name}")
     
     # =============================================================================
     # GENERATE TABLE 2: Cluster25 with Colors
@@ -7131,11 +7867,16 @@ def create_hotspot_area_by_contour_plots(hotspot_polygons_enriched, landscape_gd
     table2_df = pd.DataFrame(cluster25_info)
     table2_df = table2_df.sort_values('Cluster25')
     table2_df.to_csv(table2_path, index=False)
-    print(f"✓ Saved Table 2: {table2_path.name}")
+    print(f" Saved Table 2: {table2_path.name}")
     
+    primary_svg = svg_path if svg_path.exists() else (svg_paths[0] if svg_paths else svg_path)
+    pdf_result = pdf_path if (pdf_export_ok and pdf_path.exists()) else None
+
     return {
-        'pdf': pdf_path,
-        'png': png_path,
+        'pdf': pdf_result,
+        'svg': primary_svg,
+        'PDF': pdf_result,
+        'SVG': primary_svg,
         'table1': table1_path,
         'table2': table2_path,
         'skipped': False,
@@ -7167,7 +7908,7 @@ def create_population_exposure_donuts(
     Create **separate half-donut cross-section** charts per city
     showing population exposed to UHI hotspots.
 
-    Each city gets its own figure (PDF + PNG).  The semicircle faces
+    Each city gets its own figure (PDF + SVG).  The semicircle faces
     upward; the flat cut edge faces down.  Day occupies the left
     half-ring, Night the right half-ring.
 
@@ -7177,13 +7918,13 @@ def create_population_exposure_donuts(
         Ring 3 (outer)  : Contour — 90 % / 75 % / 50 %
 
     Design:
-      • Day ☀ / Night ☾ headers placed at the base (below the flat edge)
-      • Labels on each side connected by leader lines FROM the segment
+     Day ☀ / Night ☾ headers placed at the base (below the flat edge)
+       Labels on each side connected by leader lines FROM the segment
         midpoint TO the label position
-      • Leader lines are coloured to match their segment, with small
+       Leader lines are coloured to match their segment, with small
         filled circles at both endpoints
-      • Robust overlap resolution keeps labels well-separated
-      • Zero-population segments are omitted
+       Robust overlap resolution keeps labels well-separated
+       Zero-population segments are omitted
 
     Args:
         hotspot_polygons_enriched: GeoDataFrame with city, method, period,
@@ -7202,7 +7943,7 @@ def create_population_exposure_donuts(
     import numpy as np
     import pandas as pd
 
-    # ── data prep ─────────────────────────────────────────────────────────
+    #  data prep 
     df = (
         hotspot_polygons_enriched
         .loc[
@@ -7213,7 +7954,7 @@ def create_population_exposure_donuts(
     )
 
     if df.empty:
-        print("✗ No data matching filter (P90/GI_STAR × Day/Night)")
+        print(" No data matching filter (P90/GI_STAR × Day/Night)")
         return {'skipped': False, 'success': False}
 
     cities = sorted(df['city'].unique())
@@ -7223,16 +7964,16 @@ def create_population_exposure_donuts(
     for city in cities:
         slug = city.lower().replace(' ', '_')
         pdf_p = output_dir / f'population_exposure_donut_{slug}.pdf'
-        png_p = output_dir / f'population_exposure_donut_{slug}.png'
-        if not (pdf_p.exists() and png_p.exists()):
+        svg_p = output_dir / f'population_exposure_donut_{slug}.svg'
+        if not (pdf_p.exists() and svg_p.exists()):
             all_exist = False
             break
 
     if skip_if_exists and all_exist:
-        print("✓ All per-city donut charts already exist, skipping")
+        print(" All per-city donut charts already exist, skipping")
         return {'skipped': True, 'success': True, 'cities': cities}
 
-    # ── colour palette ────────────────────────────────────────────────────
+    #  colour palette 
     period_colors = {
         'Day':   '#E8651A',
         'Night': '#2B6CB0',
@@ -7245,12 +7986,12 @@ def create_population_exposure_donuts(
     methods  = ['P90', 'GI_STAR']
     contours = [0.9, 0.75, 0.5]
 
-    # ── ring geometry ─────────────────────────────────────────────────────
+    #  ring geometry 
     r_inner = {1: 0.42, 2: 0.72, 3: 1.02}
     r_width = {1: 0.27, 2: 0.27, 3: 0.24}
     outer_max = r_inner[3] + r_width[3]  # 1.26
 
-    # ── helpers ───────────────────────────────────────────────────────────
+    #  helpers 
     def _fmt_pop(val):
         """Format population: ≥1000 → '12.3 k', else integer."""
         if val >= 1_000_000:
@@ -7269,7 +8010,7 @@ def create_population_exposure_donuts(
             ['pop_total'].sum()
         )
 
-        # ── figure ────────────────────────────────────────────────────
+        #  figure 
         fig, ax = plt.subplots(
             figsize=(10.0, 6.0),
             subplot_kw=dict(aspect='equal'),
@@ -7278,7 +8019,7 @@ def create_population_exposure_donuts(
         # Collect label specs per side
         label_specs = []
 
-        # ── compute proportional angular spans for Day vs Night ───────
+        #  compute proportional angular spans for Day vs Night 
         # Ring 1 sweep is proportional to actual population, not 50/50.
         period_pops = {}
         for period in periods:
@@ -7308,7 +8049,7 @@ def create_population_exposure_donuts(
             base_color = period_colors[period]
             side       = 'left' if period == 'Day' else 'right'
 
-            # ── Ring 1: Period band ───────────────────────────────────
+            #  Ring 1: Period band 
             pop_period = agg.loc[agg['period'] == period, 'pop_total'].sum()
             if pop_period <= 0:
                 continue
@@ -7331,7 +8072,7 @@ def create_population_exposure_donuts(
                 'color': color_r1, 'fs': 9, 'fw': 'bold',
             })
 
-            # ── Ring 2: Method bands ──────────────────────────────────
+            #  Ring 2: Method bands 
             method_pops = []
             for m in methods:
                 mp = agg.loc[
@@ -7368,7 +8109,7 @@ def create_population_exposure_donuts(
                         'color': color_r2, 'fs': 8, 'fw': 'bold',
                     })
 
-                # ── Ring 3: Contour bands ─────────────────────────────
+                #  Ring 3: Contour bands 
                 contour_pops = []
                 for c in contours:
                     cp = agg.loc[
@@ -7409,7 +8150,7 @@ def create_population_exposure_donuts(
                     ang_cursor3 += sweep3
                 ang_cursor2 += sweep2
 
-        # ── label segments directly at their midpoints ──────────────
+        #  label segments directly at their midpoints 
         # Filled circle at segment midpoint; horizontal text beside it.
         # Day (left) labels sit LEFT of dot, Night (right) sit RIGHT.
         # Overlap prevention: spread labels vertically per side so
@@ -7427,7 +8168,7 @@ def create_population_exposure_donuts(
             spec['dot_y'] = mid_r * np.sin(ang_rad)
             spec['label_y'] = spec['dot_y']   # initial
 
-        # ── vertical overlap prevention per side ──────────────────────
+        #  vertical overlap prevention per side 
         min_gap = 0.085
         for side_name in ('left', 'right'):
             group = [s for s in label_specs if s['side'] == side_name]
@@ -7440,7 +8181,7 @@ def create_population_exposure_donuts(
                 if group[i - 1]['label_y'] - group[i]['label_y'] < min_gap:
                     group[i]['label_y'] = group[i - 1]['label_y'] - min_gap
 
-        # ── draw dots + labels ────────────────────────────────────────
+        #  draw dots + labels 
         for spec in label_specs:
             side = spec['side']
             dark = day_dark if side == 'left' else night_dark
@@ -7474,7 +8215,7 @@ def create_population_exposure_donuts(
                           ec='none', alpha=0.7),
             )
 
-        # ── centre annotation ─────────────────────────────────────────
+        #  centre annotation 
         city_total = int(city_df['pop_total'].sum())
         ax.text(0, 0.22, city, ha='center', va='center',
                 fontsize=16, fontweight='bold', color='#1a1a1a')
@@ -7483,7 +8224,7 @@ def create_population_exposure_donuts(
         ax.text(0, -0.09, 'persons exposed', ha='center', va='center',
                 fontsize=8.5, color='#888888', style='italic')
 
-        # ── "Day" / "Night" at the BASE (below flat edge) ────────────
+        #  "Day" / "Night" at the BASE (below flat edge) 
         base_y = -0.22
         ax.text(-0.55, base_y, 'Day', ha='center', va='top',
                 fontsize=12, fontweight='bold', color=day_dark)
@@ -7493,7 +8234,7 @@ def create_population_exposure_donuts(
         ax.plot([-outer_max, outer_max], [0, 0],
                 color='#cccccc', lw=0.6, zorder=1)
 
-        # ── ring-name labels on the flat edge (at y=0) ────────────────
+        #  ring-name labels on the flat edge (at y=0) 
         # Place ring names along the bottom baseline so they don't
         # overlap segment labels at the top of the arc.
         for ring_id, ring_name in [(1, 'Period'), (2, 'Method'), (3, 'Contour')]:
@@ -7501,13 +8242,13 @@ def create_population_exposure_donuts(
             ax.text(mid_r, -0.04, ring_name, ha='center', va='top',
                     fontsize=6.5, color='#777777', style='italic')
 
-        # ── title ─────────────────────────────────────────────────────
+        #  title 
         ax.set_title(
             f'Population Exposed to UHI Hotspots — {city}',
             fontsize=13, fontweight='bold', pad=18, color='#1a1a1a',
         )
 
-        # ── axis limits ───────────────────────────────────────────────
+        #  axis limits 
         margin = 0.65
         ax.set_xlim(-(outer_max + margin), outer_max + margin)
         ax.set_ylim(-0.55, outer_max + 0.55)
@@ -7515,20 +8256,136 @@ def create_population_exposure_donuts(
 
         fig.tight_layout()
 
-        # ── save per-city ─────────────────────────────────────────────
+        #  save per-city 
         slug = city.lower().replace(' ', '_')
         pdf_path = output_dir / f'population_exposure_donut_{slug}.pdf'
-        png_path = output_dir / f'population_exposure_donut_{slug}.png'
+        svg_path = output_dir / f'population_exposure_donut_{slug}.svg'
+        fig.savefig(svg_path, format='svg', dpi=300, bbox_inches='tight')
         fig.savefig(pdf_path, format='pdf', dpi=300, bbox_inches='tight')
-        fig.savefig(png_path, format='png', dpi=300, bbox_inches='tight')
         plt.close(fig)
-        print(f"  ✓ {city}: {pdf_path.name} / {png_path.name}")
-        saved_paths[city] = {'pdf': pdf_path, 'png': png_path}
+        print(f"   {city}: {svg_path.name} / {pdf_path.name}")
+        saved_paths[city] = {'pdf': pdf_path, 'svg': svg_path, 'PDF': pdf_path, 'SVG': svg_path}
 
     return {
         'cities': saved_paths,
         'skipped': False,
         'success': True,
+    }
+
+
+def create_nigeria_population_exposure_summary(
+    hotspot_polygons_enriched,
+    output_dir: Path,
+    skip_if_exists: bool = True,
+    country_label: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Build AOI-level Section 6.4 summary table and create one composite
+    half-donut for the whole country.
+
+    Table columns:
+        AOI | Level | Diurnality | Sub-total Population |
+        Total Population (across the sub-totals)
+
+    The national donut is created from aggregated P90/GI_STAR x Day/Night x
+    contour-level totals so it is directly comparable with city-level donuts.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if not country_label:
+        boundary_name = Path(config.AOI_DATA_PATHS.get('boundary_geojson', '')).stem
+        if boundary_name.lower().startswith('boundary_'):
+            country_label = boundary_name.split('_', 1)[1].replace('_', ' ').strip().title()
+        else:
+            country_label = 'National'
+
+    required_cols = {'city', 'method', 'period', 'contour_level', 'pop_total'}
+    missing = required_cols.difference(set(hotspot_polygons_enriched.columns))
+    if missing:
+        raise ValueError(
+            f"Missing required columns for Section 6.4 summary: {sorted(missing)}"
+        )
+
+    df = hotspot_polygons_enriched.loc[
+        hotspot_polygons_enriched['method'].isin(['P90', 'GI_STAR'])
+        & hotspot_polygons_enriched['period'].isin(['Day', 'Night']),
+        ['city', 'method', 'period', 'contour_level', 'pop_total'],
+    ].copy()
+
+    if df.empty:
+        return {'success': False, 'skipped': False, 'reason': 'No matching rows after filter'}
+
+    # AOI-level table requested by user.
+    aoi_level = (
+        df.groupby(['city', 'contour_level', 'period'], as_index=False)['pop_total']
+          .sum()
+          .rename(
+              columns={
+                  'city': 'AOI',
+                  'contour_level': 'Level',
+                  'period': 'Diurnality (day/night)',
+                  'pop_total': 'Sub-total Population',
+              }
+          )
+    )
+    aoi_level['Level'] = (aoi_level['Level'] * 100).round(0).astype(int).astype(str) + '%'
+    aoi_level['Total Population (across the sub-totals)'] = (
+        aoi_level.groupby('AOI')['Sub-total Population'].transform('sum')
+    )
+
+    # National roll-up rows (same schema as AOI rows).
+    national_rows = (
+        aoi_level.groupby(['Level', 'Diurnality (day/night)'], as_index=False)['Sub-total Population']
+                 .sum()
+    )
+    national_rows.insert(0, 'AOI', country_label)
+    national_total = national_rows['Sub-total Population'].sum()
+    national_rows['Total Population (across the sub-totals)'] = national_total
+
+    summary_table = pd.concat([aoi_level, national_rows], ignore_index=True)
+    summary_table = summary_table.sort_values(
+        by=['AOI', 'Diurnality (day/night)', 'Level'],
+        key=lambda s: s.map({'Day': 0, 'Night': 1}) if s.name == 'Diurnality (day/night)' else s,
+    )
+
+    summary_csv = output_dir / 'population_exposure_summary_aoi_level.csv'
+    summary_table.to_csv(summary_csv, index=False)
+
+    # Build country-level donut input and reuse the existing renderer.
+    national_donut_df = (
+        df.groupby(['period', 'method', 'contour_level'], as_index=False)['pop_total']
+          .sum()
+    )
+    national_donut_df['city'] = country_label
+
+    donut_result = create_population_exposure_donuts(
+        hotspot_polygons_enriched=national_donut_df,
+        output_dir=output_dir,
+        skip_if_exists=skip_if_exists,
+    )
+
+    donut_paths = None
+    if isinstance(donut_result.get('cities'), dict):
+        donut_paths = donut_result['cities'].get(country_label)
+
+    if donut_paths is None:
+        slug = country_label.lower().replace(' ', '_')
+        donut_paths = {
+            'svg': output_dir / f'population_exposure_donut_{slug}.svg',
+            'pdf': output_dir / f'population_exposure_donut_{slug}.pdf',
+            'SVG': output_dir / f'population_exposure_donut_{slug}.svg',
+            'PDF': output_dir / f'population_exposure_donut_{slug}.pdf',
+        }
+
+    return {
+        'success': bool(donut_result.get('success', False)),
+        'skipped': bool(donut_result.get('skipped', False)),
+        'table_csv': summary_csv,
+        'donut': donut_paths,
+        'country': country_label,
+        'n_aoi_rows': int(len(aoi_level)),
+        'n_national_rows': int(len(national_rows)),
     }
 
 
@@ -7735,7 +8592,7 @@ def create_national_summary_map(
     gi_star_pop = gi_star_hotspots['pop_total'].sum() if 'pop_total' in gi_star_hotspots.columns else 0
     
     stats_text = f'''National Summary
-─────────────────
+
 Cities Analyzed: {n_cities}
 Hotspots Detected: {len(hotspots_gdf)} ({total_hotspot_area_km2:.1f} km²)
 Population at Risk - Day/Night: {format_population(total_day)} | {format_population(total_night)}
@@ -7763,11 +8620,11 @@ Total Population at Risk (Gi*): {format_population(gi_star_pop)}
     ax.set_ylim(bounds[1] - 1.0, bounds[3] + 0.5)
     
     # -------------------------------------------------------------------------
-    # Scale bar at bottom center (100 km ≈ 0.9 degrees at equator)
+    # Scale bar at bottom center (100 km  0.9 degrees at equator)
     # -------------------------------------------------------------------------
     
     scale_center_lon = (bounds[0] + bounds[2]) / 2
-    scale_half_deg = 0.45  # 0.9 degrees total ≈ 100 km
+    scale_half_deg = 0.45  # 0.9 degrees total  100 km
     scale_lon_start = scale_center_lon - scale_half_deg
     scale_lon_end = scale_center_lon + scale_half_deg
     scale_lat = bounds[1] - 0.7
@@ -7791,13 +8648,13 @@ Total Population at Risk (Gi*): {format_population(gi_star_pop)}
     # Save outputs
     # -------------------------------------------------------------------------
     
-    output_path_png = maps_dir / 'national_summary_map_cluster25.png'
+    output_path_svg = maps_dir / 'national_summary_map_cluster25.svg'
     output_path_pdf = maps_dir / 'national_summary_map_cluster25.pdf'
     
-    fig.savefig(output_path_png, dpi=300, bbox_inches='tight')
+    fig.savefig(output_path_svg, dpi=300, format='svg', bbox_inches='tight')
     fig.savefig(output_path_pdf, format='pdf', bbox_inches='tight')
     
-    print(f"✓ Saved: {output_path_png.name} | {output_path_pdf.name}")
+    print(f" Saved: {output_path_svg.name} | {output_path_pdf.name}")
     
     if show_plot:
         plt.show()
@@ -7805,7 +8662,8 @@ Total Population at Risk (Gi*): {format_population(gi_star_pop)}
         plt.close(fig)
     
     return {
-        'png_path': output_path_png,
+        'svg_path': output_path_svg,
+        'png_path': output_path_svg,
         'pdf_path': output_path_pdf,
         'n_cities': n_cities,
         'n_hotspots': len(hotspots_gdf),
@@ -7819,9 +8677,9 @@ Total Population at Risk (Gi*): {format_population(gi_star_pop)}
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 # Cluster25 helpers — city-based assignment (captures ALL workshop stakeholders)
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 
 
 def _build_city_cluster25_map(survey_df, landscape_gdf):
@@ -7921,9 +8779,9 @@ def _assign_cluster25_via_city(survey_df, landscape_gdf):
     return workshop, cluster_meta
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 # Chart 1: Reasons for Heating vs. Mitigation by Cluster25
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 
 def create_reasons_mitigation_chart(
     survey_df: pd.DataFrame,
@@ -7956,10 +8814,10 @@ def create_reasons_mitigation_chart(
     maps_dir = Path(output_dir) / 'maps'
     maps_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── assign Cluster25 via city (all stakeholders) ─────────────────────
+    #  assign Cluster25 via city (all stakeholders) 
     workshop, cluster_meta = _assign_cluster25_via_city(survey_df, landscape_gdf)
 
-    # ── city → Cluster25 reverse map (for textbox) ───────────────────────
+    #  city → Cluster25 reverse map (for textbox) 
     _city_cl = (
         workshop.drop_duplicates('matched_city_y')
         .set_index('matched_city_y')['Cluster25']
@@ -7969,7 +8827,7 @@ def create_reasons_mitigation_chart(
     for _city, _cid in _city_cl.items():
         cl_to_cities.setdefault(int(_cid), []).append(_city)
 
-    # ── deduplicate: one response per PID per Cluster25 ──────────────────
+    #  deduplicate: one response per PID per Cluster25 
     reason_col = '74_reason_hotspots'
     mitig_col = '94_temp_mitigation_solution'
 
@@ -7980,7 +8838,7 @@ def create_reasons_mitigation_chart(
         subset=['pid', 'Cluster25']
     )
 
-    # ── cross-tabulate ───────────────────────────────────────────────────
+    #  cross-tabulate 
     reason_ct = pd.crosstab(reason_data['Cluster25'], reason_data[reason_col])
     mitig_ct = pd.crosstab(mitig_data['Cluster25'], mitig_data[mitig_col])
 
@@ -7988,7 +8846,7 @@ def create_reasons_mitigation_chart(
     n_reason = reason_data.groupby('Cluster25')['pid'].nunique()
     n_mitig = mitig_data.groupby('Cluster25')['pid'].nunique()
 
-    # ── short column names for display ───────────────────────────────────
+    #  short column names for display 
     reason_short = {
         'Concentration of automobile emissions': 'Auto. emissions',
         'Dense urban building':                  'Dense buildings',
@@ -8006,7 +8864,7 @@ def create_reasons_mitigation_chart(
         'Others':                    'Others',
     }
 
-    # ── colour palettes ──────────────────────────────────────────────────
+    #  colour palettes 
     reason_colors = {
         'Auto. emissions':    '#e74c3c',
         'Dense buildings':    '#e67e22',
@@ -8040,13 +8898,13 @@ def create_reasons_mitigation_chart(
     reason_ct = reason_ct[r_cols]
     mitig_ct = mitig_ct[[c for c in m_cols if c in mitig_ct.columns]]
 
-    # ── totals for subtitle ──────────────────────────────────────────────
+    #  totals for subtitle 
     total_reason_stk = reason_data['pid'].nunique()
     total_mitig_stk = mitig_data['pid'].nunique()
     total_stakeholders = workshop.drop_duplicates('pid')['pid'].nunique()
     n_cities_workshop = workshop['matched_city_y'].nunique()
 
-    # ── PLOT ─────────────────────────────────────────────────────────────
+    #  PLOT 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize, sharey=True,
                                     gridspec_kw={'wspace': 0.05})
 
@@ -8107,7 +8965,7 @@ def create_reasons_mitigation_chart(
 
     fig.tight_layout()
 
-    # ── textbox: cities per cluster ──────────────────────────────────────
+    #  textbox: cities per cluster 
     tb_lines = []
     for _cid in sorted(cl_to_cities.keys()):
         _cities_str = ', '.join(sorted(cl_to_cities[_cid]))
@@ -8120,12 +8978,12 @@ def create_reasons_mitigation_chart(
                   edgecolor='#cccccc', alpha=0.9),
     )
 
-    # ── save ─────────────────────────────────────────────────────────────
-    png_path = maps_dir / 'reasons_mitigation_by_cluster25.png'
+    #  save 
+    svg_path = maps_dir / 'reasons_mitigation_by_cluster25.svg'
     pdf_path = maps_dir / 'reasons_mitigation_by_cluster25.pdf'
-    fig.savefig(png_path, dpi=300, bbox_inches='tight')
+    fig.savefig(svg_path, dpi=300, format='svg', bbox_inches='tight')
     fig.savefig(pdf_path, format='pdf', bbox_inches='tight')
-    print(f"✓ Saved: {png_path.name} | {pdf_path.name}")
+    print(f" Saved: {svg_path.name} | {pdf_path.name}")
 
     if show_plot:
         plt.show()
@@ -8133,7 +8991,8 @@ def create_reasons_mitigation_chart(
         plt.close(fig)
 
     return {
-        'png_path': png_path,
+        'svg_path': svg_path,
+        'png_path': svg_path,
         'pdf_path': pdf_path,
         'n_stakeholders': total_stakeholders,
         'n_reason_stakeholders': total_reason_stk,
@@ -8146,9 +9005,9 @@ def create_reasons_mitigation_chart(
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 # Chart 2: Tree Species Heatmap (Cluster25 or City)
-# ─────────────────────────────────────────────────────────────────────────────
+# 
 
 def create_tree_species_heatmap(
     survey_df: pd.DataFrame,
@@ -8190,10 +9049,10 @@ def create_tree_species_heatmap(
     maps_dir = Path(output_dir) / 'maps'
     maps_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── assign Cluster25 via city ────────────────────────────────────────
+    #  assign Cluster25 via city 
     workshop, cluster_meta = _assign_cluster25_via_city(survey_df, landscape_gdf)
 
-    # ── filter to tree-species rows ──────────────────────────────────────
+    #  filter to tree-species rows 
     tree_col = 'canonical_common_name'
     tree_data = workshop[workshop[tree_col].notna()].copy()
     if tree_data.empty:
@@ -8211,7 +9070,7 @@ def create_tree_species_heatmap(
 
     tree_data = tree_data[tree_data[tree_col].isin(selected_species)]
 
-    # ── deduplicate: one entry per PID × species × group ─────────────────
+    #  deduplicate: one entry per PID × species × group 
     # Without this, a stakeholder's tree suggestion is counted once per
     # survey spot, inflating the cross-tab.  We want unique stakeholders.
     if group_by == 'city':
@@ -8223,7 +9082,7 @@ def create_tree_species_heatmap(
             subset=['pid', tree_col, 'Cluster25']
         )
 
-    # ── cross-tabulate ───────────────────────────────────────────────────
+    #  cross-tabulate 
     if group_by == 'city':
         ct = pd.crosstab(tree_data[tree_col], tree_data['matched_city_y'])
         ct = ct.reindex(index=selected_species).fillna(0).astype(int)
@@ -8259,7 +9118,7 @@ def create_tree_species_heatmap(
         fname_stem = f'tree_species_heatmap_cluster25_{species_tag}'
         title_group = 'Landscape Character'
 
-    # ── dynamic figsize (tight: cell height ≈ 0.35 in) ─────────────────
+    #  dynamic figsize (tight: cell height  0.35 in) 
     if figsize is None:
         n_rows = len(selected_species)
         n_cols = ct.shape[1]
@@ -8268,19 +9127,19 @@ def create_tree_species_heatmap(
         else:
             figsize = (max(10, n_cols * 1.1 + 3), max(6, n_rows * 0.35 + 2.5))
 
-    # ── totals ───────────────────────────────────────────────────────────
+    #  totals 
     total_stakeholders = tree_data['pid'].nunique()
     n_cities = tree_data['matched_city_y'].nunique()
     n_display = len(selected_species)
 
-    # ── light-green → dark-green colour map ──────────────────────────────
+    #  light-green → dark-green colour map 
     green_cmap = LinearSegmentedColormap.from_list(
         'light_dark_green',
         ['#f0f9e8', '#bae4bc', '#7bccc4', '#43a2ca', '#0b6623'],
         N=256,
     )
 
-    # ── PLOT ─────────────────────────────────────────────────────────────
+    #  PLOT 
     fig, ax = plt.subplots(figsize=figsize)
 
     sns.heatmap(
@@ -8333,12 +9192,12 @@ def create_tree_species_heatmap(
 
     fig.tight_layout()
 
-    # ── save ─────────────────────────────────────────────────────────────
-    png_path = maps_dir / f'{fname_stem}.png'
+    #  save 
+    svg_path = maps_dir / f'{fname_stem}.svg'
     pdf_path = maps_dir / f'{fname_stem}.pdf'
-    fig.savefig(png_path, dpi=300, bbox_inches='tight')
+    fig.savefig(svg_path, dpi=300, format='svg', bbox_inches='tight')
     fig.savefig(pdf_path, format='pdf', bbox_inches='tight')
-    print(f"✓ Saved: {png_path.name} | {pdf_path.name}")
+    print(f" Saved: {svg_path.name} | {pdf_path.name}")
 
     if show_plot:
         plt.show()
@@ -8346,7 +9205,8 @@ def create_tree_species_heatmap(
         plt.close(fig)
 
     return {
-        'png_path': png_path,
+        'svg_path': svg_path,
+        'png_path': svg_path,
         'pdf_path': pdf_path,
         'n_stakeholders': total_stakeholders,
         'n_cities': n_cities,
@@ -8373,7 +9233,7 @@ def _load_geotiff_nb03(file_path):
             data[(data < -50) | (data > 70)] = np.nan
             return data, src.bounds, src.transform, src.crs
     except Exception as e:
-        print(f"❌ Error loading {file_path}: {e}")
+        print(f" Error loading {file_path}: {e}")
         return None, None, None, None
 
 
@@ -8686,7 +9546,7 @@ def create_qa_maps(aoi_data, lst_config, temporal_config, project_config):
                     data[data == src.nodata] = np.nan
                 return data, src.bounds, src.transform, src.crs
         except Exception as exc:
-            print(f"❌ Error loading QA file {fp}: {exc}")
+            print(f" Error loading QA file {fp}: {exc}")
             return None, None, None, None
 
     def _qa_stats_str(qa_data):
@@ -8715,14 +9575,14 @@ def create_qa_maps(aoi_data, lst_config, temporal_config, project_config):
             geotiff_dir = os.path.join(project_config['lst_output_dir'], city_dir,
                                        'LST_Temporal_Analysis', subdir, 'geotiff')
             if not os.path.exists(geotiff_dir):
-                print(f"  ❌ Not found: {geotiff_dir}")
+                print(f"   Not found: {geotiff_dir}")
                 continue
 
             qa_maps_dir = os.path.join(os.path.dirname(geotiff_dir),
                                        'Figures', 'QA_Maps')
             os.makedirs(qa_maps_dir, exist_ok=True)
 
-            # ── Monthly QA ────────────────────────────────────────────────
+            #  Monthly QA 
             monthly_qa = sorted(glob.glob(
                 os.path.join(geotiff_dir,
                              f"{city_name}_QA_Source_{subdir.lower()}_MonthlyClimatology_*.tif")))
@@ -8769,13 +9629,13 @@ def create_qa_maps(aoi_data, lst_config, temporal_config, project_config):
                     _plt.savefig(out_pdf, bbox_inches='tight')
                     _plt.savefig(out_png, bbox_inches='tight', dpi=300)
                     _plt.close()
-                    print(f"  ✅ Monthly QA → {os.path.basename(out_png)}")
+                    print(f"   Monthly QA → {os.path.basename(out_png)}")
                 except Exception as exc:
                     import traceback
-                    print(f"  ❌ Monthly QA error for {city_name}: {exc}")
+                    print(f"   Monthly QA error for {city_name}: {exc}")
                     print(traceback.format_exc())
 
-            # ── Yearly QA ─────────────────────────────────────────────────
+            #  Yearly QA 
             yearly_qa = sorted(glob.glob(
                 os.path.join(geotiff_dir,
                              f"{city_name}_QA_Source_{subdir.lower()}_Yearly_*.tif")))
@@ -8825,10 +9685,10 @@ def create_qa_maps(aoi_data, lst_config, temporal_config, project_config):
                 _plt.savefig(out_pdf, bbox_inches='tight')
                 _plt.savefig(out_png, bbox_inches='tight', dpi=300)
                 _plt.close()
-                print(f"  ✅ Yearly QA  → {os.path.basename(out_png)}")
+                print(f"   Yearly QA  → {os.path.basename(out_png)}")
             except Exception as exc:
                 import traceback
-                print(f"  ❌ Yearly QA error for {city_name}: {exc}")
+                print(f"   Yearly QA error for {city_name}: {exc}")
                 print(traceback.format_exc())
 
 
@@ -8885,7 +9745,7 @@ def create_lst_trend_plots(aoi_data, all_stats_df,
     for city_name, aoi_info in aoi_data.items():
         city_df = all_stats_df[all_stats_df['city'] == city_name]
         if city_df.empty:
-            print(f"⚠️  No data for {city_name}")
+            print(f"  No data for {city_name}")
             continue
 
         city_dir        = aoi_info['city_dir']
@@ -8907,7 +9767,7 @@ def create_lst_trend_plots(aoi_data, all_stats_df,
         day_data   = {}
         night_data = {}
 
-        # ── Left panel: yearly trends ──────────────────────────────────
+        #  Left panel: yearly trends 
         ax1.set_title("Yearly LST Trends", fontsize=21, pad=20)
         for lst_time in lst_time_options:
             time_df  = city_df[city_df['day_night'] == lst_time]
@@ -8984,7 +9844,7 @@ def create_lst_trend_plots(aoi_data, all_stats_df,
         ax1.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
         ax1.xaxis.set_major_formatter(ticker.FormatStrFormatter('%d'))
 
-        # ── Right panel: monthly climatology ───────────────────────────
+        #  Right panel: monthly climatology 
         ax2.set_title("Monthly LST Climatology", fontsize=21, pad=20)
         day_data   = {}
         night_data = {}
@@ -9061,9 +9921,9 @@ def create_lst_trend_plots(aoi_data, all_stats_df,
         _plt.savefig(out_png, dpi=DPI, bbox_inches='tight')
         _plt.savefig(out_pdf, bbox_inches='tight')
         _plt.close(fig)
-        print(f"✅ Saved trend plots for {city_name}")
+        print(f" Saved trend plots for {city_name}")
 
-    # ── Standalone legend ─────────────────────────────────────────────
+    #  Standalone legend 
     legend_dir = os.path.join(project_config['lst_output_dir'], 'Stats')
     os.makedirs(legend_dir, exist_ok=True)
     leg_fig, leg_ax = _plt.subplots(figsize=(12, 3), dpi=300)
@@ -9090,7 +9950,7 @@ def create_lst_trend_plots(aoi_data, all_stats_df,
     leg_fig.savefig(leg_pdf, bbox_inches='tight',
                     facecolor='white', edgecolor='none')
     _plt.close(leg_fig)
-    print(f"✅ Legend saved: {leg_png}")
+    print(f" Legend saved: {leg_png}")
 
     for city_name, aoi_info in aoi_data.items():
         cf = os.path.join(project_config['lst_output_dir'], f'City_{city_name}',
@@ -9122,14 +9982,14 @@ def create_trend_category_chart(summary_csv_path, output_dir):
     import matplotlib.ticker as mticker
 
     if not os.path.exists(summary_csv_path):
-        print(f"❌ Summary file not found: {summary_csv_path}")
+        print(f" Summary file not found: {summary_csv_path}")
         return
 
     df = pd.read_csv(summary_csv_path)
     os.makedirs(output_dir, exist_ok=True)
 
     def _slope(val):
-        m = re.search(r'([-+]?\d+\.?\d*)\s*°C/year', str(val))
+        m = re.search(r'([-+]\d+\.\d*)\s*°C/year', str(val))
         return float(m.group(1)) if m else 0.0
 
     def _is_sig(val):
@@ -9157,7 +10017,7 @@ def create_trend_category_chart(summary_csv_path, output_dir):
     tc = next((c for c in df.columns
                if c.strip().lower() in ('time', 'day_night', 'lst_time')), None)
     if tc is None:
-        print("❌ Could not find time column in CSV"); return
+        print(" Could not find time column in CSV"); return
 
     df['_tnorm'] = df[tc].str.strip().str.capitalize()
     counts = {}
@@ -9167,7 +10027,7 @@ def create_trend_category_chart(summary_csv_path, output_dir):
             counts[t] = {c: int((sub['_cat'] == c).sum()) for c in CATS}
 
     if not counts:
-        print("❌ No data to plot"); return
+        print(" No data to plot"); return
 
     x     = np.arange(len(CATS))
     bw    = 0.35
@@ -9207,7 +10067,7 @@ def create_trend_category_chart(summary_csv_path, output_dir):
     fig.savefig(chart_png, dpi=400, bbox_inches='tight')
     fig.savefig(chart_pdf, bbox_inches='tight')
     _plt.close(fig)
-    print(f"✅ Trend Category Chart → {chart_png}")
+    print(f" Trend Category Chart → {chart_png}")
 
 
 def create_annual_lst_violin_chart(all_stats_csv_path, output_dir, lst_config):
@@ -9236,7 +10096,7 @@ def create_annual_lst_violin_chart(all_stats_csv_path, output_dir, lst_config):
     from scipy.stats import gaussian_kde as _kde
 
     if not os.path.exists(all_stats_csv_path):
-        print(f"❌ Not found: {all_stats_csv_path}"); return
+        print(f" Not found: {all_stats_csv_path}"); return
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -9253,7 +10113,7 @@ def create_annual_lst_violin_chart(all_stats_csv_path, output_dir, lst_config):
         lst_times = [t for t in lst_times if t == lst_config['lst_time']]
 
     if not lst_times:
-        print("❌ No yearly data found"); return
+        print(" No yearly data found"); return
 
     ref_time     = 'day' if 'day' in lst_times else lst_times[0]
     city_means   = (yr_df[yr_df['day_night'] == ref_time]
@@ -9366,7 +10226,7 @@ def create_annual_lst_violin_chart(all_stats_csv_path, output_dir, lst_config):
     fig.savefig(out_png, dpi=400, bbox_inches='tight')
     fig.savefig(out_pdf, bbox_inches='tight')
     _plt.close(fig)
-    print(f"✅ Annual LST Violin Chart → {out_png}")
+    print(f" Annual LST Violin Chart → {out_png}")
 
 
 def create_stakeholder_validation_chart(validation_df, output_dir,
@@ -9386,7 +10246,7 @@ def create_stakeholder_validation_chart(validation_df, output_dir,
         For monthly chart cols additionally: lst_day_hottest,
         lst_night_hottest.
     output_dir : str
-        Directory where PNG/PDF are saved.
+        Directory where SVG are saved.
     chart_type : str
         'annual' (default) or 'monthly'.
     """
@@ -9512,7 +10372,7 @@ def create_stakeholder_validation_chart(validation_df, output_dir,
     fig.savefig(out_png, dpi=300, bbox_inches='tight', facecolor='white')
     fig.savefig(out_pdf, bbox_inches='tight', facecolor='white')
     _plt.close(fig)
-    print(f"✅ Stakeholder validation chart ({chart_type}) → {out_png}")
+    print(f" Stakeholder validation chart ({chart_type}) → {out_png}")
 
 
 # ====================================================================
@@ -9540,7 +10400,7 @@ def create_paired_dot_plot(cities_data, base_dir=None, study_year=2024, dpi=200)
         pointing to single-band GeoTIFF rasters of persistent-heat
         mean LST.
     base_dir : str or Path, optional
-        Directory for saving PNG + PDF.  If *None* the figure is
+        Directory for saving SVG.  If *None* the figure is
         returned without saving.
     study_year : int, optional
         Year label used in the title and filename (default 2024).
@@ -9778,7 +10638,7 @@ def create_paired_dot_plot(cities_data, base_dir=None, study_year=2024, dpi=200)
         for ext in ['png', 'pdf']:
             out = save_dir / f'Paired_Dot_Plot_MeanSD_{study_year}.{ext}'
             fig.savefig(out, dpi=300, bbox_inches='tight')
-        print(f"Saved: Paired_Dot_Plot_MeanSD_{study_year}.png/pdf")
+        print(f"Saved: Paired_Dot_Plot_MeanSD_{study_year}.SVG")
 
     return fig
 
@@ -9805,7 +10665,7 @@ def create_daynight_scatter_pie(cities_data, base_dir=None, study_year=2024, dpi
         ``{city_name: {'day_file': str, 'night_file': str,
         'day_duration': int, 'night_duration': int, ...}}``.
     base_dir : str or Path, optional
-        Directory for saving PNG + PDF.  ``None`` → no save.
+        Directory for saving SVG.  ``None`` → no save.
     study_year : int, optional
         Year label (default 2024).
     dpi : int, optional
@@ -9988,6 +10848,698 @@ def create_daynight_scatter_pie(cities_data, base_dir=None, study_year=2024, dpi
 
     xlims_d = ax.get_xlim()
     dx_data = xlims_d[1] - xlims_d[0]
+
+    texts = []
+    for i, name in enumerate(names):
+        texts.append(ax_overlay.text(x_day[i], y_night[i], name,
+                                    fontsize=8, ha='center', va='center',
+                                    color='black',  path_effects=halo,
+                                    bbox=dict(boxstyle='round,pad=0.3',
+                                              facecolor='yellow', alpha=0.7,
+                                              edgecolor='black', linewidth=0.5),
+                                    zorder=101))
+
+    # Resolve overlaps with adjustText
+    if HAS_ADJUSTTEXT and len(texts) > 0:
+        adjust_text(texts, ax=ax_overlay,
+                   arrowprops=dict(arrowstyle='-', lw=0.5, color='black', alpha=0.3),
+                   expand_points=(1.5, 1.5))
+
+    # -- 7  Save --------------------------------------------------------
+    if base_dir is not None:
+        save_dir = Path(base_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        for ext in ['png', 'pdf']:
+            out = save_dir / f'DayNight_Scatter_Pie_{study_year}.{ext}'
+            fig.savefig(out, dpi=300, bbox_inches='tight')
+        print(f"Saved: DayNight_Scatter_Pie_{study_year}")
+
+    return fig
+
+
+# ====================================================================
+# HOTSPOT ANALYSIS: SUMMARY TABLE GENERATION
+# ====================================================================
+
+def build_gistar_p90_summary_table(table1_csv_path):
+    """
+    Build a side-by-side Gi* and P90 summary table from hotspot characterization data.
+    
+    This function processes hotspot detection results (from 05_hotspot_analysis.ipynb
+    Section 6.3) and creates a comprehensive summary table with per-cluster statistics
+    across both Gi* and P90 methods, Day/Night periods, and confidence thresholds
+    (50%, 75%, 90%).
+    
+    Parameters
+    ----------
+    table1_csv_path : str or Path
+        Path to 'table1_hotspot_characterization.csv' from hotspot analysis output
+        
+    Returns
+    -------
+    pandas.DataFrame
+        Summary table with columns:
+        - Dominant Cluster: Cluster identifier (CL-1 to CL-25)
+        - City.AOIs: Comma-separated list of cities in cluster
+        - (Method, Period, Threshold): Area in km² for each combination
+        
+        Rows include:
+        - Cluster rows (CL-1 to CL-25)
+        - Sub-total (Gi*): Sum of all Gi* method cells
+        - Sub-total (P90): Sum of all P90 method cells
+        - Total: Grand total across all methods and thresholds
+        
+    Example
+    -------
+    >>> from src.visualization import build_gistar_p90_summary_table
+    >>> from pathlib import Path
+    >>> 
+    >>> project_root = Path('.')
+    >>> table1_path = project_root / 'data' / 'outputs' / '05_hotspot_analysis' / 'figures' / 'table1_hotspot_characterization.csv'
+    >>> 
+    >>> summary_table = build_gistar_p90_summary_table(table1_path)
+    >>> summary_table.to_csv('manuscript_table.csv', index=False)
+    """
+    from pathlib import Path
+    import pandas as pd
+    import numpy as np
+    
+    table1_path = Path(table1_csv_path)
+    
+    # Load data
+    df = pd.read_csv(table1_path)
+    
+    # Filter for Gi* and P90 methods, Day/Night periods
+    data = df[(df["Method"].isin(["GI_STAR", "P90"])) & (df["Period"].isin(["Day", "Night"]))].copy()
+    
+    # Normalize contour values
+    data["Contour"] = pd.to_numeric(data["Contour"], errors="coerce").round(2)
+    contour_map = {0.50: "50%", 0.75: "75%", 0.90: "90%"}
+    data = data[data["Contour"].isin(contour_map.keys())].copy()
+    data["Threshold"] = data["Contour"].map(contour_map)
+    
+    # Clean cluster IDs
+    data["Dominant_Cluster25"] = pd.to_numeric(data["Dominant_Cluster25"], errors="coerce")
+    data = data.dropna(subset=["Dominant_Cluster25"]).copy()
+    data["Dominant_Cluster25"] = data["Dominant_Cluster25"].astype(int)
+    
+    selected_clusters = list(range(1, 26))
+    
+    # Process each method to extract data
+    method_data_dict = {}
+    city_maps = {}
+    
+    for method in ["GI_STAR", "P90"]:
+        method_df = data[data["Method"] == method].copy()
+        
+        # Build city list per cluster
+        city_maps[method] = (
+            method_df.groupby("Dominant_Cluster25")["City"]
+              .apply(lambda s: ", ".join(sorted(set(s.dropna()))))
+              .to_dict()
+        )
+        
+        # Aggregate by cluster, period, threshold
+        agg = method_df.groupby(["Dominant_Cluster25", "Period", "Threshold"], as_index=False)["Total_Area_km²"].sum()
+        
+        pivot = (
+            agg.pivot_table(
+                index="Dominant_Cluster25",
+                columns=["Period", "Threshold"],
+                values="Total_Area_km²",
+                aggfunc="sum",
+                fill_value=0.0,
+            )
+            .reindex(selected_clusters, fill_value=0.0)
+        )
+        
+        # Ensure consistent column order
+        ordered_cols = [
+            ("Day", "50%"), ("Day", "75%"), ("Day", "90%"),
+            ("Night", "50%"), ("Night", "75%"), ("Night", "90%"),
+        ]
+        for col in ordered_cols:
+            if col not in pivot.columns:
+                pivot[col] = 0.0
+        pivot = pivot[ordered_cols]
+        method_data_dict[method] = pivot
+    
+    # Build side-by-side table with one row per cluster
+    result_data = []
+    
+    for cluster_id in selected_clusters:
+        row = {"Dominant Cluster": f"CL-{cluster_id}"}
+        
+        # Combine cities from both methods
+        cities_gi = city_maps["GI_STAR"].get(cluster_id, "")
+        cities_p90 = city_maps["P90"].get(cluster_id, "")
+        all_cities = ", ".join(sorted(set((cities_gi + ", " + cities_p90).split(", "))))
+        all_cities = ", ".join([c for c in all_cities.split(", ") if c])
+        row["City.AOIs"] = all_cities
+        
+        # Add method-specific AOI counts
+        gi_aois = [c.strip() for c in cities_gi.split(",") if c.strip()]
+        p90_aois = [c.strip() for c in cities_p90.split(",") if c.strip()]
+        row["Gi*.AOI_Count"] = len(gi_aois)
+        row["P90.AOI_Count"] = len(p90_aois)
+        
+        # Add Gi* columns
+        for period in ["Day", "Night"]:
+            for threshold in ["50%", "75%", "90%"]:
+                gi_val = method_data_dict["GI_STAR"].loc[cluster_id, (period, threshold)]
+                row[("Gi*", period, threshold)] = round(gi_val, 2)
+        
+        # Add P90 columns
+        for period in ["Day", "Night"]:
+            for threshold in ["50%", "75%", "90%"]:
+                p90_val = method_data_dict["P90"].loc[cluster_id, (period, threshold)]
+                row[("P90", period, threshold)] = round(p90_val, 2)
+        
+        result_data.append(row)
+    
+    # Create DataFrame
+    result = pd.DataFrame(result_data)
+    
+    # Reorder columns: Dominant Cluster, City.AOIs, AOI counts, then Gi* Day/Night, P90 Day/Night
+    col_order = ["Dominant Cluster", "City.AOIs", "Gi*.AOI_Count", "P90.AOI_Count",
+                 ("Gi*", "Day", "50%"), ("Gi*", "Day", "75%"), ("Gi*", "Day", "90%"),
+                 ("Gi*", "Night", "50%"), ("Gi*", "Night", "75%"), ("Gi*", "Night", "90%"),
+                 ("P90", "Day", "50%"), ("P90", "Day", "75%"), ("P90", "Day", "90%"),
+                 ("P90", "Night", "50%"), ("P90", "Night", "75%"), ("P90", "Night", "90%")]
+    result = result[col_order]
+    
+    # Filter out clusters with 0 for both Gi* and P90
+    gi_cols = [col for col in result.columns if col[0] == "Gi*"]
+    p90_cols = [col for col in result.columns if col[0] == "P90"]
+    
+    result_filtered = result[
+        (result[gi_cols].sum(axis=1) > 0) |  # Keep if Gi* has any non-zero
+        (result[p90_cols].sum(axis=1) > 0)   # Keep if P90 has any non-zero
+    ].copy()
+    
+    # Compute subtotals for each method (based on filtered clusters)
+    gi_subtotals = {}
+    p90_subtotals = {}
+    
+    for period in ["Day", "Night"]:
+        for threshold in ["50%", "75%", "90%"]:
+            gi_subtotals[(period, threshold)] = round(result_filtered[("Gi*", period, threshold)].sum(), 2)
+            p90_subtotals[(period, threshold)] = round(result_filtered[("P90", period, threshold)].sum(), 2)
+    
+    # Build summary rows with proper column filling
+    summary_rows = []
+    
+    # Sub-total (Gi*) row
+    gi_subtotal = {"Dominant Cluster": "Sub-total (Gi*)", "City.AOIs": "", "Gi*.AOI_Count": 0, "P90.AOI_Count": 0}
+    for period in ["Day", "Night"]:
+        for threshold in ["50%", "75%", "90%"]:
+            gi_subtotal[("Gi*", period, threshold)] = gi_subtotals[(period, threshold)]
+            gi_subtotal[("P90", period, threshold)] = 0.0
+    summary_rows.append(gi_subtotal)
+    
+    # Sub-total (P90) row
+    p90_subtotal = {"Dominant Cluster": "Sub-total (P90)", "City.AOIs": "", "Gi*.AOI_Count": 0, "P90.AOI_Count": 0}
+    for period in ["Day", "Night"]:
+        for threshold in ["50%", "75%", "90%"]:
+            p90_subtotal[("Gi*", period, threshold)] = 0.0
+            p90_subtotal[("P90", period, threshold)] = p90_subtotals[(period, threshold)]
+    summary_rows.append(p90_subtotal)
+    
+    # Grand Total row (sum of all methods and thresholds)
+    grand_total = {"Dominant Cluster": "Total", "City.AOIs": "", "Gi*.AOI_Count": 0, "P90.AOI_Count": 0}
+    for period in ["Day", "Night"]:
+        for threshold in ["50%", "75%", "90%"]:
+            grand_total[("Gi*", period, threshold)] = gi_subtotals[(period, threshold)]
+            grand_total[("P90", period, threshold)] = p90_subtotals[(period, threshold)]
+    summary_rows.append(grand_total)
+    
+    # Concatenate all rows
+    final_table = pd.concat([
+        result_filtered.reset_index(drop=True),
+        pd.DataFrame(summary_rows)
+    ], ignore_index=True)
+    
+    # Ensure all columns exist in the final table
+    for col in col_order:
+        if col not in final_table.columns:
+            final_table[col] = 0.0
+    final_table = final_table[col_order]
+    
+    return final_table
+
+
+def plot_hotspot_multicomponent_chart(final_table, output_path, figsize=(18, 7), dpi=300):
+    """
+    Create a multi-component bar chart showing hotspot areas by thermal cluster.
+    
+    Visualizes hotspot detection results across different methods (P90 and Gi*) and
+    confidence thresholds (50%, 75%, 90%), with grouped bars for each cluster.
+    
+    Parameters
+    ----------
+    final_table : pandas.DataFrame
+        Summary table from build_gistar_p90_summary_table(), containing cluster data
+        with (Method, Period, Threshold) multi-index columns
+    output_path : str or Path
+        Base path for output chart. The function saves SVG and PDF.
+    figsize : tuple
+        Figure size (width, height) in inches. Default: (18, 7)
+    dpi : int
+        Resolution for saved figure. Default: 300
+        
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The created figure object
+        
+    Notes
+    -----
+    - Uses Day period only (hotspot areas are consistent across periods)
+    - Each cluster has 6 bars: P90-50%, P90-75%, P90-90%, Gi*-50%, Gi*-75%, Gi*-90%
+    - A thin dotted grey divider separates P90 bars from Gi* bars within each cluster
+    - Color coding: P90 uses orange tones, Gi* uses red tones (lighter → darker with increasing confidence)
+    - Adds the total number of City AOIs per cluster above each cluster bar group
+    - Removes extra horizontal padding before CL-1 and after CL-25
+    - Chart is publication-ready with proper formatting and legend
+    
+    Example
+    -------
+    >>> from src.visualization import build_gistar_p90_summary_table, plot_hotspot_multicomponent_chart
+    >>> from pathlib import Path
+    >>> 
+    >>> table1_path = Path('data/outputs/05_hotspot_analysis/figures/table1_hotspot_characterization.csv')
+    >>> summary_table = build_gistar_p90_summary_table(table1_path)
+    >>> fig = plot_hotspot_multicomponent_chart(
+    ...     summary_table,
+    ...     output_path=table1_path.parent / 'hotspot_chart'
+    ... )
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+    from pathlib import Path
+    
+    # Color mapping for both methods and thresholds
+    HOTSPOT_COLORS = {
+        'P90': {
+            0.9: '#FF8C00',   # Dark orange (90%)
+            0.75: '#FFA500',  # Orange (75%)
+            0.5: '#FFD700'    # Gold (50%)
+        },
+        'GI_STAR': {
+            0.9: '#8B0000',   # Dark red (90%)
+            0.75: '#DC143C',  # Crimson (75%)
+            0.5: '#FF6347'    # Tomato (50%)
+        }
+    }
+    
+    # Define the 6 components per cluster (P90: 3 thresholds + Gi*: 3 thresholds)
+    components = [
+        ('P90', 0.9, 'P90-90%'),
+        ('P90', 0.75, 'P90-75%'),
+        ('P90', 0.5, 'P90-50%'),
+        ('Gi*', 0.9, 'Gi*-90%'),
+        ('Gi*', 0.75, 'Gi*-75%'),
+        ('Gi*', 0.5, 'Gi*-50%'),
+    ]
+    
+    # Filter to data rows only (exclude summary rows)
+    data_rows = final_table[final_table['Dominant Cluster'].str.startswith('CL-')].copy()
+    clusters = data_rows['Dominant Cluster'].values
+    n_clusters = len(clusters)
+    bar_width = 0.12  # Width of each bar
+    method_gap = bar_width * 0.35  # Extra spacing between P90 and Gi* triplets
+    x_positions = np.arange(n_clusters)
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    
+    # Plot bars for each component
+    max_vals = np.zeros(n_clusters)
+    for i, (method_col, contour, label) in enumerate(components):
+        offset = (i - 2.5) * bar_width
+        if i < 3:
+            offset -= method_gap / 2
+        else:
+            offset += method_gap / 2
+        
+        # Map contour value to threshold string for column lookup
+        threshold_map = {0.9: "90%", 0.75: "75%", 0.5: "50%"}
+        threshold_str = threshold_map[contour]
+        
+        # Use Day period for all components
+        period = "Day"
+        
+        # Get values for this component
+        col = (method_col, period, threshold_str)
+        values = data_rows[col].values
+        
+        # Get color (map method_col back to visualization method name)
+        viz_method = 'GI_STAR' if method_col == 'Gi*' else method_col
+        color = HOTSPOT_COLORS[viz_method][contour]
+        
+        # Plot bars
+        ax.bar(x_positions + offset, values, bar_width, label=label, color=color, 
+               edgecolor='black', linewidth=0.5)
+        max_vals = np.maximum(max_vals, values)
+
+    # Add a subtle divider between P90 (left triplet) and Gi* (right triplet).
+    # The split is exactly at the cluster center x-position (between bars 3 and 4).
+    if n_clusters > 0:
+        for x in x_positions:
+            ax.axvline(
+                x=x,
+                ymin=0,
+                ymax=1,
+                color='grey',
+                linestyle=':',
+                linewidth=1.0,
+                alpha=0.85,
+                zorder=2,
+            )
+
+    # Add method-specific AOI counts at top of each cluster group
+    # Extract method-specific counts from data_rows
+    p90_counts = data_rows['P90.AOI_Count'].values if 'P90.AOI_Count' in data_rows.columns else np.zeros(n_clusters)
+    gi_counts = data_rows['Gi*.AOI_Count'].values if 'Gi*.AOI_Count' in data_rows.columns else np.zeros(n_clusters)
+    
+    # Colors: orange for P90 (75% shade), crimson for Gi* (75% shade)
+    p90_color = HOTSPOT_COLORS['P90'][0.75]  # #FFA500
+    gi_color = HOTSPOT_COLORS['GI_STAR'][0.75]  # #DC143C
+    
+    y_offset = max(max_vals) * 0.03 if len(max_vals) and max(max_vals) > 0 else 0.3
+    
+    for i in range(n_clusters):
+        # P90 count on the left
+        if p90_counts[i] > 0:
+            ax.text(
+                x_positions[i] - 0.15,
+                max_vals[i] + y_offset,
+                f'{int(p90_counts[i])}',
+                ha='center',
+                va='bottom',
+                fontsize=9,
+                fontweight='bold',
+                color=p90_color
+            )
+        
+        # Gi* count on the right
+        if gi_counts[i] > 0:
+            ax.text(
+                x_positions[i] + 0.15,
+                max_vals[i] + y_offset,
+                f'{int(gi_counts[i])}',
+                ha='center',
+                va='bottom',
+                fontsize=9,
+                fontweight='bold',
+                color=gi_color
+            )
+    
+    # Customize chart
+    ax.set_xlabel('Physiographic Clusters', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Area (km²)', fontsize=12, fontweight='bold')
+    ax.set_title('Hotspot Areas by Physiographic Cluster and Method Components',
+                 fontsize=14, fontweight='bold')
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(clusters, rotation=45, ha='right')
+    ax.legend(loc='upper right', ncol=3, fontsize=10)
+    ax.grid(axis='y', alpha=0.3, linestyle='--')
+    ax.set_ylim(bottom=0)
+
+    # Remove horizontal padding so bars begin at CL-1 and end at CL-25
+    left_edge = x_positions[0] - 3 * bar_width - (method_gap / 2)
+    right_edge = x_positions[-1] + 3 * bar_width + (method_gap / 2)
+    ax.set_xlim(left_edge, right_edge)
+    ax.margins(x=0)
+    
+    plt.tight_layout()
+    
+    # Save figure as SVG and PDF only.
+    # Some notebook sessions force a PDF canvas backend, which can raise:
+    # "The 'pdf' backend does not support svg output".
+    # Explicitly switch canvas per export type to avoid backend mismatch.
+    output_path = Path(output_path)
+    svg_path = output_path.with_suffix('.svg')
+    pdf_path = output_path.with_suffix('.pdf')
+
+    from matplotlib.backends.backend_svg import FigureCanvasSVG
+    from matplotlib.backends.backend_pdf import FigureCanvasPdf
+
+    FigureCanvasSVG(fig)
+    fig.savefig(svg_path, bbox_inches='tight')
+
+    FigureCanvasPdf(fig)
+    fig.savefig(pdf_path, bbox_inches='tight')
+
+    print(f"Chart saved: {svg_path}")
+    print(f"Chart saved: {pdf_path}")
+    print(f"Chart shows {n_clusters} physiographic clusters with 6 component bars each "
+          f"(P90-50%, P90-75%, P90-90%, Gi*-50%, Gi*-75%, Gi*-90%)")
+    
+    return fig
+
+
+# ====================================================================
+# PUBLISH-READY: HEAT WAVE RESILIENCE & VULNERABILITY SUMMARY MAP
+# ====================================================================
+
+def create_resilience_vulnerability_map(
+    cities_summary_data,
+    city_name,
+    output_dir=None,
+    figsize=(16, 12),
+    dpi=300
+):
+    """
+    Create a publication-ready summary map showing Heat Wave resilience and
+    vulnerability indicators for a single city or all cities simultaneously.
+    
+    This visualization synthesizes all key indicators from the temperature
+    analysis to provide a comprehensive view of heat exposure, susceptibility,
+    and adaptive capacity across urban/peri-urban areas.
+    
+    Parameters
+    ----------
+    cities_summary_data : dict
+        Summary statistics from all temporal analysis phases:
+        {'city_name': {
+            'aoi_area_km2': float,
+            'core_area_km2': float,
+            'population_2024': int,
+            'mean_day_lst': float,
+            'mean_night_lst': float,
+            'day_hotspot_pixels': int,
+            'night_hotspot_pixels': int,
+            'persistent_heat_days': int,
+            'persistent_heat_nights': int,
+            'trend_slope_celsius_per_decade': float,
+            'stakeholder_awareness': float (0-100),
+            'perceived_warming_agreement': float (0-100),
+        }}
+    city_name : str
+        City for which to create the map (or 'All' for multi-city comparison)
+    output_dir : str or Path, optional
+        Directory to save figure (both PNG and PDF)
+    figsize : tuple
+        Figure size (width, height) in inches
+    dpi : int
+        Resolution for saved figure (default 300 for publication)
+        
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The completed figure
+        
+    Notes
+    -----
+    - Indicators are standardized to 0-100 scale for direct comparison
+    - Color coding: Green = low risk, Yellow = moderate, Red = high risk
+    - Includes trend analysis and stakeholder perception alignment
+    - Suitable for peer-reviewed publications and policy briefs
+    
+    Example
+    -------
+    >>> summary = {
+    ...     'Lagos': {
+    ...         'aoi_area_km2': 5400,
+    ...         'population_2024': 15000,
+    ...         'mean_day_lst': 38.5,
+    ...         'persistent_heat_days': 120,
+    ...         ...
+    ...     }
+    ... }
+    >>> fig = create_resilience_vulnerability_map(summary, 'Lagos',
+    ...                                            output_dir='outputs')
+    """
+    from pathlib import Path
+    import numpy as np
+    import pandas as pd
+    from matplotlib.patches import Rectangle, FancyBboxPatch
+    from matplotlib.gridspec import GridSpec
+    
+    # Prepare data
+    if city_name == 'All' or city_name not in cities_summary_data:
+        cities_to_plot = list(cities_summary_data.keys())
+    else:
+        cities_to_plot = [city_name]
+    
+    # Create figure
+    if len(cities_to_plot) == 1:
+        fig = plt.figure(figsize=figsize)
+        gs = GridSpec(2, 2, figure=fig, hspace=0.3, wspace=0.3,
+                      left=0.08, right=0.95, top=0.93, bottom=0.08)
+    else:
+        # Multi-city layout
+        n_rows = int(np.ceil(len(cities_to_plot) / 2))
+        fig = plt.figure(figsize=(figsize[0], figsize[1] * n_rows / 2))
+        gs = GridSpec(n_rows * 2, 2, figure=fig, hspace=0.4, wspace=0.3,
+                      left=0.08, right=0.95, top=0.93, bottom=0.08)
+    
+    # Color mapping function
+    def get_risk_color(value, reverse=False):
+        """Get color based on risk level (0-100 scale)"""
+        value = np.clip(value, 0, 100)
+        if reverse:
+            value = 100 - value
+        
+        if value < 33:
+            return '#2ecc71'  # Green (low risk)
+        elif value < 66:
+            return '#f39c12'  # Yellow (moderate)
+        else:
+            return '#e74c3c'  # Red (high risk)
+    
+    # Create subplots for each city
+    for idx, plot_city in enumerate(cities_to_plot):
+        if plot_city not in cities_summary_data:
+            continue
+        
+        data = cities_summary_data[plot_city]
+        
+        # Select subplot
+        if len(cities_to_plot) == 1:
+            ax = fig.add_subplot(gs[0, :])  # Top half for single city
+        else:
+            row = (idx // 2) * 2
+            col = idx % 2
+            ax = fig.add_subplot(gs[row:row+2, col])
+        
+        ax.set_xlim(0, 10)
+        ax.set_ylim(0, 10)
+        ax.axis('off')
+        
+        # Title
+        ax.text(5, 9.5, f'{plot_city} - Heat Resilience Profile',
+                fontsize=14, fontweight='bold', ha='center', va='top')
+        
+        # Prepare indicators
+        indicators = {
+            'Heat Exposure': {
+                'value': np.clip(data.get('mean_day_lst', 25) / 50 * 100, 0, 100),
+                'label': f"{data.get('mean_day_lst', 0):.1f}°C",
+                'y': 8.5
+            },
+            'Hotspot Coverage': {
+                'value': data.get('hotspot_coverage_percent', 0),
+                'label': f"{data.get('hotspot_coverage_percent', 0):.1f}%",
+                'y': 7.5
+            },
+            'Trend (2000-2024)': {
+                'value': np.clip(data.get('trend_slope_celsius_per_decade', 0) / 0.15 * 100, 0, 100),
+                'label': f"{data.get('trend_slope_celsius_per_decade', 0):.2f}°C/decade",
+                'y': 6.5
+            },
+            'Persistent Heat Days': {
+                'value': np.clip(data.get('persistent_heat_days', 0) / 365 * 100, 0, 100),
+                'label': f"{data.get('persistent_heat_days', 0)} days",
+                'y': 5.5
+            },
+            'Population Exposure': {
+                'value': np.clip(np.log10(data.get('population_2024', 1)) / 8 * 100, 0, 100),
+                'label': f"{data.get('population_2024', 0):,.0f}",
+                'y': 4.5
+            },
+            'Stakeholder Awareness': {
+                'value': data.get('stakeholder_awareness', 0),
+                'label': f"{data.get('stakeholder_awareness', 0):.0f}%",
+                'y': 3.5,
+                'reverse': True
+            },
+        }
+        
+        # Draw indicator bars
+        for indicator_name, props in indicators.items():
+            value = props['value']
+            y_pos = props['y']
+            
+            # Background bar
+            rect_bg = FancyBboxPatch((0.5, y_pos - 0.3), 6, 0.6,
+                                     boxstyle='round,pad=0.05',
+                                     facecolor='lightgray', edgecolor='black',
+                                     linewidth=0.5)
+            ax.add_patch(rect_bg)
+            
+            # Value bar
+            color = get_risk_color(value, reverse=props.get('reverse', False))
+            rect_val = FancyBboxPatch((0.5, y_pos - 0.3), 6 * value / 100, 0.6,
+                                      boxstyle='round,pad=0.05',
+                                      facecolor=color, edgecolor='black',
+                                      linewidth=0.5, alpha=0.85)
+            ax.add_patch(rect_val)
+            
+            # Label
+            ax.text(0.2, y_pos, indicator_name, fontsize=9,
+                   fontweight='bold', va='center', ha='right')
+            
+            # Value
+            ax.text(6.8, y_pos, props['label'], fontsize=8,
+                   va='center', ha='left')
+        
+        # Risk classification box
+        risk_score = np.mean([props['value'] for props in indicators.values()])
+        if risk_score < 33:
+            risk_class = 'LOW RISK'
+            risk_color = '#2ecc71'
+        elif risk_score < 66:
+            risk_class = 'MODERATE RISK'
+            risk_color = '#f39c12'
+        else:
+            risk_class = 'HIGH RISK'
+            risk_color = '#e74c3c'
+        
+        risk_box = FancyBboxPatch((0.5, 1.5), 6, 0.8,
+                                   boxstyle='round,pad=0.1',
+                                   facecolor=risk_color, edgecolor='black',
+                                   linewidth=1.5, alpha=0.9)
+        ax.add_patch(risk_box)
+        ax.text(3.5, 1.9, risk_class,
+               fontsize=11, fontweight='bold',
+               ha='center', va='center', color='white')
+    
+    # Figure title
+    if city_name == 'All':
+        fig.suptitle('Heat Resilience & Vulnerability Assessment - All Cities',
+                    fontsize=16, fontweight='bold', y=0.98)
+    else:
+        fig.suptitle(f'Heat Resilience & Vulnerability Assessment - {city_name}',
+                    fontsize=16, fontweight='bold', y=0.98)
+    
+    # Save figure
+    if output_dir:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        png_path = output_dir / f'Resilience_Vulnerability_Map_{city_name}.png'
+        pdf_path = output_dir / f'Resilience_Vulnerability_Map_{city_name}.pdf'
+        
+        fig.savefig(png_path, dpi=dpi, bbox_inches='tight', facecolor='white')
+        fig.savefig(pdf_path, format='pdf', bbox_inches='tight', facecolor='white')
+        
+        print(f" Saved: {png_path.name}")
+        print(f" Saved: {pdf_path.name}")
+    
+    return fig
     pie_radii = []
     for i in range(n_cities):
         td = total_dur[i]
@@ -10059,7 +11611,7 @@ def create_daynight_scatter_pie(cities_data, base_dir=None, study_year=2024, dpi
         for ext in ['png', 'pdf']:
             out = save_dir / f'DayNight_Scatter_PieDuration_{study_year}.{ext}'
             fig.savefig(out, dpi=300, bbox_inches='tight')
-        print(f"Saved: DayNight_Scatter_PieDuration_{study_year}.png/pdf")
+        print(f"Saved: DayNight_Scatter_PieDuration_{study_year}.SVG")
 
     return fig
 
@@ -10092,7 +11644,7 @@ def plot_kde_quicklook(
     all_cities : list[str] | None
         All cities for the saved file version.  If *None*, defaults to *cities*.
     output_dir : Path | str | None
-        If provided, saves the full-city grid (PNG + PDF) here.
+        If provided, saves the full-city grid (SVG) here.
     method, period : str
         Filter values for the polygon GeoDataFrame.
     dpi : int
@@ -10188,8 +11740,460 @@ def plot_kde_quicklook(
                 fig_all.savefig(out / f'kde_quicklook_{method}_{period}.{ext}',
                                 dpi=dpi, bbox_inches='tight')
             plt.close(fig_all)
-            print(f"💾 Saved kde_quicklook_{method}_{period}.png/pdf → {out.name}/")
+            print(f"💾 Saved kde_quicklook_{method}_{period}.SVG → {out.name}/")
 
     # --- Return inline figure (display subset only) ---------------------
     fig_inline = _draw_grid(cities)
     return fig_inline
+
+
+# =====================================================================
+# Notebook-03 helpers  – LST temporal analysis visualisation utilities
+# =====================================================================
+
+def load_geotiff(file_path):
+    """Load a single-band GeoTIFF, masking NoData and extreme values.
+
+    Returns (data, bounds, transform, crs) or (None, …) on error.
+    """
+    import rasterio as _rio
+    import numpy as _np
+
+    try:
+        with _rio.open(file_path) as src:
+            data = src.read(1).astype(float)
+            if src.nodata is not None:
+                data[data == src.nodata] = _np.nan
+            data[(_np.abs(data) > 70) | (data < -50)] = _np.nan
+            return data, src.bounds, src.transform, src.crs
+    except Exception as e:
+        print(f" Error loading {file_path}: {e}")
+        return None, None, None, None
+
+
+def calculate_qa_stats(qa_file_path):
+    """Return a short string summarising QA tier proportions.
+
+    E.g. ``"QA: S-85.3%"``
+    """
+    import rasterio as _rio
+    import numpy as _np
+
+    try:
+        with _rio.open(qa_file_path) as src:
+            qa_data = src.read(1).astype(float)
+            if src.nodata is not None:
+                qa_data[qa_data == src.nodata] = _np.nan
+            valid = _np.count_nonzero(~_np.isnan(qa_data))
+            if valid == 0:
+                return "No QA data"
+            strict_pct = (_np.count_nonzero(qa_data == 1) / valid) * 100
+            return f"QA: S-{strict_pct:.1f}%"
+    except Exception:
+        return "QA data unavailable"
+
+
+def load_qa_geotiff(file_path):
+    """Load a QA-source GeoTIFF (single band), masking NoData as NaN.
+
+    Returns (data, bounds, transform, crs) or (None, …) on error.
+    """
+    import rasterio as _rio
+    import numpy as _np
+
+    try:
+        with _rio.open(file_path) as src:
+            data = src.read(1).astype(float)
+            if src.nodata is not None:
+                data[data == src.nodata] = _np.nan
+            return data, src.bounds, src.transform, src.crs
+    except Exception as e:
+        print(f" Error loading QA file {file_path}: {e}")
+        return None, None, None, None
+
+
+def calculate_detailed_qa_stats(qa_data, lst_config):
+    """Detailed per-tier QA percentages, e.g. ``"S:85.3% | M:14.7%"``.
+
+    Parameters
+    ----------
+    qa_data : np.ndarray
+    lst_config : dict   (must contain 'quality_hierarchy' and 'qa_levels_to_use')
+    """
+    import numpy as _np
+
+    try:
+        valid = _np.count_nonzero(~_np.isnan(qa_data))
+        if valid == 0:
+            return "No QA data"
+        parts = []
+        for tier in sorted(lst_config['qa_levels_to_use'],
+                           key=lambda t: lst_config['quality_hierarchy'][t]['priority']):
+            pv = lst_config['quality_hierarchy'][tier]['priority']
+            pct = (_np.count_nonzero(qa_data == pv) / valid) * 100
+            parts.append(f"{tier[0].upper()}:{pct:.1f}%")
+        return " | ".join(parts)
+    except Exception:
+        return "QA data unavailable"
+
+
+# -- LST map creation (used with Dask delayed in notebook) ---------------
+
+def create_monthly_climatology_map(city_name, city_dir, lst_time,
+                                   lst_config, vis_config, temporal_config,
+                                   project_config):
+    """Create a 4×3 monthly-climatology LST map for one city / time.
+
+    .. note:: Apply ``@dask.delayed`` in the notebook, **not** here.
+
+    Returns dict with *status*, *output_pdf*, *output_png*, etc.
+    """
+    import os as _os, glob as _glob, re as _re, traceback as _tb
+    import numpy as _np
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as _plt
+    from matplotlib.gridspec import GridSpec as _GS
+    from matplotlib.colors import LinearSegmentedColormap as _LSCM
+
+    A5 = (5.83, 8.27)
+
+    try:
+        base = _os.path.join(project_config['lst_output_dir'],
+                             f"City_{city_name}", 'LST_Temporal_Analysis')
+        sub = 'Day' if lst_time == 'day' else 'Night'
+        gdir = _os.path.join(base, sub, 'geotiff')
+        if not _os.path.isdir(gdir):
+            return {'status': 'error', 'message': f'Dir missing: {gdir}'}
+
+        files = sorted(_glob.glob(
+            _os.path.join(gdir,
+                          f"{city_name}_LST_{lst_time.title()}_MonthlyClimatology_*.tif")))
+        if not files:
+            return {'status': 'no_data', 'message': f'No monthly files for {city_name} {lst_time}'}
+
+        figs_dir = _os.path.join(base, sub, 'Figures')
+        _os.makedirs(figs_dir, exist_ok=True)
+
+        fig = _plt.figure(figsize=A5, dpi=300)
+        _plt.tight_layout()
+        gs = _GS(4, 3, figure=fig, hspace=0.15, wspace=0.1)
+
+        months = ['January', 'February', 'March', 'April', 'May', 'June',
+                  'July', 'August', 'September', 'October', 'November', 'December']
+        cmap = _LSCM.from_list(vis_config['colormap_name'], vis_config['colors'])
+        mn, mx, hl = vis_config['min_temp'], vis_config['max_temp'], vis_config['highlight_temp']
+
+        im = None
+        for fp in files:
+            m = _re.search(r'MonthlyClimatology_(\d+)', _os.path.basename(fp))
+            if not m:
+                continue
+            mnum = int(m.group(1))
+            ax = fig.add_subplot(gs[(mnum - 1) // 3, (mnum - 1) % 3])
+            data, *_ = load_geotiff(fp)
+            if data is not None:
+                im = ax.imshow(data, cmap=cmap, vmin=mn, vmax=mx)
+                ax.set_title(months[mnum - 1], fontsize=8)
+                ax.set_xticks([]); ax.set_yticks([])
+                qf = fp.replace('_LST_', '_QA_Source_')
+                if _os.path.exists(qf):
+                    ax.text(0.98, 0.02, calculate_qa_stats(qf),
+                            ha='right', va='bottom', transform=ax.transAxes,
+                            fontsize=6.5,
+                            bbox=dict(facecolor='white', alpha=0.7, pad=1, edgecolor='none'))
+            else:
+                ax.text(0.5, 0.5, 'No Data', ha='center', va='center',
+                        transform=ax.transAxes)
+                ax.set_title(months[mnum - 1], fontsize=8)
+
+        fig.canvas.draw()
+        if im is not None:
+            cax = fig.add_axes([0.15, 0.05, 0.7, 0.02])
+            ticks = list(range(int(mn), int(mx) + 1, 5))
+            if hl not in ticks:
+                ticks.append(hl); ticks.sort()
+            cb = fig.colorbar(im, cax=cax, orientation='horizontal', ticks=ticks)
+            cb.ax.set_xticklabels([str(t) for t in ticks], fontsize=6)
+            cb.ax.get_xticklabels()[ticks.index(hl)].set_weight('bold')
+            cb.set_label('Temperature (°C)', fontsize=8)
+
+        yr = f"{temporal_config['years'][0]}-{temporal_config['years'][-1]}"
+        fig.suptitle(f"{city_name} - {lst_time.title()}-time Monthly LST Climatology",
+                     fontsize=10, y=0.95)
+        fig.text(0.5, 0.01,
+                 f"Median {lst_time.title()}-time LST values across years {yr}",
+                 ha='center', fontsize=6)
+        fig.canvas.draw()
+
+        pdf = _os.path.join(figs_dir, f"{city_name}_{lst_time.title()}_Monthly_LST_Climatology.pdf")
+        png = _os.path.join(figs_dir, f"{city_name}_{lst_time.title()}_Monthly_LST_Climatology.png")
+        fig.savefig(pdf, bbox_inches='tight', format='pdf')
+        fig.savefig(png, bbox_inches='tight', dpi=300, format='png')
+        _plt.close(fig)
+
+        return {'status': 'success', 'city': city_name, 'lst_time': lst_time,
+                'type': 'monthly', 'output_pdf': pdf, 'output_png': png}
+    except Exception as e:
+        return {'status': 'error', 'city': city_name, 'lst_time': lst_time,
+                'type': 'monthly', 'message': f"{e}\n{_tb.format_exc()}"}
+
+
+def create_yearly_lst_map(city_name, city_dir, lst_time,
+                          lst_config, vis_config, temporal_config,
+                          project_config):
+    """Create a 5×4 yearly-composite LST map for one city / time.
+
+    .. note:: Apply ``@dask.delayed`` in the notebook, **not** here.
+
+    Returns dict with *status*, *output_pdf*, *output_png*, etc.
+    """
+    import os as _os, glob as _glob, re as _re, traceback as _tb
+    import numpy as _np
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as _plt
+    from matplotlib.gridspec import GridSpec as _GS
+    from matplotlib.colors import LinearSegmentedColormap as _LSCM
+
+    A5 = (5.83, 8.27)
+
+    try:
+        base = _os.path.join(project_config['lst_output_dir'],
+                             f"City_{city_name}", 'LST_Temporal_Analysis')
+        sub = 'Day' if lst_time == 'day' else 'Night'
+        gdir = _os.path.join(base, sub, 'geotiff')
+        if not _os.path.isdir(gdir):
+            return {'status': 'error', 'message': f'Dir missing: {gdir}'}
+
+        files = sorted(_glob.glob(
+            _os.path.join(gdir,
+                          f"{city_name}_LST_{lst_time.title()}_Yearly_*.tif")))
+        if not files:
+            return {'status': 'no_data', 'message': f'No yearly files for {city_name} {lst_time}'}
+
+        figs_dir = _os.path.join(base, sub, 'Figures')
+        _os.makedirs(figs_dir, exist_ok=True)
+
+        n_r, n_c = 5, 4
+        fig = _plt.figure(figsize=A5, dpi=300)
+        _plt.tight_layout()
+        gs = _GS(n_r, n_c, figure=fig, hspace=0.15, wspace=0.1)
+
+        cmap = _LSCM.from_list(vis_config['colormap_name'], vis_config['colors'])
+        mn, mx, hl = vis_config['min_temp'], vis_config['max_temp'], vis_config['highlight_temp']
+
+        im = None
+        for i, fp in enumerate(files[:n_r * n_c]):
+            m = _re.search(r'Yearly_(\d{4})', _os.path.basename(fp))
+            if not m:
+                continue
+            yr = m.group(1)
+            ax = fig.add_subplot(gs[i // n_c, i % n_c])
+            data, *_ = load_geotiff(fp)
+            if data is not None:
+                im = ax.imshow(data, cmap=cmap, vmin=mn, vmax=mx)
+                ax.set_title(yr, fontsize=8)
+                ax.set_xticks([]); ax.set_yticks([])
+                qf = fp.replace('_LST_', '_QA_Source_')
+                if _os.path.exists(qf):
+                    ax.text(0.98, 0.02, calculate_qa_stats(qf),
+                            ha='right', va='bottom', transform=ax.transAxes,
+                            fontsize=6.5,
+                            bbox=dict(facecolor='white', alpha=0.7, pad=1, edgecolor='none'))
+            else:
+                ax.text(0.5, 0.5, 'No Data', ha='center', va='center',
+                        transform=ax.transAxes)
+                ax.set_title(yr, fontsize=8)
+
+        fig.canvas.draw()
+        if im is not None:
+            cax = fig.add_axes([0.15, 0.05, 0.7, 0.02])
+            ticks = list(range(int(mn), int(mx) + 1, 5))
+            if hl not in ticks:
+                ticks.append(hl); ticks.sort()
+            cb = fig.colorbar(im, cax=cax, orientation='horizontal', ticks=ticks)
+            cb.ax.set_xticklabels([str(t) for t in ticks], fontsize=6)
+            cb.ax.get_xticklabels()[ticks.index(hl)].set_weight('bold')
+            cb.set_label('Temperature (°C)', fontsize=8)
+
+        fig.suptitle(f"{city_name} - {lst_time.title()}-time Yearly LST Medians",
+                     fontsize=10, y=0.95)
+        fig.canvas.draw()
+
+        pdf = _os.path.join(figs_dir, f"{city_name}_{lst_time.title()}_Yearly_LST.pdf")
+        png = _os.path.join(figs_dir, f"{city_name}_{lst_time.title()}_Yearly_LST.png")
+        fig.savefig(pdf, bbox_inches='tight', format='pdf')
+        fig.savefig(png, bbox_inches='tight', dpi=300, format='png')
+        _plt.close(fig)
+
+        return {'status': 'success', 'city': city_name, 'lst_time': lst_time,
+                'type': 'yearly', 'output_pdf': pdf, 'output_png': png}
+    except Exception as e:
+        return {'status': 'error', 'city': city_name, 'lst_time': lst_time,
+                'type': 'yearly', 'message': f"{e}\n{_tb.format_exc()}"}
+
+
+# -- Trend-line annotation helpers (Notebook 03, Cell 20) ----------------
+
+def find_safe_text_position(ax, x, y, default_offset,
+                            text_height_fraction=0.1):
+    """Return a y-coordinate for an annotation that stays within
+    the axes limits."""
+    ylim = ax.get_ylim()
+    y_range = ylim[1] - ylim[0]
+    th = y_range * text_height_fraction
+
+    new_y = y + default_offset
+    if new_y + th > ylim[1]:
+        new_y = y - abs(default_offset) - th
+    elif new_y - th < ylim[0]:
+        new_y = y + abs(default_offset) + th
+    return max(ylim[0] + th * 0.5, min(new_y, ylim[1] - th * 0.5))
+
+
+def place_trend_box_safely(ax, day_data=None, night_data=None):
+    """Fixed box positions: Day → top-left, Night → bottom-left."""
+    pos = {}
+    if day_data is not None:
+        pos['day'] = (0.02, 0.95)
+    if night_data is not None:
+        pos['night'] = (0.01, 0.03)
+    return pos
+
+
+def place_monthly_stats_box_safely(ax, day_data=None, night_data=None):
+    """Fixed box positions: Day → top-right, Night → bottom-right."""
+    pos = {}
+    if day_data is not None:
+        pos['day'] = (0.98, 0.95)
+    if night_data is not None:
+        pos['night'] = (0.99, 0.03)
+    return pos
+
+
+# -- Heatmap helpers (Notebook 03, Cell 21) ------------------------------
+
+def compute_mk_significance(heatmap_df, alpha=0.05):
+    """Mann-Kendall trend test per city (row).
+
+    Returns ``{city_name: True/False}`` — *True* when the test finds a
+    significant *increasing* trend at the given *alpha*.
+    """
+    import pymannkendall as _mk
+
+    sig = {}
+    for city in heatmap_df.index:
+        row = heatmap_df.loc[city].dropna()
+        if len(row) >= 4:
+            try:
+                res = _mk.original_test(row.values)
+                sig[city] = (res.p < alpha and res.trend == 'increasing')
+            except Exception:
+                sig[city] = False
+        else:
+            sig[city] = False
+    return sig
+
+
+_MONTH_NAMES_SHORT = {1: 'Jan', 2: 'Feb', 3: 'Mar', 4: 'Apr',
+                      5: 'May', 6: 'Jun', 7: 'Jul', 8: 'Aug',
+                      9: 'Sep', 10: 'Oct', 11: 'Nov', 12: 'Dec'}
+
+
+def create_single_page_heatmap(data, mk_sig, lst_time, time_dim,
+                               fig_w, fig_h, output_path, dpi=300):
+    """Single-page LST heatmap with Mann-Kendall  markers.
+
+    Parameters
+    ----------
+    data : pd.DataFrame   (cities × time-periods)
+    mk_sig : dict         {city: bool}
+    lst_time : str        'day' | 'night'
+    time_dim : str        'year' | 'month'
+    fig_w, fig_h : float  figure size in inches
+    output_path : str     PNG output path (PDF saved alongside)
+    """
+    import os as _os
+    from pathlib import Path as _Path
+    import numpy as _np
+    import matplotlib.pyplot as _plt
+    import seaborn as _sns
+
+    if data.empty:
+        print(f"   No data for {lst_time} {time_dim}")
+        return
+
+    df = data.copy()
+    df['_mean'] = df.mean(axis=1)
+    df = df.sort_values('_mean', ascending=False).drop('_mean', axis=1)
+
+    if time_dim == 'month':
+        df.columns = [_MONTH_NAMES_SHORT.get(int(c), c) for c in df.columns]
+
+    # Only append  for yearly heatmaps (not monthly)
+    if time_dim == 'year':
+        df.index = [f"{c} " if mk_sig.get(c, False) else c for c in df.index]
+
+    n_cities = len(df)
+    n_cols = len(df.columns)
+
+    # Scale figure height so every city row is tall enough to show its label
+    row_height = 0.22  # inches per city row
+    min_h = max(fig_h, n_cities * row_height + 1.5)
+
+    # Consistent small font sizes for both axes
+    tick_fs = max(4, min(6, 350 / n_cities))
+    annot_fs = max(3.5, min(5.5, 250 / (n_cities * n_cols) + 3.5))
+
+    cmap = 'YlOrRd'
+    vals = df.values.flatten()
+    vals = vals[~_np.isnan(vals)]
+    vmin, vmax = (_np.nanmin(vals), _np.nanmax(vals)) if len(vals) else (None, None)
+
+    label = 'Yearly' if time_dim == 'year' else 'Monthly Climatology'
+
+    fig, ax = _plt.subplots(figsize=(fig_w, min_h), dpi=dpi)
+    _sns.heatmap(df, annot=True, fmt='.1f', cmap=cmap,
+                 vmin=vmin, vmax=vmax, linewidths=0.3, linecolor='gray',
+                 ax=ax, annot_kws={'fontsize': annot_fs},
+                 cbar_kws={'label': 'LST (°C)', 'shrink': 0.4, 'pad': 0.015,
+                           'aspect': 25})
+
+    # Smaller colorbar label
+    cbar = ax.collections[0].colorbar
+    cbar.ax.tick_params(labelsize=tick_fs)
+    cbar.set_label('LST (°C)', fontsize=tick_fs + 1)
+
+    if time_dim == 'year':
+        ax.set_title(f'{lst_time.title()}-time LST — {label}\n'
+                     f' = significant warming trend (Mann-Kendall p<0.05)',
+                     fontsize=8, fontweight='bold', pad=8)
+    else:
+        ax.set_title(f'{lst_time.title()}-time LST — {label}',
+                     fontsize=8, fontweight='bold', pad=8)
+    ax.set_xlabel('Year' if time_dim == 'year' else 'Month',
+                  fontsize=tick_fs + 1, fontweight='bold')
+    ax.set_ylabel('City', fontsize=tick_fs + 1, fontweight='bold')
+    # Same label size on both axes
+    ax.tick_params(axis='y', rotation=0, labelsize=tick_fs)
+    ax.tick_params(axis='x', rotation=45 if time_dim == 'year' else 0,
+                   labelsize=tick_fs)
+    # Force ALL city labels to be shown — prevent matplotlib auto-pruning
+    from matplotlib.ticker import FixedLocator as _FixedLocator
+    ax.yaxis.set_major_locator(_FixedLocator(_np.arange(n_cities) + 0.5))
+    ax.set_yticklabels(df.index, fontsize=tick_fs)
+    ax.set_ylim(n_cities, 0)  # ensure full range visible
+
+    _plt.tight_layout(pad=0.5)
+
+    out_path = _Path(output_path)
+    fig.savefig(out_path, dpi=dpi, bbox_inches='tight')
+
+    # Always save a separate PDF companion without overwriting the primary file.
+    pdf_path = out_path.with_suffix('.pdf')
+    if pdf_path != out_path:
+        fig.savefig(pdf_path, format='pdf', bbox_inches='tight')
+
+    _plt.close(fig)
+    print(f'   Saved: {_os.path.basename(str(out_path))}')

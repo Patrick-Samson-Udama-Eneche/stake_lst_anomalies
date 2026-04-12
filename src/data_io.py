@@ -12,8 +12,12 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from datetime import datetime
+import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.backends.backend_pdf import FigureCanvasPdf
 
 try:
     import config
@@ -30,6 +34,107 @@ try:
     RASTERIO_AVAILABLE = True
 except ImportError:
     RASTERIO_AVAILABLE = False
+
+
+def install_backend_safe_savefig(svg_mirror_pdf: bool = False) -> None:
+    """Install backend-safe PNG/PDF savefig behavior.
+
+    This avoids inline-backend redirection of PNG/PDF when notebooks run in VS Code.
+    Optionally mirrors SVG saves into sibling PDF files.
+    """
+    # Store/reuse original savefig through dynamic attrs to avoid static member warnings.
+    original_figure_savefig = getattr(Figure, '_data_io_original_savefig', Figure.savefig)
+    setattr(Figure, '_data_io_original_savefig', original_figure_savefig)
+
+    def _safe_figure_savefig(self, fname, *args, **kwargs):
+        target = Path(str(fname))
+        suffix = target.suffix.lower().lstrip('.')
+        fmt = str(kwargs.get('format', suffix)).lower()
+
+        if fmt == 'png':
+            export_kwargs = dict(kwargs)
+            export_kwargs['format'] = 'png'
+            FigureCanvasAgg(self).print_figure(str(target), **export_kwargs)
+            return
+
+        if fmt == 'pdf':
+            export_kwargs = dict(kwargs)
+            export_kwargs['format'] = 'pdf'
+            FigureCanvasPdf(self).print_figure(str(target), **export_kwargs)
+            return
+
+        if fmt == 'svg':
+            original_figure_savefig(self, str(target), *args, **kwargs)
+            if svg_mirror_pdf:
+                pdf_target = target.with_suffix('.pdf')
+                export_kwargs = dict(kwargs)
+                export_kwargs.pop('format', None)
+                export_kwargs['format'] = 'pdf'
+                FigureCanvasPdf(self).print_figure(str(pdf_target), **export_kwargs)
+            return
+
+        return original_figure_savefig(self, str(target), *args, **kwargs)
+
+    def _safe_pyplot_savefig(fname, *args, **kwargs):
+        return plt.gcf().savefig(fname, *args, **kwargs)
+
+    Figure.savefig = _safe_figure_savefig
+    plt.savefig = _safe_pyplot_savefig
+    setattr(Figure, '_data_io_safe_savefig', True)
+    setattr(Figure, '_data_io_svg_mirror_pdf', bool(svg_mirror_pdf))
+
+
+def export_figure_set(
+    fig: Figure,
+    output_stem: Path,
+    dpi: int = 300,
+    include_png: bool = True,
+    include_svg: bool = True,
+    include_pdf: bool = True,
+    bbox_inches: str = 'tight',
+    facecolor: Optional[str] = None,
+    edgecolor: Optional[str] = None,
+    **legacy_kwargs,
+) -> Dict[str, Path]:
+    """Export a figure to PNG (+ optional SVG/PDF) using backend-safe writers."""
+    # Backward compatibility for older call sites that use save_* argument names.
+    if 'save_png' in legacy_kwargs:
+        include_png = bool(legacy_kwargs.pop('save_png'))
+    if 'save_svg' in legacy_kwargs:
+        include_svg = bool(legacy_kwargs.pop('save_svg'))
+    if 'save_pdf' in legacy_kwargs:
+        include_pdf = bool(legacy_kwargs.pop('save_pdf'))
+
+    if legacy_kwargs:
+        unknown = ', '.join(sorted(legacy_kwargs.keys()))
+        raise TypeError(f"Unexpected keyword argument(s): {unknown}")
+
+    output_stem = Path(output_stem)
+    if output_stem.suffix:
+        output_stem = output_stem.with_suffix('')
+
+    paths = {}
+    if include_png:
+        paths['png'] = output_stem.with_suffix('.png')
+    if include_svg:
+        paths['svg'] = output_stem.with_suffix('.svg')
+    if include_pdf:
+        paths['pdf'] = output_stem.with_suffix('.pdf')
+
+    common_kwargs = {'bbox_inches': bbox_inches}
+    if facecolor is not None:
+        common_kwargs['facecolor'] = facecolor
+    if edgecolor is not None:
+        common_kwargs['edgecolor'] = edgecolor
+
+    if include_png:
+        FigureCanvasAgg(fig).print_figure(str(paths['png']), dpi=dpi, format='png', **common_kwargs)
+    if include_svg:
+        fig.savefig(paths['svg'], format='svg', **common_kwargs)
+    if include_pdf:
+        FigureCanvasPdf(fig).print_figure(str(paths['pdf']), format='pdf', **common_kwargs)
+
+    return paths
 
 
 def create_city_output_structure(city_name: str, notebook_name: str = "01_aoi_delineation", 
@@ -367,9 +472,20 @@ def load_stakeholder_datasets(config):
     boundary_gdf = gpd.read_file(boundary_path)
     print(f"✅ Nigeria boundary loaded (CRS: {boundary_gdf.crs})")
     
-    # Load cities population data
+    # Load cities population data (CSV or XLSX)
     cities_path = config.get_aoi_data_path('cities_csv')
-    cities_df = pd.read_csv(cities_path)
+    if cities_path.suffix.lower() in ('.xlsx', '.xls'):
+        cities_df = pd.read_excel(cities_path, sheet_name='Data')
+    else:
+        cities_df = pd.read_csv(cities_path, thousands=',')
+    # Rename WUP 2025 columns to legacy schema if present
+    if 'City_Name' in cities_df.columns:
+        cities_df = cities_df.rename(columns={
+            'City_Name': 'Urban Agglomeration',
+            'PWCent_Latitude': 'Latitude',
+            'PWCent_Longitude': 'Longitude',
+        })
+        cities_df['Urban Agglomeration'] = cities_df['Urban Agglomeration'].str.strip()
     print(f"✅ Cities population data loaded: {len(cities_df)} cities")
     print(f"   Population column: {config.PROJECT_STUDY_YEAR}")
     
@@ -415,6 +531,16 @@ def export_stakeholder_outputs(stakeholder_map, cities_gdf, workshop_prof,
     ... )
     """
     from pathlib import Path
+
+    # Use explicit backends to bypass Jupyter inline backend on PNG/PDF saves
+    from matplotlib.backends.backend_agg import FigureCanvasAgg as _FCAgg
+    from matplotlib.backends.backend_pdf import FigureCanvasPdf as _FCPdf
+
+    def _save_png(fig, path, dpi):
+        _FCAgg(fig).print_figure(str(path), dpi=dpi, bbox_inches='tight', format='png')
+
+    def _save_pdf(fig, path):
+        _FCPdf(fig).print_figure(str(path), bbox_inches='tight', format='pdf')
     
     # Create subdirectories
     figures_dir = output_dir / 'Figures'
@@ -427,27 +553,35 @@ def export_stakeholder_outputs(stakeholder_map, cities_gdf, workshop_prof,
     print(f"  Figures: {figures_dir}")
     print(f"  Data: {data_dir}")
     
-    # Export map as PNG and PDF
+    # Export map as PNG + SVG + PDF
     print("\nExporting stakeholder distribution map...")
     
     png_path = figures_dir / f'Stakeholder_Distribution_Map_{study_year}.png'
+    svg_path = figures_dir / f'Stakeholder_Distribution_Map_{study_year}.svg'
     pdf_path = figures_dir / f'Stakeholder_Distribution_Map_{study_year}.pdf'
     
-    stakeholder_map.savefig(png_path, dpi=figure_dpi, bbox_inches='tight')
+    _save_png(stakeholder_map, png_path, figure_dpi)
     print(f"  ✅ PNG saved: {png_path.name}")
     
-    stakeholder_map.savefig(pdf_path, format='pdf', bbox_inches='tight')
+    stakeholder_map.savefig(svg_path, format='svg', bbox_inches='tight')
+    print(f"  ✅ SVG saved: {svg_path.name}")
+    
+    _save_pdf(stakeholder_map, pdf_path)
     print(f"  ✅ PDF saved: {pdf_path.name}")
     
     # Export donut chart if provided
     if donut_fig is not None:
         donut_png = figures_dir / f'City_Classification_Donut_{study_year}.png'
+        donut_svg = figures_dir / f'City_Classification_Donut_{study_year}.svg'
         donut_pdf = figures_dir / f'City_Classification_Donut_{study_year}.pdf'
         
-        donut_fig.savefig(donut_png, dpi=figure_dpi, bbox_inches='tight')
+        _save_png(donut_fig, donut_png, figure_dpi)
         print(f"  ✅ PNG saved: {donut_png.name}")
         
-        donut_fig.savefig(donut_pdf, format='pdf', bbox_inches='tight')
+        donut_fig.savefig(donut_svg, format='svg', bbox_inches='tight')
+        print(f"  ✅ SVG saved: {donut_svg.name}")
+        
+        _save_pdf(donut_fig, donut_pdf)
         print(f"  ✅ PDF saved: {donut_pdf.name}")
     
     # Export data tables
@@ -476,9 +610,11 @@ def export_stakeholder_outputs(stakeholder_map, cities_gdf, workshop_prof,
     print(f"Output Directory: {output_dir}")
     print(f"\nFigures Exported:")
     print(f"  - {png_path.name}")
+    print(f"  - {svg_path.name}")
     print(f"  - {pdf_path.name}")
     if donut_fig is not None:
         print(f"  - {donut_png.name}")
+        print(f"  - {donut_svg.name}")
         print(f"  - {donut_pdf.name}")
     print(f"\nData Files Exported:")
     print(f"  - {cities_export_path.name}")
@@ -489,6 +625,7 @@ def export_stakeholder_outputs(stakeholder_map, cities_gdf, workshop_prof,
     # Return paths for reference
     result = {
         'png': png_path,
+        'svg': svg_path,
         'pdf': pdf_path,
         'cities_csv': cities_export_path,
         'profession_csv': profession_export_path,
@@ -497,6 +634,7 @@ def export_stakeholder_outputs(stakeholder_map, cities_gdf, workshop_prof,
     
     if donut_fig is not None:
         result['donut_png'] = donut_png
+        result['donut_svg'] = donut_svg
         result['donut_pdf'] = donut_pdf
     
     return result
@@ -533,7 +671,17 @@ def export_perception_charts(
     dict : Paths to all exported files
     """
     from pathlib import Path
-    
+
+    # Use explicit backends to bypass Jupyter inline backend on PNG/PDF saves
+    from matplotlib.backends.backend_agg import FigureCanvasAgg as _FCAgg
+    from matplotlib.backends.backend_pdf import FigureCanvasPdf as _FCPdf
+
+    def _save_png(fig, path, dpi):
+        _FCAgg(fig).print_figure(str(path), dpi=dpi, bbox_inches='tight', format='png')
+
+    def _save_pdf(fig, path):
+        _FCPdf(fig).print_figure(str(path), bbox_inches='tight', format='pdf')
+
     # Create subdirectories
     figures_dir = Path(output_dir) / 'Figures'
     data_dir = Path(output_dir) / 'Data'
@@ -543,28 +691,34 @@ def export_perception_charts(
     
     print("\nExporting perception charts...")
     
-    # Export main perception chart (PNG + PDF)
+    # Export main perception chart (PNG + SVG + PDF)
     perception_png = figures_dir / f'Stakeholder_Perception_By_City_{study_year}.png'
+    perception_svg = figures_dir / f'Stakeholder_Perception_By_City_{study_year}.svg'
     perception_pdf = figures_dir / f'Stakeholder_Perception_By_City_{study_year}.pdf'
     
-    perception_fig.savefig(perception_png, dpi=figure_dpi, bbox_inches='tight', 
-                           facecolor='white', edgecolor='none')
+    _save_png(perception_fig, perception_png, figure_dpi)
     print(f"  ✅ PNG saved: {perception_png.name}")
     
-    perception_fig.savefig(perception_pdf, format='pdf', bbox_inches='tight', 
+    perception_fig.savefig(perception_svg, format='svg', bbox_inches='tight', 
                            facecolor='white', edgecolor='none')
+    print(f"  ✅ SVG saved: {perception_svg.name}")
+    
+    _save_pdf(perception_fig, perception_pdf)
     print(f"  ✅ PDF saved: {perception_pdf.name}")
     
-    # Export standalone donuts chart (PNG + PDF)
+    # Export standalone donuts chart (PNG + SVG + PDF)
     donuts_png = figures_dir / f'Stakeholder_Perception_Overall_{study_year}.png'
+    donuts_svg = figures_dir / f'Stakeholder_Perception_Overall_{study_year}.svg'
     donuts_pdf = figures_dir / f'Stakeholder_Perception_Overall_{study_year}.pdf'
     
-    donuts_fig.savefig(donuts_png, dpi=figure_dpi, bbox_inches='tight', 
-                       facecolor='white', edgecolor='none')
+    _save_png(donuts_fig, donuts_png, figure_dpi)
     print(f"  ✅ PNG saved: {donuts_png.name}")
     
-    donuts_fig.savefig(donuts_pdf, format='pdf', bbox_inches='tight', 
+    donuts_fig.savefig(donuts_svg, format='svg', bbox_inches='tight', 
                        facecolor='white', edgecolor='none')
+    print(f"  ✅ SVG saved: {donuts_svg.name}")
+    
+    _save_pdf(donuts_fig, donuts_pdf)
     print(f"  ✅ PDF saved: {donuts_pdf.name}")
     
     # Export perception data
@@ -576,8 +730,10 @@ def export_perception_charts(
     
     return {
         'perception_png': perception_png,
+        'perception_svg': perception_svg,
         'perception_pdf': perception_pdf,
         'donuts_png': donuts_png,
+        'donuts_svg': donuts_svg,
         'donuts_pdf': donuts_pdf,
         'perception_data': perception_data_path
     }
@@ -1238,10 +1394,22 @@ def check_osm_feature_exists(city_name: str, feature_type: str,
         return False, feature_file, 0
     
     try:
-        gdf = gpd.read_file(feature_file)
-        return True, feature_file, len(gdf)
-    except:
-        return False, feature_file, 0
+        # Use fiona to count features without loading full GeoDataFrame
+        # (much faster for large files; avoids OGR type warnings from gpd.read_file)
+        import fiona
+        with fiona.Env(GDAL_CACHEMAX=64), fiona.open(str(feature_file)) as src:
+            count = len(src)
+        return True, feature_file, count
+    except Exception:
+        # Fallback: try full read with OGR warnings suppressed
+        try:
+            os.environ['CPL_LOG'] = 'NUL' if os.name == 'nt' else '/dev/null'
+            gdf = gpd.read_file(feature_file)
+            os.environ.pop('CPL_LOG', None)
+            return True, feature_file, len(gdf)
+        except Exception:
+            os.environ.pop('CPL_LOG', None)
+            return False, feature_file, 0
 
 
 def load_city_osm_features(city_name: str, base_output_dir: Path = None) -> dict:
@@ -1267,7 +1435,18 @@ def load_city_osm_features(city_name: str, base_output_dir: Path = None) -> dict
         exists, file_path, count = check_osm_feature_exists(city_name, feature_type, base_output_dir)
         
         if exists and count > 0:
-            features[feature_type] = gpd.read_file(file_path)
+            # Suppress OGR "Skipping field" warnings (C-level stderr)
+            _old_stderr = os.dup(2)
+            _devnull = os.open(os.devnull, os.O_RDWR)
+            os.dup2(_devnull, 2)
+            try:
+                features[feature_type] = gpd.read_file(file_path)
+            except Exception:
+                features[feature_type] = None
+            finally:
+                os.dup2(_old_stderr, 2)
+                os.close(_old_stderr)
+                os.close(_devnull)
         else:
             features[feature_type] = None
     

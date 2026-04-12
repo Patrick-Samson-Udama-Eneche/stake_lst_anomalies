@@ -38,8 +38,15 @@ def load_aoi_datasets(cities_csv_path: str, urban_geojson_path: str,
     """
     Load all required datasets for AOI processing.
     
+    Supports both the legacy CSV (Major_cities_population_Nigeria.csv) and
+    the WUP 2025 CSV (Major_cities_population_Nigeria_WUP_2025.csv).
+    Column names are normalised so downstream code always sees:
+      - 'Urban Agglomeration'  (city name)
+      - 'Latitude' / 'Longitude'
+      - Year columns as strings, e.g. '1975' … '2050'
+    
     Args:
-        cities_csv_path: Path to cities population CSV file
+        cities_csv_path: Path to cities population file (CSV or XLSX)
         urban_geojson_path: Path to urban landscape typology GeoJSON
         boundary_geojson_path: Path to country boundary GeoJSON
         
@@ -52,12 +59,40 @@ def load_aoi_datasets(cities_csv_path: str, urban_geojson_path: str,
     """
     print("Loading AOI datasets...")
     
-    # Load cities data
-    if not Path(cities_csv_path).exists():
-        raise FileNotFoundError(f"Cities CSV not found: {cities_csv_path}")
+    # Load cities data — detect format by extension
+    cities_path = Path(cities_csv_path)
+    if not cities_path.exists():
+        raise FileNotFoundError(f"Cities file not found: {cities_csv_path}")
     
-    cities_df = pd.read_csv(cities_csv_path)
-    print(f"✅ Loaded {len(cities_df)} cities from CSV")
+    if cities_path.suffix.lower() in ('.xlsx', '.xls'):
+        cities_df = pd.read_excel(cities_csv_path, sheet_name='Data')
+    else:
+        cities_df = pd.read_csv(cities_csv_path, thousands=',')
+    
+    # Rename WUP 2025 columns to legacy schema if present
+    if 'City_Name' in cities_df.columns:
+        rename_map = {
+            'City_Name': 'Urban Agglomeration',
+            'PWCent_Latitude': 'Latitude',
+            'PWCent_Longitude': 'Longitude',
+        }
+        cities_df = cities_df.rename(columns=rename_map)
+        cities_df['Urban Agglomeration'] = cities_df['Urban Agglomeration'].str.strip()
+    
+    # Ensure year columns are strings
+    cities_df.columns = [
+        str(c) if isinstance(c, (int, float)) else c
+        for c in cities_df.columns
+    ]
+    
+    # Remove non-city entries (e.g., state-level entries like "Abia State")
+    state_mask = cities_df['Urban Agglomeration'].str.contains(r'\bState\b', case=False, na=False)
+    if state_mask.any():
+        removed = cities_df.loc[state_mask, 'Urban Agglomeration'].tolist()
+        cities_df = cities_df[~state_mask].reset_index(drop=True)
+        print(f"🗑️ Removed {len(removed)} non-city entries: {', '.join(removed)}")
+
+    print(f"✅ Loaded {len(cities_df)} cities from {cities_path.name}")
     
     # Validate cities data structure
     required_columns = ['Urban Agglomeration', 'Latitude', 'Longitude', '2024']
@@ -298,7 +333,8 @@ def clip_aoi_to_land(aoi_gdf: gpd.GeoDataFrame, boundary_gdf: gpd.GeoDataFrame,
 
 
 def find_cities_in_aoi(cities_df: pd.DataFrame, aoi_boundary,
-                      target_crs: str) -> Tuple[pd.DataFrame, gpd.GeoDataFrame]:
+                      target_crs: str,
+                      filter_year: str = None) -> Tuple[pd.DataFrame, gpd.GeoDataFrame]:
     """
     Find all cities within the AOI boundary.
     
@@ -306,6 +342,7 @@ def find_cities_in_aoi(cities_df: pd.DataFrame, aoi_boundary,
         cities_df: DataFrame with all cities data
         aoi_boundary: Shapely geometry of AOI boundary
         target_crs: CRS of the AOI boundary
+        filter_year: If provided, drop cities with NaN population for this year column
         
     Returns:
         Tuple of (cities_in_aoi_df, cities_in_aoi_gdf)
@@ -325,6 +362,14 @@ def find_cities_in_aoi(cities_df: pd.DataFrame, aoi_boundary,
     if cities_in_aoi:
         cities_in_aoi_df = pd.DataFrame(cities_in_aoi)
         
+        # Filter out cities with no population for the study year
+        if filter_year and filter_year in cities_in_aoi_df.columns:
+            before_count = len(cities_in_aoi_df)
+            cities_in_aoi_df = cities_in_aoi_df.dropna(subset=[filter_year]).reset_index(drop=True)
+            dropped = before_count - len(cities_in_aoi_df)
+            if dropped:
+                print(f"  🔍 Filtered {dropped} cities with no {filter_year} population data")
+        
         # Create GeoDataFrame
         geometries = [Point(row['Longitude'], row['Latitude']) for _, row in cities_in_aoi_df.iterrows()]
         cities_in_aoi_gdf = gpd.GeoDataFrame(cities_in_aoi_df, geometry=geometries, crs=config.WGS84)
@@ -338,6 +383,10 @@ def find_cities_in_aoi(cities_df: pd.DataFrame, aoi_boundary,
 def calculate_population_statistics(cities_in_aoi_df: pd.DataFrame) -> Dict[str, Any]:
     """
     Calculate population statistics and growth rates for cities in AOI.
+    
+    Dynamically determines the earliest and latest available year columns
+    so the function works with both the legacy 1950–2035 CSV and the new
+    1975–2050 WUP 2025 CSV dataset.
     
     Args:
         cities_in_aoi_df: DataFrame with cities population data
@@ -353,27 +402,36 @@ def calculate_population_statistics(cities_in_aoi_df: pd.DataFrame) -> Dict[str,
             'growth_rate_total': 0
         }
     
-    # Calculate growth rates
-    pop_1950 = cities_in_aoi_df['1950'].sum()
-    pop_2024 = cities_in_aoi_df['2024'].sum()
-    pop_2035 = cities_in_aoi_df['2035'].sum()
+    # Determine available year columns
+    year_cols = sorted([c for c in cities_in_aoi_df.columns if c.isdigit()])
+    first_year = int(year_cols[0]) if year_cols else 1975
+    last_year = int(year_cols[-1]) if year_cols else 2050
     
-    # Pre-2024 growth rate (1950-2024)
-    years_pre = 2024 - 1950
-    growth_rate_pre = ((pop_2024 / pop_1950) ** (1/years_pre) - 1) * 100 if pop_1950 > 0 else 0
+    pop_first = cities_in_aoi_df[str(first_year)].sum() if str(first_year) in cities_in_aoi_df.columns else 0
+    pop_2024 = cities_in_aoi_df['2024'].sum() if '2024' in cities_in_aoi_df.columns else 0
+    pop_last = cities_in_aoi_df[str(last_year)].sum() if str(last_year) in cities_in_aoi_df.columns else 0
     
-    # Post-2024 growth rate (2024-2035)
-    years_post = 2035 - 2024
-    growth_rate_post = ((pop_2035 / pop_2024) ** (1/years_post) - 1) * 100 if pop_2024 > 0 else 0
+    # Pre-2024 growth rate
+    years_pre = 2024 - first_year
+    growth_rate_pre = ((pop_2024 / pop_first) ** (1/years_pre) - 1) * 100 if pop_first > 0 and years_pre > 0 else 0
     
-    # Overall growth rate (1950-2035)
-    years_total = 2035 - 1950
-    growth_rate_total = ((pop_2035 / pop_1950) ** (1/years_total) - 1) * 100 if pop_1950 > 0 else 0
+    # Post-2024 growth rate
+    years_post = last_year - 2024
+    growth_rate_post = ((pop_last / pop_2024) ** (1/years_post) - 1) * 100 if pop_2024 > 0 and years_post > 0 else 0
+    
+    # Overall growth rate
+    years_total = last_year - first_year
+    growth_rate_total = ((pop_last / pop_first) ** (1/years_total) - 1) * 100 if pop_first > 0 and years_total > 0 else 0
     
     return {
         'total_pop_2024': pop_2024,
-        'total_pop_1950': pop_1950,
-        'total_pop_2035': pop_2035,
+        'total_pop_first': pop_first,
+        'total_pop_last': pop_last,
+        'first_year': first_year,
+        'last_year': last_year,
+        # Legacy keys for backward compatibility
+        'total_pop_1950': pop_first,
+        'total_pop_2035': pop_last,
         'growth_rate_pre': growth_rate_pre,
         'growth_rate_post': growth_rate_post,
         'growth_rate_total': growth_rate_total
@@ -446,10 +504,9 @@ def build_comprehensive_aoi_stats(selected_city: str, cities_in_aoi_df: pd.DataF
     
     # Add population time series data
     if not cities_in_aoi_df.empty:
-        pop_years = [str(year) for year in range(1950, 2036, 1)]
-        for year in pop_years:
-            if year in cities_in_aoi_df.columns:
-                stats[f'total_population_{year}'] = cities_in_aoi_df[year].sum()
+        year_cols = sorted([c for c in cities_in_aoi_df.columns if c.isdigit()])
+        for year in year_cols:
+            stats[f'total_population_{year}'] = cities_in_aoi_df[year].sum()
     
     # Add individual city data
     if not cities_in_aoi_df.empty:
@@ -583,6 +640,31 @@ def update_master_database(output_base_dir: str,
     return {'status': 'no_changes', 'message': 'No updates needed'}
 
 
+def sort_cities_by_population(cities_to_process: List[str],
+                              cities_df: pd.DataFrame,
+                              year: str = '2024') -> List[str]:
+    """
+    Sort a list of city names by their population in descending order.
+
+    Args:
+        cities_to_process: City names to sort.
+        cities_df: DataFrame with 'Urban Agglomeration' and year columns.
+        year: Year column to use for sorting (default '2024').
+
+    Returns:
+        List of city names sorted by population (largest first).
+    """
+    pop_lookup = dict(zip(
+        cities_df['Urban Agglomeration'],
+        pd.to_numeric(cities_df[year], errors='coerce').fillna(0)
+    ))
+    return sorted(
+        cities_to_process,
+        key=lambda c: pop_lookup.get(c, 0),
+        reverse=True
+    )
+
+
 def process_city_aoi(selected_city: str, cities_df: pd.DataFrame, 
                     urban_gdf: gpd.GeoDataFrame, boundary_gdf: gpd.GeoDataFrame,
                     buffer_distance: int = None) -> Dict[str, Any]:
@@ -631,7 +713,9 @@ def process_city_aoi(selected_city: str, cities_df: pd.DataFrame,
         aoi_gdf, aoi_area_km2 = clip_aoi_to_land(aoi_gdf, boundary_gdf, selected_city)
     
     # Find cities in AOI
-    cities_in_aoi_df, cities_in_aoi_gdf = find_cities_in_aoi(cities_df, aoi_gdf.geometry.iloc[0], urban_gdf.crs)
+    cities_in_aoi_df, cities_in_aoi_gdf = find_cities_in_aoi(
+        cities_df, aoi_gdf.geometry.iloc[0], urban_gdf.crs,
+        filter_year=str(config.PROJECT_STUDY_YEAR))
     
     # Calculate statistics
     coverage_efficiency = (buffer_area_km2 / aoi_area_km2) * 100 if aoi_area_km2 > 0 else 0

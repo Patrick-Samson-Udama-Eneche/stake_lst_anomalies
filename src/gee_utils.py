@@ -851,7 +851,7 @@ def compute_and_export_lst_geotiff_with_qa(collection, geometry, city_name,
 
         # Build output paths
         lst_subfolder  = 'Day' if lst_time == 'day' else 'Night'
-        geotiff_dir    = os.path.join(project_config['lst_output_dir'], city_dir,
+        geotiff_dir    = os.path.join(project_config['lst_output_dir'], f"City_{city_name}",
                                       'LST_Temporal_Analysis', lst_subfolder, 'geotiff')
         os.makedirs(geotiff_dir, exist_ok=True)
         dl_path        = os.path.join(geotiff_dir, f"{file_name}.tif")
@@ -895,3 +895,200 @@ def compute_and_export_lst_geotiff_with_qa(collection, geometry, city_name,
         print(f"      ❌ Error: {e}")
         print(f"      📋 {_tb.format_exc()}")
         return None
+
+
+# ---------------------------------------------------------------------------
+# Dask worker helpers for parallel GEE processing  (Notebook 03, Cell 13)
+# ---------------------------------------------------------------------------
+
+def init_ee_in_worker():
+    """Initialize Earth Engine inside a Dask worker process.
+
+    Safe to call repeatedly — skips if EE is already initialised.
+    """
+    import sys
+    import os as _os
+    from pathlib import Path
+    import ee as _ee
+
+    try:
+        _ee.Number(1).getInfo()          # already initialised
+    except Exception:
+        project_root = (Path(_os.getcwd()).parent
+                        if Path(_os.getcwd()).name == 'notebooks'
+                        else Path(_os.getcwd()))
+        sys.path.insert(0, str(project_root))
+        import config as _cfg
+        from google.oauth2 import service_account as _sa
+
+        credentials = _sa.Credentials.from_service_account_file(
+            _cfg.GEE_CONFIG['service_json'],
+            scopes=['https://www.googleapis.com/auth/earthengine'],
+        )
+        _ee.Initialize(credentials=credentials,
+                       project=_cfg.GEE_CONFIG['project_id'])
+
+
+def process_city_period(city_name, bounds_list, city_dir, period_type,
+                        period_value, lst_time, lst_config, temporal_config,
+                        project_config):
+    """Process and download a single LST period for one city.
+
+    All arguments are plain Python objects (no EE objects) so that the
+    function can be serialised by Dask.
+
+    Returns
+    -------
+    dict   with keys *city*, *period_type*, *period_value*, *lst_time*,
+           *status* ('downloaded' | 'skipped' | 'no_data' | 'error'),
+           and optional *file_path*, *qa_file_path*, *duration*,
+           *image_count*, *message*, *traceback*.
+    """
+    import os as _os
+    import time as _time
+    import traceback as _tb
+    import ee as _ee
+    import requests as _requests
+
+    try:
+        init_ee_in_worker()
+        start = _time.time()
+
+        city_geometry = _ee.Geometry.Rectangle(bounds_list)
+
+        result = {
+            'city': city_name,
+            'period_type': period_type,
+            'period_value': period_value,
+            'lst_time': lst_time,
+            'status': 'pending',
+        }
+
+        # File names
+        if period_type == 'yearly':
+            file_name = f"{city_name}_LST_{lst_time.title()}_Yearly_{period_value}"
+            qa_file_name = f"{city_name}_QA_Source_{lst_time.title()}_Yearly_{period_value}"
+        else:
+            file_name = f"{city_name}_LST_{lst_time.title()}_MonthlyClimatology_{period_value:02d}"
+            qa_file_name = f"{city_name}_QA_Source_{lst_time.title()}_MonthlyClimatology_{period_value:02d}"
+
+        # Directories
+        city_lst_dir = _os.path.join(project_config['lst_output_dir'],
+                                     f"City_{city_name}",
+                                     'LST_Temporal_Analysis')
+        lst_subfolder = 'Day' if lst_time == 'day' else 'Night'
+        city_geotiff_dir = _os.path.join(city_lst_dir, lst_subfolder, 'geotiff')
+        _os.makedirs(city_geotiff_dir, exist_ok=True)
+
+        file_path    = _os.path.join(city_geotiff_dir, f"{file_name}.tif")
+        qa_file_path = _os.path.join(city_geotiff_dir, f"{qa_file_name}.tif")
+
+        if _os.path.exists(file_path):
+            result['status'] = 'skipped'
+            result['message'] = f"File already exists: {file_path}"
+            return result
+
+        # Collection setup
+        collection_config = lst_config['collections'][lst_config['primary_collection']]
+        selected_band    = collection_config[lst_time + '_band']
+        selected_qa_band = collection_config[lst_time + '_qa_band']
+
+        collection = (_ee.ImageCollection(collection_config['id'])
+                      .filterDate(project_config['start_date'],
+                                  project_config['end_date'])
+                      .filterBounds(city_geometry))
+
+        # Hierarchical QA filtering
+        def _apply_hierarchical_qa(image):
+            lst = image.select(selected_band)
+            qa  = image.select(selected_qa_band)
+            lst_celsius = lst.multiply(collection_config['scale_factor']).add(collection_config['offset'])
+
+            qa_levels     = lst_config['qa_levels_to_use']
+            qa_hierarchy  = lst_config['quality_hierarchy']
+            quality_masks = {}
+            quality_lst   = {}
+            for tier in qa_levels:
+                quality_masks[tier] = qa.bitwiseAnd(3).eq(qa_hierarchy[tier]['qa_bits'])
+                quality_lst[tier]   = lst_celsius.updateMask(quality_masks[tier])
+
+            qa_source = _ee.Image(0).rename('QA_Source')
+            sorted_qa = sorted(qa_levels, key=lambda t: qa_hierarchy[t]['priority'])
+            for tier in sorted_qa:
+                qa_source = qa_source.where(quality_masks[tier],
+                                            qa_hierarchy[tier]['priority'])
+
+            lst_hier = None
+            for i, tier in enumerate(sorted_qa):
+                lst_hier = quality_lst[tier] if i == 0 else lst_hier.blend(quality_lst[tier])
+            if lst_hier is None:
+                return _ee.Image([]).copyProperties(image, ['system:time_start'])
+
+            lst_hier = lst_hier.rename('LST')
+            valid = lst_hier.gt(5).And(lst_hier.lt(70))
+            lst_hier  = lst_hier.updateMask(valid)
+            qa_source = qa_source.updateMask(valid)
+            return _ee.Image([lst_hier, qa_source]).copyProperties(image, ['system:time_start'])
+
+        processed = collection.map(_apply_hierarchical_qa)
+
+        if period_type == 'yearly':
+            filtered = processed.filterDate(f"{period_value}-01-01",
+                                            f"{period_value}-12-31")
+        else:
+            filtered = processed.filter(
+                _ee.Filter.calendarRange(period_value, period_value, 'month'))
+
+        count = filtered.size().getInfo()
+        if count == 0:
+            result['status']  = 'no_data'
+            result['message'] = (f"No images for {city_name} – "
+                                 f"{period_type}={period_value} ({lst_time})")
+            return result
+
+        lst_composite = filtered.select('LST').median()
+        qa_composite  = filtered.select('QA_Source').mode()
+
+        dl_params = {'scale': lst_config['scale'], 'crs': 'EPSG:4326',
+                     'region': city_geometry, 'format': 'GEO_TIFF'}
+
+        lst_url = lst_composite.getDownloadURL(dl_params)
+        qa_url  = qa_composite.getDownloadURL(dl_params)
+
+        def _download(url, dest, max_retries=3):
+            for attempt in range(max_retries):
+                try:
+                    resp = _requests.get(url, timeout=60)
+                    if resp.status_code == 200:
+                        with open(dest, 'wb') as f:
+                            f.write(resp.content)
+                        return True
+                except Exception:
+                    if attempt == max_retries - 1:
+                        raise
+                    _time.sleep(2)
+            return False
+
+        _download(lst_url, file_path)
+        _download(qa_url, qa_file_path)
+
+        duration = _time.time() - start
+        result.update({
+            'status': 'downloaded',
+            'file_path': file_path,
+            'qa_file_path': qa_file_path,
+            'duration': duration,
+            'image_count': count,
+        })
+        return result
+
+    except Exception as e:
+        return {
+            'city': city_name,
+            'period_type': period_type,
+            'period_value': period_value,
+            'lst_time': lst_time,
+            'status': 'error',
+            'message': str(e),
+            'traceback': _tb.format_exc(),
+        }

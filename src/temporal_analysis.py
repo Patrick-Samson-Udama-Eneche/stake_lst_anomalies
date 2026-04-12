@@ -832,7 +832,7 @@ def categorise_trend(warming_rate_str, trend_significance_str):
     import re as _re
 
     def _slope(val):
-        m = _re.search(r'([-+]?\d+\.?\d*)\s*°C/year', str(val))
+        m = _re.search(r'([-+]\d+\.\d*)\s*°C/year', str(val))
         return float(m.group(1)) if m else 0.0
 
     def _is_sig(val):

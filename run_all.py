@@ -3,7 +3,7 @@ Master Runner Script for LST Modeling Project
 ==============================================
 
 Executes all project notebooks in the correct dependency order:
-  01 → 01a → 02 → 03 → 04 → 05 → 061 → 062 → 063
+    01 → 01a → 02 → 03 → 04 → 05 → 06
 
 Usage:
 ------
@@ -33,6 +33,7 @@ Notes:
   - Notebook 04 (SEVIRI section) requires EUMETSAT credentials.
   - Notebook 02 is independent and can run in parallel with 01a/03.
   - Notebook 05 requires outputs from Notebook 04 (SEVIRI rasters).
+    - Notebook 06 requires outputs from Notebook 05 (hotspot polygons).
 """
 
 import argparse
@@ -129,13 +130,40 @@ NOTEBOOK_REGISTRY = [
         "id": "06",
         "file": "06_hotspot_modelling.ipynb",
         "name": "Hotspot Modelling",
-        "description": "Landscape-oriented modelling of hotspot occurrence (logistic) and extent (OLS clustered)",
+        "description": "Physiographic modelling of hotspot occurrence (binomial GLM), extent (OLS), and intensity (OLS)",
         "requires_gee": False,
         "requires_eumetsat": False,
         "accepts_cities": False,
         "depends_on": ["05"],
     },
 ]
+
+
+def list_notebook_files() -> list:
+    """Return project notebooks found in notebooks/ (excluding executed_ outputs)."""
+    return sorted(
+        p.name
+        for p in NOTEBOOKS_DIR.glob("*.ipynb")
+        if not p.name.startswith("executed_")
+    )
+
+
+def validate_registry_coverage() -> tuple[list, list]:
+    """
+    Compare NOTEBOOK_REGISTRY against notebooks/ folder.
+
+    Returns
+    -------
+    tuple(list, list)
+        (unregistered_files, missing_files)
+        - unregistered_files: present on disk but not in NOTEBOOK_REGISTRY
+        - missing_files: in NOTEBOOK_REGISTRY but not found on disk
+    """
+    disk_files = set(list_notebook_files())
+    registry_files = {nb["file"] for nb in NOTEBOOK_REGISTRY}
+    unregistered_files = sorted(disk_files - registry_files)
+    missing_files = sorted(registry_files - disk_files)
+    return unregistered_files, missing_files
 
 
 def get_notebook_by_id(nb_id: str) -> Optional[dict]:
@@ -195,8 +223,28 @@ def load_available_cities() -> list:
         import pandas as pd
         import config
         cities_path = config.get_aoi_data_path("cities_csv")
-        df = pd.read_csv(cities_path)
-        return sorted(df["Urban Agglomeration"].dropna().tolist())
+        if cities_path.suffix.lower() in (".xlsx", ".xls"):
+            df = pd.read_excel(cities_path, sheet_name="Data")
+        else:
+            df = pd.read_csv(cities_path, thousands=",")
+
+        # Support WUP schema while preserving legacy behavior.
+        if "Urban Agglomeration" not in df.columns and "City_Name" in df.columns:
+            df = df.rename(columns={"City_Name": "Urban Agglomeration"})
+
+        if "Urban Agglomeration" not in df.columns:
+            raise KeyError("Urban Agglomeration")
+
+        cities = (
+            df["Urban Agglomeration"]
+            .dropna()
+            .astype(str)
+            .str.strip()
+        )
+
+        # Exclude non-city entries such as state aggregates.
+        cities = cities[~cities.str.contains(r"\bState\b", case=False, regex=True)]
+        return sorted(cities.unique().tolist())
     except Exception as e:
         print(f"  [WARNING] Could not load city list: {e}")
         return []
@@ -397,7 +445,7 @@ def main():
     parser.add_argument(
         "--notebooks",
         nargs="+",
-        help="Specific notebook IDs to run (e.g., 01 03 05)",
+        help="Specific notebook IDs to run (e.g., 01 01a 03 05 06)",
     )
     parser.add_argument(
         "--start-from",
@@ -433,7 +481,7 @@ def main():
     parser.add_argument(
         "--list-cities",
         action="store_true",
-        help="Print the 50 valid city names and exit",
+        help="Print all valid city names and exit",
     )
 
     args = parser.parse_args()
@@ -448,6 +496,19 @@ def main():
         return
 
     print("=" * 70)
+
+    # ---- Pre-check: registry vs notebooks/ coverage ----
+    unregistered_files, missing_files = validate_registry_coverage()
+    if unregistered_files:
+        print("\n[WARNING] Notebook files present but not registered in NOTEBOOK_REGISTRY:")
+        for f in unregistered_files:
+            print(f"  - {f}")
+        print("  These files will NOT be executed unless added to NOTEBOOK_REGISTRY.")
+
+    if missing_files:
+        print("\n[WARNING] Notebook files registered but missing on disk:")
+        for f in missing_files:
+            print(f"  - {f}")
     print("  LST Modeling Project — Master Runner")
     print(f"  Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 70)

@@ -33,6 +33,58 @@ CV_FOLDS = int(os.getenv("CV_FOLDS", "5"))
 # Visualization
 FIGURE_DPI = int(os.getenv("FIGURE_DPI", "300"))
 PLOT_STYLE = os.getenv("PLOT_STYLE", "default")
+EXPORT_MODE = os.getenv("LST_EXPORT_MODE", "svg_only").strip().lower()
+
+
+def _enable_svg_only_exports() -> None:
+    """Force Matplotlib figure exports to SVG-only output files.
+
+        Any raster save request ending in .png/.jpg/.jpeg/.tif/.tiff is
+        transparently rewritten to .svg, and raster format requests are coerced
+        to SVG.
+
+        IMPORTANT:
+        - Explicit PDF backend calls (e.g., via PdfPages) are preserved.
+        - Explicit PDF output requests are preserved so the project can export
+            both SVG and PDF publication files.
+    """
+    try:
+        from matplotlib.figure import Figure
+    except Exception:
+        return
+
+    if getattr(Figure.savefig, "_svg_only_patched", False):
+        return
+
+    _original_savefig = Figure.savefig
+
+    def _svg_only_savefig(self, fname, *args, **kwargs):
+        # Respect explicit PDF backend requests (e.g., PdfPages backend="pdf").
+        if str(kwargs.get("backend", "")).lower() == "pdf":
+            return _original_savefig(self, fname, *args, **kwargs)
+
+        target = fname
+        if isinstance(fname, (str, Path)):
+            target_path = Path(fname)
+            if target_path.suffix.lower() in {".png", ".jpg", ".jpeg", ".tif", ".tiff"}:
+                target = target_path.with_suffix(".svg")
+            elif target_path.suffix == "":
+                target = target_path.with_suffix(".svg")
+
+        requested_format = kwargs.get("format")
+        if requested_format is None or str(requested_format).lower() in {
+            "png", "jpg", "jpeg", "tif", "tiff"
+        }:
+            kwargs["format"] = "svg"
+
+        return _original_savefig(self, target, *args, **kwargs)
+
+    _svg_only_savefig._svg_only_patched = True
+    Figure.savefig = _svg_only_savefig
+
+
+if EXPORT_MODE == "svg_only":
+    _enable_svg_only_exports()
 
 # CRS settings (common projections)
 WGS84 = "EPSG:4326"
@@ -40,24 +92,44 @@ WEB_MERCATOR = "EPSG:3857"
 UTM_ZONE_32N = "EPSG:32632"  # For Nigeria (approximate)
 
 # =============================================================================
-# VALID CITY NAMES (from Major_cities_population_Nigeria.csv)
+# VALID CITY NAMES (from Major_cities_population_Nigeria_WUP_2025.csv)
 # =============================================================================
-# These are the 50 cities recognized by the pipeline.  City names passed via
-# CLI (--cities) or selected in Notebook 01 are validated against this list.
-# Spelling and capitalisation must match exactly.  Use validate_city_names()
-# to check user input and get suggestions for typos.
-VALID_CITIES: List[str] = [
-    "Aba", "Abakaliki", "Abeokuta", "Abuja", "Ado-Ekiti",
-    "Akure", "Bauchi", "Benin City", "Birnin Kebbi", "Calabar",
-    "Effon Alaiye", "Enugu", "Gboko", "Gombe", "Gwagwalada",
-    "Ibadan", "Ife", "Igbidu", "Ijebu-Ode", "Ikorodu",
-    "Ikot Ekpene", "Ilesha", "Ilorin", "Jos", "Kaduna",
-    "Kano", "Katsina", "Lafia", "Lagos", "Lokoja",
-    "Maiduguri", "Makurdi", "Minna", "Nnewi", "Ogbomosho",
-    "Okene", "Okpogho", "Ondo", "Onitsha", "Oshogbo",
-    "Owerri", "Oyo", "Port Harcourt", "Potiskum", "Saki",
-    "Sokoto", "Umuahia", "Uyo", "Warri", "Zaria",
-]
+# These are all 791 cities in the UN WUP 2025 File 21 dataset for Nigeria.
+# City names passed via CLI (--cities) or selected in Notebook 01 are
+# validated against this list.  Spelling and capitalisation must match
+# exactly.  Use validate_city_names() to check user input and get
+# suggestions for typos.
+#
+# Rather than embedding 791 names here, VALID_CITIES is built lazily
+# from the CSV file the first time it is needed.
+_VALID_CITIES_CACHE: Optional[List[str]] = None
+
+def _load_valid_cities() -> List[str]:
+    """Load all city names from the WUP 2025 CSV file (cached)."""
+    global _VALID_CITIES_CACHE
+    if _VALID_CITIES_CACHE is None:
+        import pandas as pd
+        csv_path = PROJECT_ROOT / AOI_DATA_PATHS['cities_csv']
+        df = pd.read_csv(csv_path, thousands=',')
+        _VALID_CITIES_CACHE = sorted(df['City_Name'].dropna().str.strip().tolist())
+    return _VALID_CITIES_CACHE
+
+class _ValidCitiesProxy:
+    """Lazy list proxy so VALID_CITIES works without loading CSV at import."""
+    def __iter__(self):
+        return iter(_load_valid_cities())
+    def __contains__(self, item):
+        return item in _load_valid_cities()
+    def __len__(self):
+        return len(_load_valid_cities())
+    def __getitem__(self, idx):
+        return _load_valid_cities()[idx]
+    def __repr__(self):
+        return repr(_load_valid_cities())
+    def copy(self):
+        return list(_load_valid_cities())
+
+VALID_CITIES = _ValidCitiesProxy()
 
 
 def validate_city_names(names: List[str], *, strict: bool = False) -> List[str]:
@@ -103,27 +175,86 @@ def validate_city_names(names: List[str], *, strict: bool = False) -> List[str]:
 
 
 # =============================================================================
-# CITIES ABOVE 1 MILLION POPULATION (2024 estimates)
+# CITIES BY POPULATION TIER (WUP 2025 — 2024 estimates, thousands)
 # =============================================================================
-# These 16 cities have population >= 1 million based on 2024 data.
-# Population figures are in thousands (e.g., 16536 = ~16.5 million).
+
+# 17 cities with population >= 1 million (2024)
 CITIES_ABOVE_1M: List[str] = [
-    "Lagos",         # 16,536k
-    "Kano",          # 4,491k
-    "Abuja",         # 4,026k
-    "Ibadan",        # 4,004k
-    "Port Harcourt", # 3,637k
-    "Benin City",    # 1,973k
-    "Onitsha",       # 1,695k
-    "Uyo",           # 1,393k
-    "Nnewi",         # 1,301k
-    "Aba",           # 1,230k
-    "Kaduna",        # 1,221k
-    "Ikorodu",       # 1,145k
-    "Ilorin",        # 1,064k
-    "Warri",         # 1,031k
-    "Owerri",        # 1,023k
-    "Jos",           # 1,001k
+    "Lagos",         # 12,636k
+    "Onitsha",       # 5,494k
+    "Kano",          # 4,782k
+    "Owerri",        # 3,701k
+    "Ibadan",        # 3,685k
+    "Port Harcourt", # 2,306k
+    "Kaduna",        # 1,873k
+    "Benin City",    # 1,824k
+    "Warri",         # 1,565k
+    "Uyo",           # 1,523k
+    "Aba",           # 1,407k
+    "Aboh",          # 1,331k
+    "Abuja",         # 1,328k
+    "Ilorin",        # 1,271k
+    "Maiduguri",     # 1,216k
+    "Enugu",         # 1,103k
+    "Otite",         # 1,008k
+]
+
+# 37 cities with population >= 500k (2024)
+CITIES_ABOVE_500K: List[str] = CITIES_ABOVE_1M + [
+    "Jos",           # 915k
+    "Sokoto",        # 894k
+    "Ikorodu",       # 894k
+    "Umuahia",       # 821k
+    "Nsukka",        # 815k
+    "Abeokuta",      # 789k
+    "Oyo",           # 779k
+    "Yola",          # 748k
+    "Zaria",         # 705k
+    "Akure",         # 692k
+    "Calabar",       # 664k
+    "Bauchi",        # 633k
+    "Lokoja",        # 614k
+    "Ado Ekiti",     # 590k
+    "Katsina",       # 589k
+    "Ogale",         # 581k
+    "Yenagoa",       # 566k
+    "Madalla",       # 562k
+    "Ondo",          # 557k
+    "Minna",         # 506k
+]
+
+# 67 cities with population >= 300k (2024)
+CITIES_ABOVE_300K: List[str] = CITIES_ABOVE_500K + [
+    "Ife",           # 484k
+    "Ijebu-Ode",     # 483k
+    "Oshogbo",       # 465k
+    "Gusau",         # 462k
+    "Ilesa",         # 442k
+    "Ogbomosho",     # 437k
+    "Titi",          # 432k
+    "Oron",          # 430k
+    "Dere",          # 415k
+    "Bida",          # 412k
+    "Ikot Ekpene",   # 406k
+    "Makurdi",       # 405k
+    "Asaba",         # 399k
+    "Abakaliki",     # 398k
+    "Saki",          # 395k
+    "Potiskum",      # 394k
+    "Iseyin",        # 381k
+    "KUNDULUN",      # 377k
+    "Gamboru",       # 371k
+    "Gboko",         # 364k
+    "Abonnema",      # 363k
+    "Daura",         # 362k
+    "Oyigbo",        # 361k
+    "Ikere-Ekiti",   # 334k
+    "Bonny",         # 327k
+    "Ikare",         # 324k
+    "Erin-osun",     # 323k
+    "Gwagwalada",    # 323k
+    "Sapele",        # 311k
+    "Ughelli",       # 301k
 ]
 
 # Test cities for quick development/debugging runs
@@ -141,23 +272,25 @@ TEST_CITIES: List[str] = [
 # Control which cities to process in notebooks.
 # 
 # CITY_SELECTION_MODE options:
-#   - "ALL"      : Process all 50 cities in the CSV file
-#   - "ABOVE_1M" : Process 16 cities with population >= 1 million (default)
-#   - "TEST"     : Process 5 test cities (Lagos, Abuja, Kano, Jos, Port Harcourt)
-#   - "SPECIFIC" : Process only the cities listed in SELECTED_CITIES
+#   - "ALL"        : Process all 791 cities in the CSV file
+#   - "ABOVE_1M"   : 17 cities with population >= 1 million
+#   - "ABOVE_500K" : 37 cities with population >= 500k
+#   - "ABOVE_300K" : 67 cities with population >= 300k (default)
+#   - "TEST"       : 5 test cities (Lagos, Abuja, Kano, Jos, Port Harcourt)
+#   - "SPECIFIC"   : Only the cities listed in SELECTED_CITIES
 #
 # SELECTED_CITIES:
 #   - Only used when CITY_SELECTION_MODE = "SPECIFIC"
-#   - Can be any cities from VALID_CITIES (all 50 Nigerian cities)
+#   - Can be any cities from VALID_CITIES (all 791 Nigerian cities)
 #   - Example: ["Lagos", "Abuja", "Enugu", "Maiduguri"]
 
 
-CITY_SELECTION_MODE: str = "ALL"  # Options: "ALL", "ABOVE_1M", "TEST", or "SPECIFIC"
+CITY_SELECTION_MODE: str = "ABOVE_300K"  # Options: "ALL", "ABOVE_1M", "ABOVE_500K", "ABOVE_300K", "TEST", or "SPECIFIC"
 
 
 SELECTED_CITIES: List[str] = [
     # Add cities here when using CITY_SELECTION_MODE = "SPECIFIC"
-    # Can select from any of the 50 cities in VALID_CITIES
+    # Can select from any of the 791 cities in VALID_CITIES
     # "Lagos",
     # "Enugu",
     # "Maiduguri",
@@ -183,6 +316,10 @@ def get_cities_to_process() -> List[str]:
         return VALID_CITIES.copy()
     elif CITY_SELECTION_MODE == "ABOVE_1M":
         return CITIES_ABOVE_1M.copy()
+    elif CITY_SELECTION_MODE == "ABOVE_500K":
+        return CITIES_ABOVE_500K.copy()
+    elif CITY_SELECTION_MODE == "ABOVE_300K":
+        return CITIES_ABOVE_300K.copy()
     elif CITY_SELECTION_MODE == "TEST":
         return TEST_CITIES.copy()
     elif CITY_SELECTION_MODE == "SPECIFIC":
@@ -195,18 +332,18 @@ def get_cities_to_process() -> List[str]:
         invalid = [c for c in SELECTED_CITIES if c not in VALID_CITIES]
         if invalid:
             from difflib import get_close_matches
-            suggestions = {c: get_close_matches(c, VALID_CITIES, n=2, cutoff=0.5) for c in invalid}
+            suggestions = {c: get_close_matches(c, list(VALID_CITIES), n=2, cutoff=0.5) for c in invalid}
             hint = "\n".join(f"  - '{c}': did you mean {s}?" for c, s in suggestions.items() if s)
             raise ValueError(
                 f"Invalid cities in SELECTED_CITIES: {invalid}.\n"
-                f"Valid cities are: {VALID_CITIES}\n"
+                f"Valid cities are: {list(VALID_CITIES)}\n"
                 f"{hint if hint else ''}"
             )
         return SELECTED_CITIES.copy()
     else:
         raise ValueError(
             f"Invalid CITY_SELECTION_MODE: '{CITY_SELECTION_MODE}'. "
-            "Must be 'ALL', 'ABOVE_1M', 'TEST', or 'SPECIFIC'."
+            "Must be 'ALL', 'ABOVE_1M', 'ABOVE_500K', 'ABOVE_300K', 'TEST', or 'SPECIFIC'."
         )
 
 
@@ -218,7 +355,7 @@ def get_cities_to_process() -> List[str]:
 
 # Paths to your geospatial input files (relative to project root):
 AOI_DATA_PATHS = {
-    'cities_csv': 'data/inputs/geospatial_features/Major_cities_population_Nigeria.csv',        # ← CHANGE THIS  (CSV with 'Urban Agglomeration' column)
+    'cities_csv': 'data/inputs/geospatial_features/Major_cities_population_Nigeria_WUP_2025.csv', # ← CHANGE THIS  (UN WUP 2025 CSV with 'City_Name' column)
     'urban_geojson': 'data/inputs/geospatial_features/urban_landscape_typology_Nigeria.geojson', # ← CHANGE THIS  (urban area polygons)
     'boundary_geojson': 'data/inputs/geospatial_features/boundary_Nigeria.geojson'               # ← CHANGE THIS  (country boundary for clipping)
 }
@@ -258,11 +395,11 @@ AOI_VIS_CONFIG = {
 
 # Population analysis configuration
 POPULATION_CONFIG = {
-    'years_range': list(range(1950, 2036, 5)),  # Every 5 years
+    'years_range': list(range(1975, 2051, 5)),  # Every 5 years
     'growth_periods': {
-        'pre_2024': (1950, 2024),
-        'post_2024': (2024, 2035), 
-        'overall': (1950, 2035)
+        'pre_2024': (1975, 2024),
+        'post_2024': (2024, 2050), 
+        'overall': (1975, 2050)
     },
     'trend_analysis_step': 2  # For 10-year growth rates
 }
@@ -521,6 +658,21 @@ PROCESSING_OPTIONS = {
     'dask_chunksize': 2                                   # ← CHANGE THIS  (cities processed in parallel; lower = less RAM)
 }
 
+# ---------------------------------------------------------------------------
+# Skip logic for long-running outputs (Notebook 03)
+# ---------------------------------------------------------------------------
+# When True, each step checks for existing output files and skips regeneration.
+# Set individual flags to False to force regeneration of specific outputs.
+SKIP_EXISTING = {
+    'lst_visualization':       True,   # Cell 16: Dask-based LST map visualization
+    'qa_maps':                 True,   # Cell 17: QA map visualization
+    'lst_summary_stats':       True,   # Cell 19: LST summary statistics CSV/HTML
+    'trend_plots':             True,   # Cell 21: LST trend line plots per city
+    'heatmaps':                True,   # Cell 22: 4 single-page heatmaps
+    'stakeholder_yearly':      True,   # Cell 24: Yearly stakeholder validation chart
+    'stakeholder_monthly':     True,   # Cell 25: Monthly stakeholder validation chart
+}
+
 
 # =============================================================================
 # CROSS-CITY CHART CONFIGURATION (Notebook 03)
@@ -706,7 +858,14 @@ def get_input_path(filename: str, subfolder: Optional[str] = None) -> Path:
     return input_path / filename
 
 def get_aoi_data_path(data_type: str) -> Path:
-    """Get AOI data file path"""
+    """Get AOI data file path.
+
+    Accepts 'cities_xlsx' as a legacy alias for 'cities_csv' so that
+    call-sites that still reference the old XLSX key keep working.
+    """
+    # Legacy alias
+    if data_type == 'cities_xlsx':
+        data_type = 'cities_csv'
     if data_type not in AOI_DATA_PATHS:
         raise ValueError(f"Unknown data type: {data_type}. Available: {list(AOI_DATA_PATHS.keys())}")
     return PROJECT_ROOT / AOI_DATA_PATHS[data_type]
@@ -963,12 +1122,12 @@ def verify_ghsl_availability() -> dict:
     return result
 
 def load_available_cities() -> List[str]:
-    """Load available cities from CSV"""
+    """Load available cities from the WUP 2025 CSV file."""
     try:
         import pandas as pd
         cities_path = get_aoi_data_path('cities_csv')
-        df = pd.read_csv(cities_path)
-        cities = df['Urban Agglomeration'].dropna().tolist()
+        df = pd.read_csv(cities_path, thousands=',')
+        cities = df['City_Name'].dropna().str.strip().tolist()
         global AVAILABLE_CITIES
         AVAILABLE_CITIES = cities
         return cities
@@ -1191,26 +1350,39 @@ VALIDATION_CONFIG = {
 # HOTSPOT MODELLING CONFIGURATION (Notebook 06)
 # =============================================================================
 # Notebook 06 investigates which physiographic landscape elements predict
-# hotspot spatial extent (OLS with city-clustered SEs) and hotspot intensity
-# (OLS with city-clustered SEs using mean LST).
+# hotspot occurrence (city-level Gi* presence), hotspot spatial extent
+# (polygon-level OLS with city-clustered SEs), and hotspot intensity
+# (polygon-level OLS with city-clustered SEs using mean LST).
 # Results are produced separately for Day and Night.
 #
-# Analysis 1: Hotspot Extent — Hierarchical OLS with Clustered SEs
+# Analysis 1: Hotspot Occurrence — Hierarchical Binomial GLM (logit link)
+#   Dataset: city-level Gi* hotspot presence/absence, DV = Hotspot_Day / Hotspot_Night
+# Analysis 2: Hotspot Extent — Hierarchical OLS with Clustered SEs
 #   Dataset: P90 hotspot polygons, DV = log(area_km2)
-# Analysis 2: Hotspot Intensity — Hierarchical OLS with Clustered SEs
+# Analysis 3: Hotspot Intensity — Hierarchical OLS with Clustered SEs
 #   Dataset: P90 hotspot polygons, DV = mean LST (°C) within polygon
 
 # Output directory
 MODEL_OUTPUT_DIR = OUTPUT_DIR / '06_hotspot_modelling'
 
-# Hierarchical block order for both analyses.
+# Hierarchical block order for all Notebook 06 analyses.
 # Each element is a landscape class attribute column from the landscape GDF.
 # Blocks are added cumulatively: Block 1 = [0], Block 2 = [0,1], etc.
 HIERARCHY_BLOCKS = [
     'Climate_Class',                                       # ← CHANGE THIS  (Block 1)
     'Geology_Class',                                       # ← CHANGE THIS  (Block 2 = Climate + Geology)
-    'Elevation_Class',                                     # ← CHANGE THIS  (Block 3 = Climate + Geology + Elevation)
+    'Elevation_Class',                                     # ← CHANGE THIS  (Block 3 = + Elevation)
 ]
+
+# Analysis 1 configuration (Gi* occurrence — city-level binomial GLM)
+OCCURRENCE_CONFIG = {
+    'hotspot_method': 'GI_STAR',                           # Detection method for occurrence DV
+    'periods': ['Day', 'Night'],                           # Separate models per period
+    'dependent_variable_prefix': 'Hotspot',                # Produces Hotspot_Day / Hotspot_Night
+    'rare_class_min_count': 5,                             # Collapse levels below this count to Other
+    'significance_level': 0.05,                            # ← CHANGE THIS
+    'link': 'logit',                                       # Canonical binomial link
+}
 
 # Wild Cluster Bootstrap configuration (Cameron, Gelbach & Miller, 2008)
 WILD_BOOTSTRAP_CONFIG = {
@@ -1220,7 +1392,7 @@ WILD_BOOTSTRAP_CONFIG = {
     'random_state': 42,                                    # Reproducibility seed
 }
 
-# Analysis 1 configuration (OLS with clustered SEs — hotspot extent)
+# Analysis 2 configuration (OLS with clustered SEs — hotspot extent)
 OLS_CLUSTERED_CONFIG = {
     'hotspot_method': 'P90',                               # ← CHANGE THIS  (detection method for extent DV)
     'dependent_variable': 'area_km2',                      # Raw DV (log-transform applied if skewed)
@@ -1231,7 +1403,7 @@ OLS_CLUSTERED_CONFIG = {
     'significance_level': 0.05,                            # ← CHANGE THIS
 }
 
-# Analysis 2 configuration (OLS with clustered SEs — hotspot intensity)
+# Analysis 3 configuration (OLS with clustered SEs — hotspot intensity)
 OLS_INTENSITY_CONFIG = {
     'hotspot_method': 'P90',                               # ← CHANGE THIS  (detection method)
     'dependent_variable_day': 'LST_day_mean',              # Mean LST within hotspot polygon (Day)

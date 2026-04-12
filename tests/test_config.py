@@ -110,6 +110,12 @@ class TestPathHelpers:
         path = config.get_aoi_data_path('cities_csv')
         assert str(path).endswith('.csv')
 
+    def test_get_aoi_data_path_legacy_alias(self):
+        """'cities_xlsx' should resolve to the same path as 'cities_csv'."""
+        path_legacy = config.get_aoi_data_path('cities_xlsx')
+        path_new = config.get_aoi_data_path('cities_csv')
+        assert path_legacy == path_new
+
     def test_get_aoi_data_path_invalid_key_raises(self):
         with pytest.raises(ValueError, match="Unknown data type"):
             config.get_aoi_data_path('nonexistent_key')

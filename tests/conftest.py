@@ -19,19 +19,20 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 
 # ---------------------------------------------------------------------------
-# Sample city data (mimics Major_cities_population_Nigeria.csv schema)
+# Sample city data (mimics WUP 2025 CSV schema,
+# columns renamed to legacy names by load_aoi_datasets)
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
 def sample_cities_df():
-    """DataFrame with 3 cities and population columns from 1950 to 2035."""
+    """DataFrame with 3 cities and population columns from 1975 to 2050."""
     return pd.DataFrame({
         'Urban Agglomeration': ['CityA', 'CityB', 'CityC'],
         'Latitude': [9.06, 6.45, 12.00],
         'Longitude': [7.49, 3.40, 8.52],
-        '1950': [100_000, 300_000, 50_000],
+        '1975': [100_000, 300_000, 50_000],
         '2024': [3_000_000, 15_000_000, 1_200_000],
-        '2035': [5_000_000, 22_000_000, 2_000_000],
+        '2050': [5_000_000, 22_000_000, 2_000_000],
     })
 
 

@@ -3,9 +3,10 @@ Modelling Utilities for Hotspot Analysis (Notebook 06)
 ======================================================
 
 Reusable functions for:
-- Building city-level binary datasets (legacy, retained for reference)
+- Building city-level binary datasets for Gi* occurrence analysis
+- Hierarchical binomial GLMs with logit link for occurrence analysis
 - Hierarchical logistic regression with variance partitioning (legacy)
-- Hierarchical OLS with city-clustered standard errors (Analyses 1–2)
+- Hierarchical OLS with city-clustered standard errors (Analyses 2–3)
 - Wild Cluster Bootstrap p-values (Cameron, Gelbach & Miller, 2008)
 - Coefficient tables and visualisation helpers (panel Day|Night charts)
 
@@ -26,6 +27,21 @@ import statsmodels.api as sm
 from statsmodels.discrete.discrete_model import Logit
 from scipy import stats as scipy_stats
 
+from src.data_io import export_figure_set
+
+
+def _export_figure_all_formats(fig: plt.Figure, output_path: Path, dpi: int = 300) -> None:
+    """Export a figure through the centralized data_io exporter."""
+    output_path = Path(output_path)
+    export_figure_set(
+        fig,
+        output_path,
+        dpi=dpi,
+        include_svg=True,
+        include_pdf=True,
+        bbox_inches='tight',
+    )
+
 
 # =========================================================================
 # SHARED COLOUR PALETTES  (one per hierarchy block; used by donut & Sankey)
@@ -34,6 +50,7 @@ BLOCK_PALETTES: List[List[str]] = [
     ['#4e79a7', '#59a14f', '#f28e2b', '#e15759', '#76b7b2', '#edc949'],   # Climate
     ['#af7aa1', '#ff9da7', '#9c755f', '#bab0ab', '#d4a6c8', '#c9d4e0'],   # Geology
     ['#86bcb6', '#f1ce63', '#a0cbe8', '#d37295', '#b07aa1', '#8cd17d'],   # Elevation
+    ['#499894', '#e49444', '#b6992d', '#d4a6c8', '#f1ce63', '#86bcb6', '#a0cbe8', '#d37295'],  # Landcover
 ]
 
 
@@ -156,7 +173,7 @@ def build_binary_hotspot_dataset(
     periods: List[str] = None,
 ) -> pd.DataFrame:
     """
-    Build a city-level binary dataset: does a hotspot intersect the AOI?
+    Build a city-level binary dataset: does a hotspot intersect the AOI
 
     Parameters
     ----------
@@ -199,6 +216,205 @@ def build_binary_hotspot_dataset(
         df[f'Hotspot_{period}'] = flags
 
     return df
+
+
+def prepare_occurrence_dataset(
+    occurrence_df: pd.DataFrame,
+    block_columns: List[str],
+    min_count: int = 5,
+) -> pd.DataFrame:
+    """
+    Collapse sparse categorical levels before city-level occurrence modelling.
+
+    The Gi* occurrence analysis operates on only 58 cities. Rare categories can
+    create quasi-separation and unstable maximum-likelihood estimates, so levels
+    occurring fewer than ``min_count`` times are grouped into an ``Other`` class.
+
+    Parameters
+    ----------
+    occurrence_df : pd.DataFrame
+        Output of ``build_binary_hotspot_dataset()``.
+    block_columns : list[str]
+        Ordered predictor columns to check.
+    min_count : int
+        Minimum frequency required to retain a category as-is.
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of ``occurrence_df`` with sparse levels collapsed.
+    """
+    prepared = occurrence_df.copy()
+    for col in block_columns:
+        counts = prepared[col].value_counts(dropna=False)
+        rare_levels = counts[counts < min_count].index.tolist()
+        if len(rare_levels) == 0:
+            continue
+        other_label = f'{col}_Other'
+        prepared[col] = prepared[col].where(~prepared[col].isin(rare_levels), other=other_label)
+    return prepared
+
+
+def summarize_binary_separation_risk(
+    df: pd.DataFrame,
+    dv_column: str,
+    block_columns: List[str],
+) -> pd.DataFrame:
+    """
+    Summarize zero-cell risks for binary occurrence models.
+
+    A categorical level with only successes or only failures can induce
+    (quasi-)separation in a logit-type model. This helper reports the binary
+    outcome counts for every level in every predictor block so Notebook 06 can
+    surface the risk explicitly before coefficient-level interpretation.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        City-level occurrence dataset.
+    dv_column : str
+        Binary dependent variable column.
+    block_columns : list[str]
+        Predictor block columns to inspect.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns include ``Block``, ``Level``, counts of 0/1 outcomes, and a
+        boolean ``Zero-cell risk`` flag.
+    """
+    rows = []
+    for block in block_columns:
+        counts = pd.crosstab(df[block], df[dv_column]).reindex(columns=[0, 1], fill_value=0)
+        for level, row in counts.iterrows():
+            n_zero = int(row.get(0, 0))
+            n_one = int(row.get(1, 0))
+            rows.append({
+                'Block': block,
+                'Level': level,
+                'No hotspot (0)': n_zero,
+                'Hotspot (1)': n_one,
+                'Zero-cell risk': (n_zero == 0 or n_one == 0),
+            })
+    return pd.DataFrame(rows)
+
+
+def fit_hierarchical_binomial_glm(
+    df: pd.DataFrame,
+    dv_column: str,
+    block_columns: List[str],
+    alpha: float = 0.05,
+    verbose: bool = True,
+) -> Dict:
+    """
+    Fit cumulative binomial GLMs with the canonical logit link.
+
+    This is the primary occurrence-analysis engine for Notebook 06. It replaces
+    the older direct ``Logit`` fit because GLM(Binomial, logit) is numerically
+    more stable for the sparse city-level Gi* presence/absence dataset while
+    preserving the same substantive model family.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        City-level dataset with binary dependent variable and categorical blocks.
+    dv_column : str
+        Name of the binary outcome column.
+    block_columns : list[str]
+        Ordered list of categorical predictor columns added cumulatively.
+    alpha : float
+        Significance level.
+    verbose : bool
+        Print progress.
+
+    Returns
+    -------
+    dict
+        Keys: ``'models'``, ``'comparison'``, ``'block_tests'``, ``'model_results'``.
+    """
+    y = df[dv_column].astype(float)
+
+    models = []
+    model_results = []
+    prev_result = None
+
+    for i, _ in enumerate(block_columns):
+        current_blocks = block_columns[:i + 1]
+        block_label = ' + '.join(current_blocks)
+
+        X_parts = []
+        for col in current_blocks:
+            dummies = pd.get_dummies(df[col], prefix=col, drop_first=True, dtype=float)
+            X_parts.append(dummies)
+        X = pd.concat(X_parts, axis=1)
+        X = sm.add_constant(X, has_constant='add')
+
+        if verbose:
+            print(f"\n  Block {i+1}: {block_label}")
+            print(f"    Predictors: {X.shape[1] - 1} dummies + intercept")
+
+        model = sm.GLM(y, X, family=sm.families.Binomial())
+        result = model.fit(maxiter=200, disp=0)
+        converged = bool(getattr(result, 'converged', True))
+        pseudo_r2 = np.nan
+        if result.null_deviance not in (0, np.nan):
+            pseudo_r2 = 1 - (result.deviance / result.null_deviance)
+
+        lr_test = None
+        if prev_result is not None:
+            lr_stat = 2 * (result.llf - prev_result.llf)
+            df_diff = int(result.df_model - prev_result.df_model)
+            if df_diff > 0:
+                lr_pvalue = scipy_stats.chi2.sf(lr_stat, df_diff)
+                lr_test = {
+                    'block_added': block_columns[i],
+                    'lr_statistic': lr_stat,
+                    'df': df_diff,
+                    'p_value': lr_pvalue,
+                    'significant': lr_pvalue < alpha,
+                }
+                if verbose:
+                    sig_str = '***' if lr_pvalue < 0.001 else '**' if lr_pvalue < 0.01 else '*' if lr_pvalue < alpha else 'ns'
+                    print(f"    LR test vs Block {i}: χ²={lr_stat:.3f}, df={df_diff}, p={lr_pvalue:.4f} {sig_str}")
+
+        model_info = {
+            'block': i + 1,
+            'block_label': block_label,
+            'n_predictors': X.shape[1] - 1,
+            'log_likelihood': result.llf,
+            'pseudo_r2': pseudo_r2,
+            'aic': result.aic,
+            'bic': result.bic_llf,
+            'converged': converged,
+            'lr_test': lr_test,
+        }
+        model_results.append(model_info)
+        models.append(result)
+        prev_result = result
+
+        if verbose:
+            print(f"    McFadden-style R² = {pseudo_r2:.4f}, AIC = {result.aic:.1f}, LL = {result.llf:.2f}")
+
+    comparison_df = pd.DataFrame([{
+        'Block': r['block'],
+        'Variables': r['block_label'],
+        'K': r['n_predictors'],
+        'Log-Lik': r['log_likelihood'],
+        'McFadden R²': r['pseudo_r2'],
+        'AIC': r['aic'],
+        'BIC': r['bic'],
+        'Converged': r.get('converged', False),
+    } for r in model_results])
+    comparison_df['ΔR²'] = comparison_df['McFadden R²'].diff().fillna(comparison_df['McFadden R²'])
+
+    block_tests = [r.get('lr_test') for r in model_results if r.get('lr_test') is not None]
+
+    return {
+        'models': models,
+        'comparison': comparison_df,
+        'block_tests': block_tests,
+        'model_results': model_results,
+    }
 
 
 
@@ -727,6 +943,62 @@ def format_ols_coefficients(
     return pd.DataFrame(rows)
 
 
+def format_binomial_coefficients(
+    result,
+    alpha: float = 0.05,
+) -> pd.DataFrame:
+    """
+    Extract binomial GLM coefficients with standard errors, CIs, and odds ratios.
+
+    Parameters
+    ----------
+    result : statsmodels GLMResults
+        Fitted binomial GLM result.
+    alpha : float
+        Significance level for confidence intervals.
+
+    Returns
+    -------
+    pd.DataFrame
+    """
+    params = result.params
+    conf = result.conf_int(alpha=alpha)
+    pvalues = result.pvalues
+    bse = result.bse
+    zvalues = result.tvalues
+
+    rows = []
+    for var in params.index:
+        coef = params[var]
+        ci_low = conf.loc[var, 0]
+        ci_high = conf.loc[var, 1]
+        p = pvalues[var]
+        z = zvalues[var]
+
+        sig = ''
+        if p < 0.001:
+            sig = '***'
+        elif p < 0.01:
+            sig = '**'
+        elif p < alpha:
+            sig = '*'
+
+        row = {
+            'Variable': var,
+            'Coef (β)': round(coef, 4),
+            'SE': round(bse[var], 4),
+            'z': round(z, 3),
+            'p-value': round(p, 4),
+            f'CI {(1-alpha)*100:.0f}% Lower': round(ci_low, 4),
+            f'CI {(1-alpha)*100:.0f}% Upper': round(ci_high, 4),
+            'Odds Ratio': round(np.exp(coef), 4),
+            'Sig': sig,
+        }
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
 # =========================================================================
 # VARIANCE PARTITIONING PLOTS  (Day | Night panel)
 # =========================================================================
@@ -833,9 +1105,8 @@ def plot_variance_partitioning_panel(
 
     if output_path:
         output_path = Path(output_path)
-        fig.savefig(output_path, dpi=dpi, bbox_inches='tight')
-        fig.savefig(output_path.with_suffix('.pdf'), bbox_inches='tight')
-        print(f"    ✓ Saved: {output_path.name} + .pdf")
+        _export_figure_all_formats(fig, output_path, dpi=dpi)
+        print(f"    ✓ Saved: {output_path.name} + .svg + .pdf")
 
     if not show:
         plt.close(fig)
@@ -875,7 +1146,7 @@ def plot_data_composition_donut(
     title : str
         Overall figure title.
     output_path : Path, optional
-        Save path (PNG; PDF auto-generated).
+        Save path (SVG output).
     figsize : tuple
         Figure size.
     dpi : int
@@ -896,9 +1167,12 @@ def plot_data_composition_donut(
     if len(periods) == 1:
         axes = [axes]
 
-    # Ring geometry (inner → outer)
-    radii = [0.50, 0.78, 1.06]      # outer edge of each ring
-    widths = [0.22, 0.22, 0.22]
+    # Ring geometry (inner → outer) — dynamically spaced for any number of blocks
+    n_rings = len(block_columns)
+    ring_width = 0.22
+    ring_gap = 0.06
+    radii = [0.50 + i * (ring_width + ring_gap) for i in range(n_rings)]
+    widths = [ring_width] * n_rings
 
     # Collect legend handles to build one unified legend
     legend_handles_all = []
@@ -976,9 +1250,8 @@ def plot_data_composition_donut(
 
     if output_path:
         output_path = Path(output_path)
-        fig.savefig(output_path, dpi=dpi, bbox_inches='tight')
-        fig.savefig(output_path.with_suffix('.pdf'), bbox_inches='tight')
-        print(f"    ✓ Saved: {output_path.name} + .pdf")
+        _export_figure_all_formats(fig, output_path, dpi=dpi)
+        print(f"    ✓ Saved: {output_path.name} + .svg + .pdf")
 
     if not show:
         plt.close(fig)
@@ -1018,7 +1291,7 @@ def plot_data_composition_sankey(
     title : str
         Overall figure title.
     output_path : Path, optional
-        Save path (PNG; PDF auto-generated).
+        Save path (SVG output).
     figsize : tuple
         Figure size.
     dpi : int
@@ -1042,11 +1315,18 @@ def plot_data_composition_sankey(
     if len(periods) == 1:
         axes = [axes]
 
-    # Layout constants
-    x_left = [0.22, 0.48, 0.74]   # left edge of each node column
+    # Layout constants — dynamically spaced for any number of blocks
+    n_cols = len(block_columns)
     node_w = 0.04                  # node width
     gap = 0.03                     # vertical gap between nodes
     min_node_h = 0.04              # minimum node height for label legibility
+    x_start = 0.22
+    x_end = 0.74
+    if n_cols > 1:
+        x_spacing = (x_end - x_start) / (n_cols - 1)
+    else:
+        x_spacing = 0
+    x_left = [x_start + i * x_spacing for i in range(n_cols)]
 
     for ax, period in zip(axes, periods):
         subset = df[df['period'] == period]
@@ -1168,7 +1448,8 @@ def plot_data_composition_sankey(
                     fontweight='bold', fontstyle='italic')
 
         # ── 5. Total polygon count ─────────────────────────────
-        ax.text(x_left[1] + node_w / 2, 1.06, f'n = {total} polygons',
+        mid_x_pos = (x_left[0] + x_left[-1] + node_w) / 2
+        ax.text(mid_x_pos, 1.06, f'n = {total} polygons',
                 ha='center', va='bottom', fontsize=13,
                 fontweight='bold', color='#333333')
 
@@ -1182,9 +1463,8 @@ def plot_data_composition_sankey(
 
     if output_path:
         output_path = Path(output_path)
-        fig.savefig(output_path, dpi=dpi, bbox_inches='tight')
-        fig.savefig(output_path.with_suffix('.pdf'), bbox_inches='tight')
-        print(f"    ✓ Saved: {output_path.name} + .pdf")
+        _export_figure_all_formats(fig, output_path, dpi=dpi)
+        print(f"    ✓ Saved: {output_path.name} + .svg + .pdf")
 
     if not show:
         plt.close(fig)
@@ -1202,6 +1482,7 @@ def plot_coefficient_forest_panel(
     title: str,
     output_path: Optional[Path] = None,
     figsize: Optional[Tuple[float, float]] = None,
+    max_abs_display: Optional[float] = None,
     dpi: int = 300,
     show: bool = True,
 ) -> plt.Figure:
@@ -1220,6 +1501,10 @@ def plot_coefficient_forest_panel(
         Save path.
     figsize : tuple, optional
         Auto-sized if None.
+    max_abs_display : float, optional
+        If provided, clip the displayed coefficient axis to ``±max_abs_display``.
+        This is useful when a few unstable coefficients produce enormous
+        confidence intervals that would otherwise hide the interpretable range.
     dpi : int
         Resolution.
     show : bool
@@ -1235,9 +1520,9 @@ def plot_coefficient_forest_panel(
     if len(plot_day) == 0:
         return None
 
-    n = len(plot_day)
+    n_max = max(len(plot_day), len(plot_night))
     if figsize is None:
-        figsize = (14, max(4, n * 0.45))
+        figsize = (14, max(4, n_max * 0.45))
 
     fig, (ax_day, ax_night) = plt.subplots(1, 2, figsize=figsize, sharey=False)
 
@@ -1246,11 +1531,24 @@ def plot_coefficient_forest_panel(
 
     for ax, plot_df, period_label in [(ax_day, plot_day, 'Day'),
                                        (ax_night, plot_night, 'Night')]:
-        y_pos = range(n)
+        n_panel = len(plot_df)
+        y_pos = np.arange(n_panel)
         coefs = plot_df['Coef (β)'].values
         ci_lower = plot_df[ci_lower_col].values
         ci_upper = plot_df[ci_upper_col].values
-        errors = np.array([coefs - ci_lower, ci_upper - coefs])
+
+        if max_abs_display is not None:
+            clipped_coefs = np.clip(coefs, -max_abs_display, max_abs_display)
+            clipped_lower = np.clip(ci_lower, -max_abs_display, max_abs_display)
+            clipped_upper = np.clip(ci_upper, -max_abs_display, max_abs_display)
+            left_truncated = ci_lower < -max_abs_display
+            right_truncated = ci_upper > max_abs_display
+            errors = np.array([clipped_coefs - clipped_lower, clipped_upper - clipped_coefs])
+        else:
+            clipped_coefs = coefs
+            left_truncated = np.zeros_like(coefs, dtype=bool)
+            right_truncated = np.zeros_like(coefs, dtype=bool)
+            errors = np.array([coefs - ci_lower, ci_upper - coefs])
 
         # Colour by significance
         colors = []
@@ -1260,18 +1558,35 @@ def plot_coefficient_forest_panel(
             else:
                 colors.append('#999999')
 
-        ax.errorbar(coefs, y_pos, xerr=errors, fmt='o', color='black',
+        ax.errorbar(clipped_coefs, y_pos, xerr=errors, fmt='o', color='black',
                     ecolor='grey', elinewidth=1.5, capsize=3, markersize=0, zorder=3)
-        ax.scatter(coefs, y_pos, c=colors, s=80, zorder=5, edgecolors='black', linewidths=0.5)
+        ax.scatter(clipped_coefs, y_pos, c=colors, s=80, zorder=5, edgecolors='black', linewidths=0.5)
         ax.axvline(x=0, color='black', linestyle='--', linewidth=0.8, alpha=0.5)
 
-        # Labels (only on left panel)
+        if max_abs_display is not None:
+            if left_truncated.any():
+                ax.scatter(np.full(left_truncated.sum(), -max_abs_display),
+                           y_pos[left_truncated], marker='<', c='grey', s=40, zorder=6)
+            if right_truncated.any():
+                ax.scatter(np.full(right_truncated.sum(), max_abs_display),
+                           y_pos[right_truncated], marker='>', c='grey', s=40, zorder=6)
+            n_truncated = int(left_truncated.sum() + right_truncated.sum())
+            if n_truncated > 0:
+                ax.text(0.02, 0.96,
+                        f'{n_truncated} CI bound(s) truncated at ±{max_abs_display:g}',
+                        transform=ax.transAxes, ha='left', va='top',
+                        fontsize=8, color='#555555',
+                        bbox={'facecolor': 'white', 'edgecolor': 'none', 'alpha': 0.8, 'pad': 1.5})
+            ax.set_xlim(-max_abs_display, max_abs_display)
+
+        # Labels
         labels = plot_df['Variable'].apply(
             lambda v: v.replace('Climate_Class_', 'Climate: ')
                        .replace('Geology_Class_', 'Geology: ')
                        .replace('Elevation_Class_', 'Elevation: ')
+                       .replace('Landcover_Class_', 'Landcover: ')
         ).values
-        ax.set_yticks(y_pos)
+        ax.set_yticks(range(n_panel))
         ax.set_yticklabels(labels, fontsize=9)
         ax.set_xlabel('Coefficient (β)', fontsize=11)
         ax.set_title(period_label, fontsize=12, fontweight='bold')
@@ -1297,9 +1612,8 @@ def plot_coefficient_forest_panel(
 
     if output_path:
         output_path = Path(output_path)
-        fig.savefig(output_path, dpi=dpi, bbox_inches='tight')
-        fig.savefig(output_path.with_suffix('.pdf'), bbox_inches='tight')
-        print(f"    ✓ Saved: {output_path.name} + .pdf")
+        _export_figure_all_formats(fig, output_path, dpi=dpi)
+        print(f"    ✓ Saved: {output_path.name} + .svg + .pdf")
 
     if not show:
         plt.close(fig)
@@ -1407,9 +1721,8 @@ def plot_skewness_diagnostic(
 
     if output_path:
         output_path = Path(output_path)
-        fig.savefig(output_path, dpi=dpi, bbox_inches='tight')
-        fig.savefig(output_path.with_suffix('.pdf'), bbox_inches='tight')
-        print(f"    ✓ Saved: {output_path.name} + .pdf")
+        _export_figure_all_formats(fig, output_path, dpi=dpi)
+        print(f"    ✓ Saved: {output_path.name} + .svg + .pdf")
 
     if not show:
         plt.close(fig)

@@ -4,32 +4,41 @@
 
 Reproducible Land Surface Temperature (LST) modeling and Urban Heat Island (UHI) hotspot analysis for Nigerian cities. The project integrates multi-source satellite data (MODIS, ERA5-Land, MSG SEVIRI), stakeholder survey data from workshops organized, and landscape assessment to identify, quantify, and validate persistent heat events across multiple study cities.
 
-**Study cities:** 50 Nigerian cities (configurable in `config.py`)  
+**Study cities:** 67 Nigerian cities ≥300k population (UN WUP 2025) → 58 unique AOIs after spatial deduplication (configurable in `config.py`)  
 **Test cities:** Lagos, Abuja, Kano, Jos, Port Harcourt  
 **Workshop cities:** Individuals from 28 cities across Nigeria were in attendance (stakeholder survey)  
 **Study year:** 2024/2025  
 
 ---
 
-## Valid City Names (50)
+## Valid City Names (67 cities ≥300k → 58 AOIs)
 
-The pipeline recognises **exactly** these 50 city names from the population CSV. Spelling and capitalisation must match — the runner will flag typos and suggest corrections.
+The pipeline uses **67 cities** from the UN WUP 2025 dataset with population ≥300k (2024 estimates). After spatial deduplication in Notebook 01 (merging overlapping AOIs), this produces **58 unique AOIs**. Spelling and capitalisation must match — the runner will flag typos and suggest corrections.
 
 <details>
-<summary>Click to expand full list</summary>
+<summary>Click to expand full list (67 cities, sorted alphabetically)</summary>
 
-| # | City | # | City | # | City | # | City | # | City |
-|---|------|---|------|---|------|---|------|---|------|
-| 1 | Aba | 11 | Effon Alaiye | 21 | Ikot Ekpene | 31 | Maiduguri | 41 | Owerri |
-| 2 | Abakaliki | 12 | Enugu | 22 | Ilesha | 32 | Makurdi | 42 | Oyo |
-| 3 | Abeokuta | 13 | Gboko | 23 | Ilorin | 33 | Minna | 43 | Port Harcourt |
-| 4 | Abuja | 14 | Gombe | 24 | Jos | 34 | Nnewi | 44 | Potiskum |
-| 5 | Ado-Ekiti | 15 | Gwagwalada | 25 | Kaduna | 35 | Ogbomosho | 45 | Saki |
-| 6 | Akure | 16 | Ibadan | 26 | Kano | 36 | Okene | 46 | Sokoto |
-| 7 | Bauchi | 17 | Ife | 27 | Katsina | 37 | Okpogho | 47 | Umuahia |
-| 8 | Benin City | 18 | Igbidu | 28 | Lafia | 38 | Ondo | 48 | Uyo |
-| 9 | Birnin Kebbi | 19 | Ijebu-Ode | 29 | Lagos | 39 | Onitsha | 49 | Warri |
-| 10 | Calabar | 20 | Ikorodu | 30 | Lokoja | 40 | Oshogbo | 50 | Zaria |
+| # | City | # | City | # | City | # | City |
+|---|------|---|------|---|------|---|------|
+| 1 | Aba | 18 | Enugu | 35 | Kaduna | 52 | Oron |
+| 2 | Abakaliki | 19 | Erin-osun | 36 | Kano | 53 | Oshogbo |
+| 3 | Abeokuta | 20 | Gamboru | 37 | Katsina | 54 | Otite |
+| 4 | Aboh | 21 | Gboko | 38 | KUNDULUN | 55 | Owerri |
+| 5 | Abonnema | 22 | Gusau | 39 | Lagos | 56 | Oyigbo |
+| 6 | Abuja | 23 | Gwagwalada | 40 | Lokoja | 57 | Oyo |
+| 7 | Ado Ekiti | 24 | Ibadan | 41 | Madalla | 58 | Port Harcourt |
+| 8 | Akure | 25 | Ife | 42 | Maiduguri | 59 | Potiskum |
+| 9 | Asaba | 26 | Ijebu-Ode | 43 | Makurdi | 60 | Saki |
+| 10 | Bauchi | 27 | Ikare | 44 | Minna | 61 | Sapele |
+| 11 | Benin City | 28 | Ikere-Ekiti | 45 | Nsukka | 62 | Sokoto |
+| 12 | Bida | 29 | Ikorodu | 46 | Ogale | 63 | Titi |
+| 13 | Bonny | 30 | Ikot Ekpene | 47 | Ogbomosho | 64 | Ughelli |
+| 14 | Calabar | 31 | Ilesa | 48 | Ondo | 65 | Umuahia |
+| 15 | Daura | 32 | Ilorin | 49 | Onitsha | 66 | Uyo |
+| 16 | Dere | 33 | Iseyin | 50 | Warri | 67 | Yenagoa |
+| 17 | | 34 | Jos | 51 | Yola | | Zaria |
+
+> **Note:** 9 cities are absorbed into parent AOIs during spatial deduplication (e.g., Ikorodu → Lagos), resulting in 58 unique AOIs.
 
 </details>
 
@@ -169,7 +178,7 @@ Timings below were measured on a modest development workstation:
 | **04** Daily LST + SEVIRI | 45–90 min | 10–18 min | GEE + EUMETSAT download (network-bound) |
 | **05** Hotspot Analysis | 20–30 min | 4–6 min | Gi\* statistics, KDE, population exposure |
 
-> **Tip:** For 50 cities (`CITY_SELECTION_MODE = "ALL"`), expect 8–12 hours total.  
+> **Tip:** For 67 cities (`CITY_SELECTION_MODE = "ABOVE_300K"`), expect 8–12 hours total.  
 > Use `"TEST"` mode (5 cities) for development/debugging (~2–3 hours total).
 
 ### Visualization and Output Logic
@@ -191,24 +200,28 @@ City selection is controlled in **`config.py`** via `CITY_SELECTION_MODE`. Edit 
 
 | Mode | Description | Cities |
 |------|-------------|--------|
-| `"ALL"` | All cities in the CSV file | 50 cities |
-| `"ABOVE_1M"` | Cities with population ≥ 1 million (default) | 16 cities |
+| `"ALL"` | All cities in the CSV file | 791 cities |
+| `"ABOVE_1M"` | Cities with population ≥ 1 million | 17 cities |
+| `"ABOVE_500K"` | Cities with population ≥ 500k | 37 cities |
+| `"ABOVE_300K"` | Cities with population ≥ 300k (default) | 67 cities → 58 AOIs |
 | `"TEST"` | Quick development/debugging runs | Lagos, Abuja, Kano, Jos, Port Harcourt |
-| `"SPECIFIC"` | User-specified custom selection | Any from 50 valid cities |
+| `"SPECIFIC"` | User-specified custom selection | Any from 791 valid cities |
 
 ```python
 # In config.py — change this line:
-CITY_SELECTION_MODE = "ALL"       # All 50 cities in CSV
-CITY_SELECTION_MODE = "ABOVE_1M"  # 16 cities >= 1M population (default)
-CITY_SELECTION_MODE = "TEST"      # 5 test cities for quick runs
-CITY_SELECTION_MODE = "SPECIFIC"  # Custom selection (edit SELECTED_CITIES below)
+CITY_SELECTION_MODE = "ALL"        # All 791 cities in CSV
+CITY_SELECTION_MODE = "ABOVE_1M"   # 17 cities >= 1M population
+CITY_SELECTION_MODE = "ABOVE_500K" # 37 cities >= 500k population
+CITY_SELECTION_MODE = "ABOVE_300K" # 67 cities >= 300k population (default)
+CITY_SELECTION_MODE = "TEST"       # 5 test cities for quick runs
+CITY_SELECTION_MODE = "SPECIFIC"   # Custom selection (edit SELECTED_CITIES below)
 
 # For SPECIFIC mode, populate this list:
 SELECTED_CITIES = ["Lagos", "Enugu", "Maiduguri"]  # Any valid cities
 ```
 
-**Cities with population ≥ 1 million (2024):**
-Lagos, Kano, Abuja, Ibadan, Port Harcourt, Benin City, Onitsha, Uyo, Nnewi, Aba, Kaduna, Ikorodu, Ilorin, Warri, Owerri, Jos
+**Cities with population ≥ 1 million (2024, WUP 2025):**
+Lagos, Onitsha, Kano, Owerri, Ibadan, Port Harcourt, Kaduna, Benin City, Warri, Uyo, Aba, Aboh, Abuja, Ilorin, Maiduguri, Enugu, Otite
 
 ### City Selection Flow
 
