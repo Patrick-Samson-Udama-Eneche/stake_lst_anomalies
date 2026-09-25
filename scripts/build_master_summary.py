@@ -1187,8 +1187,11 @@ def write_build_log(layers, dd, out_dir: Path, sources: dict):
 def write_checksums(out_dir: Path):
     lines = []
     for p in sorted(out_dir.rglob("*")):
-        if p.is_file() and "_build" not in p.relative_to(out_dir).parts:
-            lines.append(f"{md5(p)}  {p.relative_to(out_dir).as_posix()}")
+        rel = p.relative_to(out_dir)
+        # never checksum the manifest itself: it exists on a rebuild but not on a
+        # first build, which would otherwise make the listing non-deterministic
+        if p.is_file() and "_build" not in rel.parts and rel.name != "checksums_md5.txt":
+            lines.append(f"{md5(p)}  {rel.as_posix()}")
     (out_dir / "checksums_md5.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return len(lines)
 
