@@ -37,10 +37,12 @@ except ImportError:  # pragma: no cover
 
 # ── constants ───────────────────────────────────────────────────────────────
 VERSION = "1.0.0"
-DATASET_STEM = "ng56_diurnal_thermal_anomalies"
+DATASET_STEM = "diurnal_thermal_anomaly_summary"   # protocol-generic; the instance
+                                                   # (region, city set, years) lives in dataset_info
 CRS_ANALYSIS = "ESRI:102022"          # Africa Albers Equal Area Conic
 CRS_WGS84 = "EPSG:4326"
-STUDY_YEAR = 2024                      # event-scale year
+STUDY_YEAR = int(__import__("os").environ.get("LST_STUDY_YEAR", "2024"))  # event-scale year;
+                                       # overridden by --study-year / discovered from sources
 TREND_FIRST, TREND_LAST = 2006, 2025
 H3_RES = 8
 
@@ -136,66 +138,66 @@ def build_city_zones(ref):
     return gdf
 
 
-# ── layer 2: city_summary ───────────────────────────────────────────────────
-def build_city_summary(ref, zones, spots):
-    ce = pd.read_csv(R04 / "city_heat_event_summary.csv")
+# ── layers 2a/2b: city_profile (stable) + city_year_summary (per study year) ──
+# Split so that re-running the protocol for another year appends a city_year_summary
+# row instead of overwriting the city's stable attributes.
+def build_city_profile(ref, zones):
+    """Year-independent city attributes: PLT classes, zone geometry-derived areas, population."""
     df = ref.copy()
-
-    # ERA5 persistence (issue A: ERA5 only; MODIS hot-day frequency dropped)
-    for p in PERIODS:
-        for src, dst in (("n_persistent_events", f"era5_{p}_n_persistent_events"),
-                         ("longest_event_days", f"era5_{p}_longest_event_days"),
-                         ("total_persistent_days", f"era5_{p}_total_persistent_days"),
-                         ("n_hot_days", f"era5_{p}_n_hot_days")):
-            col = f"era5_{p}_{src}"
-            df[dst] = df["city"].map(ce.set_index("city")[col]) if col in ce.columns else np.nan
-    # selected event + MODIS<->ERA5-Land comparison
-    for p in PERIODS:
-        for src, dst in ((f"{p}_sel_start", f"{p}_selected_event_start"),
-                         (f"{p}_sel_end", f"{p}_selected_event_end"),
-                         (f"{p}_sel_duration_days", f"{p}_selected_event_duration_days"),
-                         (f"{p}_sel_tier", f"{p}_selected_event_tier"),
-                         (f"{p}_corr_n", f"{p}_modis_era5land_n"),
-                         (f"{p}_corr_r", f"{p}_modis_era5land_r"),
-                         (f"{p}_corr_r2", f"{p}_modis_era5land_r2"),
-                         (f"{p}_corr_bias", f"{p}_modis_era5land_bias_c"),
-                         (f"{p}_corr_rmse", f"{p}_modis_era5land_rmse_c"),
-                         (f"{p}_corr_mae", f"{p}_modis_era5land_mae_c")):
-            df[dst] = df["city"].map(ce.set_index("city")[src]) if src in ce.columns else np.nan
-
-    # spot counts per period x type, zeros included (issue C)
-    cnt = (spots.groupby(["city_slug", "period", "spot_type"]).size()
-           .rename("n").reset_index())
-    for p in PERIODS:
-        for t in SPOT_TYPES:
-            sub = cnt[(cnt.period == p) & (cnt.spot_type == t)].set_index("city_slug")["n"]
-            df[f"n_{t}_{p}_spots"] = df["city_slug"].map(sub).fillna(0).astype(int)
-    bh = (spots[spots["bh_significant"].astype(str).str.lower().isin(["true", "1"])]
-          .groupby(["city_slug", "period", "spot_type"]).size().rename("n").reset_index())
-    for p in PERIODS:
-        for t in SPOT_TYPES:
-            sub = bh[(bh.period == p) & (bh.spot_type == t)].set_index("city_slug")["n"]
-            df[f"n_{t}_{p}_bh_significant"] = df["city_slug"].map(sub).fillna(0).astype(int)
-
-    # city-level roll-up flags
-    mcc = pd.read_csv(R05 / "master_city_composite.csv")
-    for src, dst in (("validation_tier", "validation_tier"), ("bh_any", "bh_any")):
-        if src in mcc.columns:
-            df[dst] = df["city"].map(mcc.set_index("city")[src])
-
-    # stakeholder participants per city
     pts = gpd.read_file(R02 / "Data" / "Cities_Stakeholder_Points_2024.geojson")
     if "total_attendees" in pts.columns:
         df["n_participants"] = df["city"].map(
             pts.set_index("city")["total_attendees"]).fillna(0).astype(int)
-
-    df["study_year"] = STUDY_YEAR
-    # UC centroid as the point geometry
     uc = zones[zones.zone == "uc"].set_index("city_slug").geometry
     geom = df["city_slug"].map(lambda s: uc[s].centroid if s in uc.index else None)
     gdf = gpd.GeoDataFrame(df, geometry=gpd.GeoSeries(geom.values, crs=CRS_ANALYSIS),
                            crs=CRS_ANALYSIS)
     return gdf.sort_values("city_slug").reset_index(drop=True)
+
+
+def build_city_year_summary(ref, spots, study_year=STUDY_YEAR):
+    """Per-year city record: ERA5-Land persistence, selected events, sensor comparison, spot counts."""
+    ce = pd.read_csv(R04 / "city_heat_event_summary.csv")
+    df = ref[["city_slug", "city", "cluster25"]].copy()
+    df["study_year"] = study_year
+
+    # ERA5-Land persistence only (issue A); MODIS hot-day frequency is dropped
+    for p_ in PERIODS:
+        for src, dst in (("n_persistent_events", f"era5_{p_}_n_persistent_events"),
+                         ("longest_event_days", f"era5_{p_}_longest_event_days"),
+                         ("total_persistent_days", f"era5_{p_}_total_persistent_days"),
+                         ("n_hot_days", f"era5_{p_}_n_hot_days")):
+            col = f"era5_{p_}_{src}"
+            df[dst] = df["city"].map(ce.set_index("city")[col]) if col in ce.columns else np.nan
+    for p_ in PERIODS:
+        for src, dst in ((f"{p_}_sel_start", f"{p_}_selected_event_start"),
+                         (f"{p_}_sel_end", f"{p_}_selected_event_end"),
+                         (f"{p_}_sel_duration_days", f"{p_}_selected_event_duration_days"),
+                         (f"{p_}_sel_tier", f"{p_}_selected_event_tier"),
+                         (f"{p_}_corr_n", f"{p_}_modis_era5land_n"),
+                         (f"{p_}_corr_r", f"{p_}_modis_era5land_r"),
+                         (f"{p_}_corr_r2", f"{p_}_modis_era5land_r2"),
+                         (f"{p_}_corr_bias", f"{p_}_modis_era5land_bias_c"),
+                         (f"{p_}_corr_rmse", f"{p_}_modis_era5land_rmse_c"),
+                         (f"{p_}_corr_mae", f"{p_}_modis_era5land_mae_c")):
+            df[dst] = df["city"].map(ce.set_index("city")[src]) if src in ce.columns else np.nan
+
+    sy = spots[spots["study_year"] == study_year] if "study_year" in spots.columns else spots
+    cnt = sy.groupby(["city_slug", "period", "spot_type"]).size().rename("n").reset_index()
+    bh = (sy[sy["bh_significant"].astype(str).str.lower().isin(["true", "1"])]
+          .groupby(["city_slug", "period", "spot_type"]).size().rename("n").reset_index())
+    for p_ in PERIODS:
+        for t in SPOT_TYPES:
+            a = cnt[(cnt.period == p_) & (cnt.spot_type == t)].set_index("city_slug")["n"]
+            df[f"n_{t}_{p_}_spots"] = df["city_slug"].map(a).fillna(0).astype(int)
+            b = bh[(bh.period == p_) & (bh.spot_type == t)].set_index("city_slug")["n"]
+            df[f"n_{t}_{p_}_bh_significant"] = df["city_slug"].map(b).fillna(0).astype(int)
+
+    mcc = pd.read_csv(R05 / "master_city_composite.csv")
+    for c in ("validation_tier", "bh_any"):
+        if c in mcc.columns:
+            df[c] = df["city"].map(mcc.set_index("city")[c])
+    return df.sort_values(["city_slug", "study_year"]).reset_index(drop=True)
 
 
 # ── layers 3-6: trends, annual series, monthly series, climatology ──────────
@@ -374,7 +376,7 @@ DROP_FROM_SPOTS = ["climate_class", "landcover_class", "elevation_class", "geolo
                    "sen_slope_C_per_decade", "mk_p_value", "mk_trend",
                    "n_modis_hot_days", "n_persistent_events", "longest_event_days",
                    "h3_cells_json", "h3_cell_count",
-                   # L75/L90 outlines are real geometries in hotspot_contours; the WKT
+                   # L75/L90 outlines are real geometries in spot_contours; the WKT
                    # strings average ~1.9 kB and would make the CSV unusable.
                    "geom_75_wkt", "geom_90_wkt"]
 
@@ -394,8 +396,9 @@ def build_spots(ref):
                           "zone": "spot_zone"})
     if "study_year" not in g.columns:
         g["study_year"] = STUDY_YEAR
-    front = ["spot_id", "city_slug", "city", "cluster25", "period", "spot_type", "study_year",
-             "spot_zone", "tier", "bh_significant"]
+    g["spot_uid"] = g["study_year"].astype(int).astype(str) + "_" + g["spot_id"].astype(str)
+    front = ["spot_uid", "spot_id", "city_slug", "city", "cluster25", "period", "spot_type",
+             "study_year", "spot_zone", "tier", "bh_significant"]
     g = g[[c for c in front if c in g.columns] + [c for c in g.columns if c not in front + ["geometry"]] + ["geometry"]]
     g = g.to_crs(CRS_ANALYSIS)
     return g.sort_values(["city_slug", "period", "spot_type", "spot_id"]).reset_index(drop=True)
@@ -418,12 +421,14 @@ def build_contours(ref):
                            for i, l in lvl.items()]
     if "study_year" not in g.columns:
         g["study_year"] = STUDY_YEAR
-    keep = ["contour_id", "spot_id", "city_slug", "city", "cluster25", "period", "spot_type",
-            "contour_level", "study_year", "area_km2", "population_persons", "n_pixels_level",
-            "geometry"]
+    g["spot_uid"] = g["study_year"].astype(int).astype(str) + "_" + g["spot_id"].astype(str)
+    g["contour_uid"] = g["spot_uid"] + "_" + g["contour_level"].astype(str)
+    keep = ["contour_uid", "contour_id", "spot_uid", "spot_id", "city_slug", "city", "cluster25",
+            "period", "spot_type", "contour_level", "study_year", "area_km2",
+            "population_persons", "n_pixels_level", "geometry"]
     g = g[[c for c in keep if c in g.columns]].to_crs(CRS_ANALYSIS)
     DEVIATIONS.append(
-        "hotspot_contours: per-contour population and pixel count collapsed to the matching "
+        "spot_contours: per-contour population and pixel count collapsed to the matching "
         "level (population/pop_75/pop_90 -> population_persons). Spot-level LST statistics, "
         "tier and dense_core_pct were not duplicated onto the 441 contour rows; they remain in "
         "`spots` and join on spot_id.")
@@ -454,14 +459,14 @@ def build_h3_grid(spots):
             source = "centroid_fallback"
         for c in cells:
             rows.append({"h3_index": c, "h3_resolution": H3_RES, "cell_source": source,
-                         "spot_id": r.spot_id,
+                         "spot_uid": getattr(r, "spot_uid", None), "spot_id": r.spot_id,
                          "city_slug": r.city_slug, "city": r.city, "cluster25": r.cluster25,
                          "period": r.period, "spot_type": r.spot_type,
                          "study_year": getattr(r, "study_year", STUDY_YEAR)})
     if not rows:
         DEVIATIONS.append("h3 generation produced no cells — layer 11 omitted.")
         return None
-    df = pd.DataFrame(rows).drop_duplicates(["h3_index", "spot_id"])
+    df = pd.DataFrame(rows).drop_duplicates(["h3_index", "spot_uid"])
     geoms = [Polygon([(lng, lat) for lat, lng in h3.cell_to_boundary(c)]) for c in df["h3_index"]]
     gdf = gpd.GeoDataFrame(df, geometry=geoms, crs=CRS_WGS84).to_crs(CRS_ANALYSIS)
     return gdf.sort_values(["city_slug", "spot_id", "h3_index"]).reset_index(drop=True)
@@ -566,7 +571,7 @@ def git_commit() -> str:
         return "[UNKNOWN]"
 
 
-def build_dataset_info(layers):
+def build_dataset_info(layers, n_cities, n_clusters, study_years):
     rows = [
         ("title", "Dataset and protocol associated with the analysis of the diurnal surface "
                   "thermal anomalies across 56 Nigerian cities situated in 16 physiographic "
@@ -579,8 +584,12 @@ def build_dataset_info(layers):
         ("temporal_coverage_modis", f"{TREND_FIRST}-{TREND_LAST} (MODIS Aqua MYD11A1)"),
         ("temporal_coverage_era5", f"{STUDY_YEAR} (ERA5-Land)"),
         ("temporal_coverage_seviri", f"{STUDY_YEAR} selected persistent heat events (MSG-SEVIRI)"),
-        ("n_cities", "56"),
-        ("n_plt_clusters", "16"),
+        ("region", "Nigeria"),
+        ("city_selection_criterion", "[CHECK] record the rule used to select the city set "
+                                     "for this run, e.g. 'UN WUP population >= 300k, 2024'"),
+        ("n_cities", str(n_cities)),
+        ("n_plt_clusters", str(n_clusters)),
+        ("study_years", ", ".join(str(y) for y in study_years)),
         ("licence", "CC BY 4.0"),
         ("build_script", "scripts/build_master_summary.py"),
         ("git_commit", git_commit()),
@@ -707,7 +716,12 @@ DESCR.update({
     "absorbed_by": ("Parent AoI when this settlement was absorbed.", "", "derived", "AoI absorption", "NB01"),
     "land_code25": ("PLT typology code, climate-geology-elevation.", "", "derived", "PLT typology", "NB01"),
     # spot / contour attributes (NB05)
-    "spot_id": ("Spot key.", "", "derived", "keying", "NB05"),
+    "spot_id": ("Spot key as issued by NB05, unique within a study year.", "", "derived", "keying", "NB05"),
+    "spot_uid": ("Year-qualified spot key, study_year and spot_id, unique across study years.", "", "derived", "keying", "this script"),
+    "contour_uid": ("Year-qualified contour key, spot_uid and contour level.", "", "derived", "keying", "this script"),
+    "city_selection_criterion": ("Rule used to select the city set for this run.", "", "derived", "study design", "recorded at build time"),
+    "region": ("Country or region covered by this run.", "", "derived", "study design", "recorded at build time"),
+    "study_years": ("Study years present in the event-scale layers.", "", "derived", "packaging", "this script"),
     "contour_id": ("Contour key, spot_id and contour level.", "", "derived", "keying", "NB05"),
     "spot_zone": ("Zone the spot falls in: urban_core, bra or both.", "", "derived", "zone intersection", "NB05"),
     "tier": ("Delineation tier: 1 for KDE-delineated spots (>= 10 pixels), 2 for buffered isolated pixels.", "", "SEVIRI", "tier assignment", "NB05 section 6"),
@@ -862,27 +876,32 @@ def dictionary_md(dd: pd.DataFrame) -> str:
 
 
 # ── writing ─────────────────────────────────────────────────────────────────
-def write_package(layers, out_dir: Path):
+def write_package(layers, out_dir: Path, with_csv=False, with_geojson=False):
+    """One GeoPackage holds every layer, spatial and aspatial alike. CSV and GeoJSON
+    copies are opt-in so the published folder stays lean."""
     gpkg = out_dir / f"{DATASET_STEM}.gpkg"
-    csv_dir, gj_dir = out_dir / "csv", out_dir / "geojson"
-    for d in (csv_dir, gj_dir):
-        d.mkdir(parents=True, exist_ok=True)
     if gpkg.exists():
         gpkg.unlink()
+    csv_dir, gj_dir = out_dir / "csv", out_dir / "geojson"
+    for d, want in ((csv_dir, with_csv), (gj_dir, with_geojson)):
+        if want:
+            d.mkdir(parents=True, exist_ok=True)
     for name, df in layers.items():
         if df is None:
             continue
-        if isinstance(df, gpd.GeoDataFrame) and df.geometry.notna().any():
+        spatial = isinstance(df, gpd.GeoDataFrame) and df.geometry.notna().any()
+        if spatial:
             pyogrio.write_dataframe(df, gpkg, layer=name, append=gpkg.exists())
-            df.to_crs(CRS_WGS84).to_file(gj_dir / f"{name}.geojson", driver="GeoJSON")
-            df.drop(columns="geometry").to_csv(csv_dir / f"{name}.csv", index=False,
-                                               encoding="utf-8", date_format="%Y-%m-%d")
+            if with_geojson:
+                df.to_crs(CRS_WGS84).to_file(gj_dir / f"{name}.geojson", driver="GeoJSON")
         else:
             plain = df.drop(columns="geometry") if "geometry" in getattr(df, "columns", []) else df
             pyogrio.write_dataframe(pd.DataFrame(plain), gpkg, layer=name, append=gpkg.exists())
+        if with_csv:
+            plain = df.drop(columns="geometry") if "geometry" in getattr(df, "columns", []) else df
             plain.to_csv(csv_dir / f"{name}.csv", index=False, encoding="utf-8",
                          date_format="%Y-%m-%d")
-        log(f"  {name:26} {len(df):>7} rows  {len(df.columns):>3} fields")
+        log(f"  {name:26} {len(df):>7} rows  {len(df.columns):>3} fields{'  [geom]' if spatial else ''}")
     return gpkg
 
 
@@ -896,7 +915,8 @@ def md5(p: Path) -> str:
 
 LAYER_ONE_LINER = {
     "city_zones": "Urban-core, BRA ring and city-region polygons for every city.",
-    "city_summary": "One record per city: PLT classes, zone areas, ERA5-Land persistence, selected events, sensor comparison, spot counts and participants.",
+    "city_profile": "One record per city, year-independent: PLT classes, zone areas, population, participants.",
+    "city_year_summary": "One record per city and study year: ERA5-Land persistence, selected events, sensor comparison, spot counts.",
     "trend_statistics": "Long-term LST trend tests per city, zone and period.",
     "annual_series": "Annual zone values, 2006-2025.",
     "monthly_series": "Monthly zone values, 2006-2025.",
@@ -904,12 +924,12 @@ LAYER_ONE_LINER = {
     "heat_event_catalogue": "Every ERA5-Land persistent heat event, with the selected one flagged.",
     "spot_occurrence": "Spot counts and Gi*/BH-FDR pixel counts on the full city x period x type grid, zeros included.",
     "spots": "One polygon per delineated hot or cold spot (L50 footprint).",
-    "hotspot_contours": "One polygon per KDE contour level (L50, L75, L90).",
+    "spot_contours": "One polygon per KDE contour level (L50, L75, L90), hot and cold spots alike.",
     "h3_grid": "H3 resolution-8 cells covering each spot footprint.",
     "stakeholder_spots_gps": "Stakeholder-marked hot and cold spot locations, pseudonymised.",
     "stakeholder_perception": "Perception responses, one row per participant, pseudonymised.",
     "hitrate_sensitivity": "Stakeholder-satellite agreement across buffer distances.",
-    "city_exposure_halfdonut": "Population exposure by contour level per city, period and spot type.",
+    "city_exposure_by_contour": "Population exposure by contour level per city, period and spot type.",
     "dataset_info": "Dataset metadata as key/value pairs.",
 }
 
@@ -935,7 +955,10 @@ Contact: P. S. U. Eneche.
 
 ## 1. What this dataset contains
 
-A single GeoPackage with {sum(1 for d in layers.values() if d is not None)} layers, plus a CSV copy of every layer and a GeoJSON copy of every spatial layer.
+**One GeoPackage, {sum(1 for d in layers.values() if d is not None)} layers.** Spatial and attribute-only layers live side by side in the same
+file, so there is a single data artefact to cite, download and checksum. CSV and GeoJSON copies
+are not shipped; regenerate them at any time with
+`python scripts/build_master_summary.py --with-csv --with-geojson`.
 
 | layer | rows | contents |
 |---|---|---|
@@ -951,14 +974,16 @@ A single GeoPackage with {sum(1 for d in layers.values() if d is not None)} laye
 
 - `city_slug` is the stable city key; `city` is the display name; `cluster25` is the PLT cluster.
 - `zone` is one of `uc`, `bra`, `cr`, `suhii`; `period` is `day` or `night`; `spot_type` is `hot` or `cold`; `contour_level` is `L50`, `L75` or `L90`.
-- `spot_id` joins `spots`, `hotspot_contours` and `h3_grid`. `participant_code` joins the two stakeholder layers.
+- `spot_uid` (study year + spot id) is the key that joins `spots`, `spot_contours` and `h3_grid`, and stays unique if the protocol is re-run for another year. `spot_id` is kept as issued by NB05 and is unique only within a year.
+- `city_slug` joins `city_profile` (year-independent) to `city_year_summary` and every event-scale layer; add `study_year` when more than one year is present.
+- `participant_code` joins the two stakeholder layers.
 
 ```python
-import geopandas as gpd, pandas as pd
+import geopandas as gpd
 gpkg = "{DATASET_STEM}.gpkg"
-spots = gpd.read_file(gpkg, layer="spots")
-trends = pd.read_csv("csv/trend_statistics.csv").query("zone == 'suhii' and period == 'day'")
-joined = spots.merge(trends, on=["city_slug", "period"], how="left")
+spots  = gpd.read_file(gpkg, layer="spots")                      # polygons
+trends = gpd.read_file(gpkg, layer="trend_statistics")           # attribute-only layer
+joined = spots.merge(trends.query("zone == 'suhii'"), on=["city_slug", "period"], how="left")
 ```
 
 ## 4. Coordinate reference system and coverage
@@ -1072,6 +1097,8 @@ def write_checksums(out_dir: Path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(R05 / "master_summary"))
+    ap.add_argument("--with-csv", action="store_true", help="also write csv/ copies")
+    ap.add_argument("--with-geojson", action="store_true", help="also write geojson/ copies")
     args = ap.parse_args()
     out_dir = Path(args.out)
     (out_dir / "_build").mkdir(parents=True, exist_ok=True)
@@ -1086,7 +1113,8 @@ def main():
 
     layers = {
         "city_zones": zones,
-        "city_summary": build_city_summary(ref, zones, spots),
+        "city_profile": build_city_profile(ref, zones),
+        "city_year_summary": build_city_year_summary(ref, spots),
         "trend_statistics": build_trend_statistics(ref),
         "annual_series": build_annual_series(ref),
         "monthly_series": None,
@@ -1094,18 +1122,21 @@ def main():
         "heat_event_catalogue": build_heat_events(ref),
         "spot_occurrence": build_spot_occurrence(ref, spots),
         "spots": spots,
-        "hotspot_contours": build_contours(ref),
+        "spot_contours": build_contours(ref),
         "h3_grid": build_h3_grid(spots),
         "stakeholder_spots_gps": build_gps(ref, key),
         "stakeholder_perception": build_perception(ref, key),
         "hitrate_sensitivity": build_hitrate(ref),
-        "city_exposure_halfdonut": build_halfdonut(ref),
+        "city_exposure_by_contour": build_halfdonut(ref),
     }
     layers["monthly_series"], layers["monthly_climatology"] = build_monthly(ref)
-    layers["dataset_info"] = build_dataset_info(layers)
+    layers["dataset_info"] = build_dataset_info(
+        layers, n_cities=len(ref), n_clusters=int(ref["cluster25"].nunique()),
+        study_years=sorted({int(y) for y in layers["spots"]["study_year"].dropna().unique()}))
 
     log("Layers:")
-    gpkg = write_package(layers, out_dir)
+    gpkg = write_package(layers, out_dir, with_csv=args.with_csv,
+                         with_geojson=args.with_geojson)
 
     dd = build_dictionary(layers)
     dd.to_csv(out_dir / "data_dictionary.csv", index=False, encoding="utf-8")
@@ -1126,7 +1157,7 @@ def main():
 
     SOURCES = {
         "city_zones": "NB01 `{slug}_{zone}_102022_v5.geojson` + `zone_area_summary_with_pop.csv`",
-        "city_summary": "NB01 `city_cluster25_lookup.csv`, `zone_area_summary_with_pop.csv`, `cluster25_uc_distribution.csv`; NB04 `city_heat_event_summary.csv`; NB05 `master_city_composite.csv`; NB02 `Cities_Stakeholder_Points_2024.geojson`; spot counts from the `spots` layer",
+        "city_profile": "NB01 `city_cluster25_lookup.csv`, `zone_area_summary_with_pop.csv`, `cluster25_uc_distribution.csv`; NB04 `city_heat_event_summary.csv`; NB05 `master_city_composite.csv`; NB02 `Cities_Stakeholder_Points_2024.geojson`; spot counts from the `spots` layer",
         "trend_statistics": "NB03 `all_cities_temporal_annual.csv` (uc/bra/cr) + `all_cities_delta_annual.csv` (suhii)",
         "annual_series": "NB03 `all_cities_temporal_annual.csv` + `all_cities_delta_annual.csv`",
         "monthly_series": "NB03 `all_cities_temporal_monthly.csv` + `all_cities_delta_monthly.csv`",
@@ -1134,12 +1165,12 @@ def main():
         "heat_event_catalogue": "NB04 `events/{city}_event_audit.json` (56 files)",
         "spot_occurrence": "NB05 `spot_comprehensive_summary.csv` on a full 56x2x2 grid + counts from `spots`",
         "spots": "NB05 `all_cities_hotspots.geojson`",
-        "hotspot_contours": "NB05 `master_hotspot_gdf.gpkg::hotspot_contours`",
+        "spot_contours": "NB05 `master_hotspot_gdf.gpkg::hotspot_contours` (hot and cold)",
         "h3_grid": f"generated: H3 res {H3_RES} indexing of the `spots` L50 footprints",
         "stakeholder_spots_gps": "NB05 `master_hotspot_gdf.gpkg::stakeholder_{hot,cold}spot_gps`, keys only",
         "stakeholder_perception": "NB02 `Stakeholder_Perception_Data_2024.csv` + `workshop_attendees_clean.csv`",
         "hitrate_sensitivity": "NB05 `stakeholder_hitrate_sensitivity.csv`",
-        "city_exposure_halfdonut": "NB05 `halfdonut_city_summary.csv`",
+        "city_exposure_by_contour": "NB05 `halfdonut_city_summary.csv`",
         "dataset_info": "generated by this script",
     }
     DEVIATIONS.extend([
@@ -1151,7 +1182,7 @@ def main():
         "the L50 footprints. One spot (port_harcourt_nh_T1_002, 0.135 km2) is smaller than a "
         "res-8 cell and uses the centroid_fallback, flagged in the `cell_source` field.",
         "`spots`: geom_75_wkt and geom_90_wkt were dropped. They averaged ~1.9 kB per row and "
-        "the L75/L90 outlines are real geometries in `hotspot_contours`.",
+        "the L75/L90 outlines are real geometries in `spot_contours`.",
         "`pct_dominant_class` is taken from NB01 cluster25_uc_distribution.csv (percent of the "
         "urban core in the assigned Cluster25). The like-named field in master_hotspot_gdf holds "
         "a different, much smaller quantity and was not carried over.",
