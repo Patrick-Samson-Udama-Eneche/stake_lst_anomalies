@@ -117,6 +117,99 @@ def load_reference():
     return ref.sort_values("city_slug").reset_index(drop=True)
 
 
+
+# ── scenario: the config that makes one complete run distinct ───────────────
+# Every layer carries `scenario_id`, an 8-character digest of these parameters, so
+# runs made under different settings (city-selection rule, thresholds, study year)
+# coexist in one package and can be filtered apart.
+def capture_scenario():
+    sys.path.insert(0, str(ROOT))
+    sys.path.insert(0, str(ROOT / "src"))
+    import config as cfg
+    try:
+        from daily_analysis_utils import _DEFAULT_PERCENTILE, _DEFAULT_PERSISTENT
+    except Exception:
+        _DEFAULT_PERCENTILE, _DEFAULT_PERSISTENT = 90, 2
+    mode = getattr(cfg, "CITY_SELECTION_MODE", "[UNKNOWN]")
+    n_cand = {"ABOVE_1M": len(getattr(cfg, "CITIES_ABOVE_1M", [])),
+              "ABOVE_500K": len(getattr(cfg, "CITIES_ABOVE_500K", [])),
+              "ABOVE_300K": len(getattr(cfg, "CITIES_ABOVE_300K", []))}.get(mode)
+    params = [
+        ("city_selection_mode", mode, "config.py CITY_SELECTION_MODE"),
+        ("city_selection_rule", {"ABOVE_1M": "UN WUP 2024 population >= 1,000,000",
+                                 "ABOVE_500K": "UN WUP 2024 population >= 500,000",
+                                 "ABOVE_300K": "UN WUP 2024 population >= 300,000",
+                                 "ALL": "all UN WUP 2025 Nigerian cities",
+                                 }.get(mode, "[CHECK] custom selection"), "config.py"),
+        ("n_candidate_cities", n_cand, "config.py CITIES_* list length"),
+        ("study_year", getattr(cfg, "PROJECT_STUDY_YEAR", None), "config.py PROJECT_STUDY_YEAR"),
+        ("analysis_crs", getattr(cfg, "ANALYSIS_CRS", None), "config.py ANALYSIS_CRS"),
+        ("smod_uc_classes", str(getattr(cfg, "SMOD_UC_CLASSES", "")), "config.py SMOD_UC_CLASSES"),
+        ("smod_builtup_classes", str(getattr(cfg, "SMOD_BUILTUP_CLASSES", "")), "config.py"),
+        ("smod_merge_radius_m", getattr(cfg, "SMOD_MERGE_RADIUS_M", None), "config.py"),
+        ("bra_buffer_m", getattr(cfg, "BRA_BUFFER_M", None), "config.py BRA_BUFFER_M"),
+        ("bra_tolerance", getattr(cfg, "BRA_TOLERANCE", None), "config.py BRA_TOLERANCE"),
+        ("bra_max_dist_m", getattr(cfg, "BRA_MAX_DIST_M", None), "config.py"),
+        ("bra_min_ring_m", getattr(cfg, "BRA_MIN_RING_M", None), "config.py"),
+        ("jrc_occurrence_threshold_pct", getattr(cfg, "JRC_OCCURRENCE_THRESHOLD", None), "config.py"),
+        ("jrc_min_water_area_m2", getattr(cfg, "JRC_MIN_WATER_AREA_M2", None), "config.py"),
+        ("era5_min_pixels", getattr(cfg, "ERA5_MIN_PIXELS", None), "config.py ERA5_MIN_PIXELS"),
+        ("event_percentile", _DEFAULT_PERCENTILE, "src/daily_analysis_utils.py _DEFAULT_PERCENTILE"),
+        ("event_min_consecutive_days", _DEFAULT_PERSISTENT, "src/daily_analysis_utils.py _DEFAULT_PERSISTENT"),
+        ("gistar_z_hot", 1.96, "NB05 GISTAR_Z_HOT"),
+        ("gistar_z_cold", -1.96, "NB05 GISTAR_Z_COLD"),
+        ("bh_fdr_alpha", getattr(cfg, "HOTSPOT_FDR_ALPHA", 0.05), "NB05 FDR_ALPHA"),
+        ("kde_contour_levels", str(getattr(cfg, "KDE_CONTOUR_LEVELS", [0.50, 0.75, 0.90])), "NB05 KDE_CONTOURS"),
+        ("h3_resolution", H3_RES, "this script"),
+        ("random_state", getattr(cfg, "RANDOM_STATE", None), "config.py RANDOM_STATE"),
+    ]
+    canon = json.dumps({k: str(v) for k, v, _ in params}, sort_keys=True, separators=(",", ":"))
+    sid = hashlib.sha1(canon.encode("utf-8")).hexdigest()[:8]
+    df = pd.DataFrame([{"scenario_id": sid, "parameter": k, "value": ("" if v is None else str(v)),
+                        "source": src} for k, v, src in params])
+    return sid, df
+
+
+# ── accumulation: never overwrite an earlier scenario or study year ─────────
+# Event-scale layers are replaced only for the (scenario_id, study_year) being built;
+# scenario-scoped layers only for the scenario_id. Everything else is carried forward.
+YEAR_KEYED = {"city_year_summary", "heat_event_catalogue", "spot_occurrence", "spots",
+              "spot_contours", "h3_grid", "hitrate_sensitivity", "city_exposure_by_contour"}
+
+
+def merge_with_existing(layers, gpkg: Path, scenario_id: str, study_years: set):
+    if not gpkg.exists():
+        return layers
+    try:
+        existing = {n for n, _ in pyogrio.list_layers(gpkg)}
+    except Exception:
+        return layers
+    merged = {}
+    for name, new in layers.items():
+        if new is None:
+            continue
+        if name not in existing:
+            merged[name] = new
+            continue
+        spatial = isinstance(new, gpd.GeoDataFrame) and new.geometry.notna().any()
+        old = (gpd.read_file(gpkg, layer=name) if spatial
+               else pyogrio.read_dataframe(gpkg, layer=name, read_geometry=False))
+        if "scenario_id" not in old.columns:
+            merged[name] = new
+            continue
+        keep = old["scenario_id"].astype(str) != str(scenario_id)
+        if name in YEAR_KEYED and "study_year" in old.columns:
+            keep = keep | (~old["study_year"].isin(study_years))
+        old = old[keep]
+        if len(old):
+            out = pd.concat([old, new], ignore_index=True)
+            merged[name] = gpd.GeoDataFrame(out, geometry="geometry", crs=new.crs) if spatial else out
+            log(f"    accumulated {name}: kept {len(old)} earlier rows + {len(new)} new")
+        else:
+            merged[name] = new
+    return merged
+
+
 # ── layer 1: city_zones ─────────────────────────────────────────────────────
 def build_city_zones(ref):
     rows = []
@@ -571,7 +664,7 @@ def git_commit() -> str:
         return "[UNKNOWN]"
 
 
-def build_dataset_info(layers, n_cities, n_clusters, study_years):
+def build_dataset_info(layers, n_cities, n_clusters, study_years, scenario_id, scen_df):
     rows = [
         ("title", "Dataset and protocol associated with the analysis of the diurnal surface "
                   "thermal anomalies across 56 Nigerian cities situated in 16 physiographic "
@@ -585,8 +678,10 @@ def build_dataset_info(layers, n_cities, n_clusters, study_years):
         ("temporal_coverage_era5", f"{STUDY_YEAR} (ERA5-Land)"),
         ("temporal_coverage_seviri", f"{STUDY_YEAR} selected persistent heat events (MSG-SEVIRI)"),
         ("region", "Nigeria"),
-        ("city_selection_criterion", "[CHECK] record the rule used to select the city set "
-                                     "for this run, e.g. 'UN WUP population >= 300k, 2024'"),
+        ("scenario_id", scenario_id),
+        ("city_selection_mode", scen_df.set_index("parameter").loc["city_selection_mode", "value"]),
+        ("city_selection_rule", scen_df.set_index("parameter").loc["city_selection_rule", "value"]),
+        ("n_candidate_cities", scen_df.set_index("parameter").loc["n_candidate_cities", "value"]),
         ("n_cities", str(n_cities)),
         ("n_plt_clusters", str(n_clusters)),
         ("study_years", ", ".join(str(y) for y in study_years)),
@@ -596,6 +691,7 @@ def build_dataset_info(layers, n_cities, n_clusters, study_years):
         ("dataset_doi", "[PENDING-DOI]"),
         ("code_repository_doi", "[PENDING-DOI]"),
     ]
+    rows += [("scenario_ids_in_package", "see the scenario_config layer")]
     rows += [(f"rows_{n}", str(len(d))) for n, d in layers.items() if d is not None]
     return pd.DataFrame(rows, columns=["key", "value"])
 
@@ -721,6 +817,9 @@ DESCR.update({
     "contour_uid": ("Year-qualified contour key, spot_uid and contour level.", "", "derived", "keying", "this script"),
     "city_selection_criterion": ("Rule used to select the city set for this run.", "", "derived", "study design", "recorded at build time"),
     "region": ("Country or region covered by this run.", "", "derived", "study design", "recorded at build time"),
+    "scenario_id": ("Eight-character digest of the configuration that produced these rows. Filter on it to isolate one complete run.", "", "derived", "scenario hashing", "config.py via this script"),
+    "parameter": ("Configuration parameter name.", "", "derived", "scenario capture", "config.py / src / NB05"),
+    "source": ("Where the parameter value was read from.", "", "derived", "scenario capture", "this script"),
     "study_years": ("Study years present in the event-scale layers.", "", "derived", "packaging", "this script"),
     "contour_id": ("Contour key, spot_id and contour level.", "", "derived", "keying", "NB05"),
     "spot_zone": ("Zone the spot falls in: urban_core, bra or both.", "", "derived", "zone intersection", "NB05"),
@@ -931,6 +1030,7 @@ LAYER_ONE_LINER = {
     "hitrate_sensitivity": "Stakeholder-satellite agreement across buffer distances.",
     "city_exposure_by_contour": "Population exposure by contour level per city, period and spot type.",
     "dataset_info": "Dataset metadata as key/value pairs.",
+    "scenario_config": "The configuration behind each scenario_id: city-selection rule, thresholds and method parameters.",
 }
 
 
@@ -1104,6 +1204,10 @@ def main():
     (out_dir / "_build").mkdir(parents=True, exist_ok=True)
 
     log(f"Building master summary v{VERSION} -> {out_dir}")
+    scenario_id, scen_df = capture_scenario()
+    log(f"  scenario_id {scenario_id}  "
+        f"({scen_df.set_index('parameter').loc['city_selection_mode', 'value']}, "
+        f"study year {scen_df.set_index('parameter').loc['study_year', 'value']})")
     ref = load_reference()
     log(f"  reference: {len(ref)} cities")
 
@@ -1130,9 +1234,21 @@ def main():
         "city_exposure_by_contour": build_halfdonut(ref),
     }
     layers["monthly_series"], layers["monthly_climatology"] = build_monthly(ref)
+
+    # stamp the scenario on every data layer, then accumulate rather than overwrite
+    for _n, _d in layers.items():
+        if _d is None or "scenario_id" in getattr(_d, "columns", []):
+            continue
+        _d["scenario_id"] = scenario_id
+        layers[_n] = _d[["scenario_id"] + [c for c in _d.columns if c != "scenario_id"]]
+    study_years = {int(y) for y in layers["spots"]["study_year"].dropna().unique()}
+    _gpkg_path = out_dir / f"{DATASET_STEM}.gpkg"
+    layers = merge_with_existing(layers, _gpkg_path, scenario_id, study_years)
+    layers["scenario_config"] = scen_df
     layers["dataset_info"] = build_dataset_info(
         layers, n_cities=len(ref), n_clusters=int(ref["cluster25"].nunique()),
-        study_years=sorted({int(y) for y in layers["spots"]["study_year"].dropna().unique()}))
+        study_years=sorted({int(y) for y in layers["spots"]["study_year"].dropna().unique()}),
+        scenario_id=scenario_id, scen_df=scen_df)
 
     log("Layers:")
     gpkg = write_package(layers, out_dir, with_csv=args.with_csv,
@@ -1172,6 +1288,7 @@ def main():
         "hitrate_sensitivity": "NB05 `stakeholder_hitrate_sensitivity.csv`",
         "city_exposure_by_contour": "NB05 `halfdonut_city_summary.csv`",
         "dataset_info": "generated by this script",
+        "scenario_config": "config.py, src/daily_analysis_utils.py and NB05 constants, captured at build time",
     }
     DEVIATIONS.extend([
         "Layer count is 16, not the 14 in the target schema. `monthly_series` was added "
