@@ -91,7 +91,7 @@ def main():
     da = pd.read_csv(R03 / "all_cities_delta_annual.csv")
     ce = pd.read_csv(R04 / "city_heat_event_summary.csv")
     sc = pd.read_csv(R05 / "spot_comprehensive_summary.csv")
-    ah = pd.read_csv(R05 / "all_cities_hotspots.csv")
+    ah = pd.read_csv(R05 / "all_cities_spots.csv")
     side = []
     rng = np.random.default_rng(42)
     # trend_statistics

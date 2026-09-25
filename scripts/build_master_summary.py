@@ -52,7 +52,7 @@ R02 = ROOT / "Results" / "02_stakeholder_analysis"
 R03 = ROOT / "Results" / "03_temporal_analysis"
 R04 = ROOT / "Results" / "04_temporal_analysis_daily"
 R05 = ROOT / "Results" / "05_hotspot_analysis"
-MASTER_GPKG = R05 / "master_hotspot_gdf.gpkg"
+MASTER_GPKG = R05 / "master_thermal_spots.gpkg"
 
 ZONE_MAP = {"urban_core": "uc", "bra": "bra", "city_region": "cr", "delta_uc_bra": "suhii"}
 ZONE_ORDER = ["uc", "bra", "cr", "suhii"]
@@ -475,7 +475,7 @@ DROP_FROM_SPOTS = ["climate_class", "landcover_class", "elevation_class", "geolo
 
 
 def build_spots(ref):
-    g = gpd.read_file(R05 / "all_cities_hotspots.geojson")
+    g = gpd.read_file(R05 / "all_cities_spots.geojson")
     g = g.drop(columns=[c for c in DROP_FROM_SPOTS if c in g.columns])
     g["city"] = g["city"].map(clean_city)
     g["city_slug"] = g["city"].map(slugify)
@@ -1145,7 +1145,7 @@ First published version.
 ### Corrected
 
 - **Persistence fields now come from ERA5-Land.** In the previous aggregation
-  (`master_hotspot_gdf`) the fields `n_persistent_events` and `longest_event_days` carried the
+  (`master_thermal_spots`) the fields `n_persistent_events` and `longest_event_days` carried the
   **MODIS** values on every row, and `n_modis_hot_days` was present. The locked methodological
   decision is that persistence is derived from ERA5-Land only. This dataset reads
   `era5_<period>_n_persistent_events` and `era5_<period>_longest_event_days`, and
@@ -1283,10 +1283,10 @@ def main():
         "monthly_climatology": "derived from `monthly_series` (calendar-month mean)",
         "heat_event_catalogue": "NB04 `events/{city}_event_audit.json` (56 files)",
         "spot_occurrence": "NB05 `spot_comprehensive_summary.csv` on a full 56x2x2 grid + counts from `spots`",
-        "spots": "NB05 `all_cities_hotspots.geojson`",
-        "spot_contours": "NB05 `master_hotspot_gdf.gpkg::hotspot_contours` (hot and cold)",
+        "spots": "NB05 `all_cities_spots.geojson`",
+        "spot_contours": "NB05 `master_thermal_spots.gpkg::hotspot_contours` (hot and cold)",
         "h3_grid": f"generated: H3 res {H3_RES} indexing of the `spots` L50 footprints",
-        "stakeholder_spots_gps": "NB05 `master_hotspot_gdf.gpkg::stakeholder_{hot,cold}spot_gps`, keys only",
+        "stakeholder_spots_gps": "NB05 `master_thermal_spots.gpkg::stakeholder_{hot,cold}spot_gps`, keys only",
         "stakeholder_perception": "NB02 `Stakeholder_Perception_Data_2024.csv` + `workshop_attendees_clean.csv`",
         "hitrate_sensitivity": "NB05 `stakeholder_hitrate_sensitivity.csv`",
         "city_exposure_by_contour": "NB05 `halfdonut_city_summary.csv`",
@@ -1304,7 +1304,7 @@ def main():
         "`spots`: geom_75_wkt and geom_90_wkt were dropped. They averaged ~1.9 kB per row and "
         "the L75/L90 outlines are real geometries in `spot_contours`.",
         "`pct_dominant_class` is taken from NB01 cluster25_uc_distribution.csv (percent of the "
-        "urban core in the assigned Cluster25). The like-named field in master_hotspot_gdf holds "
+        "urban core in the assigned Cluster25). The like-named field in master_thermal_spots holds "
         "a different, much smaller quantity and was not carried over.",
         "`trend_statistics` has no Kendall tau: NB03 records mk_z, mk_p and the slopes but not "
         "tau, so it could not be sourced.",
