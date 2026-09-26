@@ -446,39 +446,32 @@ def get_city_export_status(city_name: str, base_output_dir: str = None) -> Dict[
 def load_stakeholder_datasets(config):
     """
     Load all required datasets for stakeholder analysis.
-    
-    Parameters:
-    -----------
-    config : module
-        Configuration module with paths and settings
-        
-    Returns:
-    --------
+
+    The target city list is read from NB01's study_cities_final.csv (status ==
+    'included'), so the filter automatically reflects whatever selection mode
+    (ABOVE_300K, ABOVE_500K, ALL, SPECIFIC …) was active when NB01 was run.
+    To change the target set, update config.CITY_SELECTION_MODE and re-run NB01.
+
+    Returns
+    -------
     tuple : (boundary_gdf, cities_df, survey_df)
-        - boundary_gdf: GeoDataFrame with Nigeria boundary
-        - cities_df: DataFrame with cities population data
-        - survey_df: DataFrame with stakeholder survey data
-        
-    Example:
-    --------
-    >>> import config
-    >>> boundary_gdf, cities_df, survey_df = load_stakeholder_datasets(config)
+        survey_df is already filtered to target cities and carries a Cluster25
+        column (keyed on matched_city_x, the stakeholder's registered city).
     """
     import geopandas as gpd
     import pandas as pd
-    
-    # Load Nigeria boundary
+
+    # ── Nigeria boundary ────────────────────────────────────────────────────────
     boundary_path = config.get_aoi_data_path('boundary_geojson')
     boundary_gdf = gpd.read_file(boundary_path)
     print(f"✅ Nigeria boundary loaded (CRS: {boundary_gdf.crs})")
-    
-    # Load cities population data (CSV or XLSX)
+
+    # ── WUP cities population data ──────────────────────────────────────────────
     cities_path = config.get_aoi_data_path('cities_csv')
     if cities_path.suffix.lower() in ('.xlsx', '.xls'):
         cities_df = pd.read_excel(cities_path, sheet_name='Data')
     else:
         cities_df = pd.read_csv(cities_path, thousands=',')
-    # Rename WUP 2025 columns to legacy schema if present
     if 'City_Name' in cities_df.columns:
         cities_df = cities_df.rename(columns={
             'City_Name': 'Urban Agglomeration',
@@ -488,12 +481,139 @@ def load_stakeholder_datasets(config):
         cities_df['Urban Agglomeration'] = cities_df['Urban Agglomeration'].str.strip()
     print(f"✅ Cities population data loaded: {len(cities_df)} cities")
     print(f"   Population column: {config.PROJECT_STUDY_YEAR}")
-    
-    # Load stakeholder survey data
+
+    # ── Target city list from NB01 ──────────────────────────────────────────────
+    nb01_dir = config.RESULTS_DIR / '01_aoi_delineation'
+    study_cities_path = nb01_dir / 'study_cities_final.csv'
+    if not study_cities_path.exists():
+        raise FileNotFoundError(
+            f"study_cities_final.csv not found at {study_cities_path}. "
+            "Run NB01 first to generate the target city list."
+        )
+    study_cities = pd.read_csv(study_cities_path)
+    target_cities = set(
+        study_cities.loc[study_cities['status'] == 'included', 'city_name']
+    )
+    # Absorbed city → parent city remap (e.g. Owerri → Onitsha)
+    absorbed_map = dict(zip(
+        study_cities.loc[study_cities['status'] == 'absorbed', 'city_name'],
+        study_cities.loc[study_cities['status'] == 'absorbed', 'absorbed_by']
+    ))
+    # Known survey spelling variants → canonical names in study_cities_final.csv
+    name_norm_map = {
+        'Osogbo': 'Oshogbo',
+    }
+    # Combined remap: normalise first, then absorb
+    full_remap = {**name_norm_map, **absorbed_map}
+
+    print(f"\n📋 Target cities loaded from NB01: {len(target_cities)} cities (status='included')")
+    print(f"   Absorbed cities with parent remap: {len(absorbed_map)}")
+    print(f"   Survey spelling fixes: {list(name_norm_map.items())}")
+    print(f"   ℹ  To change the target set, edit config.CITY_SELECTION_MODE and re-run NB01.")
+
+    # ── Cluster25 lookup (city_name → Cluster25) ────────────────────────────────
+    cluster_path = nb01_dir / 'city_cluster25_lookup.csv'
+    cluster_lookup = pd.read_csv(cluster_path)[['city_name', 'Cluster25']]
+
+    # ── Raw survey data ─────────────────────────────────────────────────────────
     survey_path = config.INPUT_DIR / 'stakeholder_survey' / 'master_composite.csv'
-    survey_df = pd.read_csv(survey_path)
-    print(f"✅ Stakeholder survey data loaded: {len(survey_df)} records")
-    
+    survey_raw = pd.read_csv(survey_path)
+    n_raw = len(survey_raw)
+
+    # ── Normalise city names and remap absorbed → parent before filtering ────────
+    # Handles: spelling variants (Osogbo→Oshogbo) and absorbed cities (Owerri→Onitsha).
+    n_remapped_x = survey_raw['matched_city_x'].isin(full_remap).sum()
+    n_remapped_y = survey_raw['matched_city_y'].isin(full_remap).sum()
+    survey_raw = survey_raw.copy()
+    survey_raw['matched_city_x'] = survey_raw['matched_city_x'].replace(full_remap)
+    survey_raw['matched_city_y'] = survey_raw['matched_city_y'].replace(full_remap)
+
+    # ── Filter to target cities (based on stakeholder's registered city) ─────────
+    # Cohort rule: matched_city_x (REGISTERED city) defines inclusion, not matched_city_y
+    # (city of workshop attendance).  Registration is the auditable record of participation;
+    # attendance alone cannot be verified for someone who never registered, and there is no
+    # per-person attendance register in the project.  One respondent (cal235) marked spots in
+    # a study city but has no registration entry, so they are excluded as unverifiable.  This
+    # is deliberate and conservative, and fixes the analysed cohort at 105 participants.
+    survey_df = survey_raw[survey_raw['matched_city_x'].isin(target_cities)].copy()
+    n_kept    = len(survey_df)
+    n_dropped = n_raw - n_kept
+
+    # ── Add Cluster25 (registered-city cluster) ─────────────────────────────────
+    survey_df = survey_df.merge(
+        cluster_lookup.rename(columns={'city_name': 'matched_city_x'}),
+        on='matched_city_x', how='left'
+    )
+
+    # ── Deduplicate workshop attendance: canonical city = most frequent TARGET city ──
+    # Some PIDs attended workshops in multiple cities.  Only target-city appearances
+    # count toward the canonical assignment so the canonical is always a study city.
+    # PIDs whose workshop records point ONLY to non-target cities are left unchanged
+    # and will be excluded naturally when workshop_df is filtered downstream.
+    ws_mask = (survey_df['survey status'] == 'Yes') & survey_df['matched_city_y'].notna()
+    ws_sub  = survey_df.loc[ws_mask, ['pid', 'matched_city_y']].copy()
+    if len(ws_sub) > 0:
+        # Restrict frequency table to target-city workshop rows
+        ws_tgt = ws_sub[ws_sub['matched_city_y'].isin(target_cities)]
+        if len(ws_tgt) > 0:
+            freq = (ws_tgt.groupby(['pid', 'matched_city_y'])
+                    .size().reset_index(name='cnt'))
+            canonical_ws = (freq.sort_values('cnt', ascending=False)
+                            .drop_duplicates('pid')
+                            .set_index('pid')['matched_city_y'])
+            multi_pids = freq.groupby('pid').size()
+            multi_pids = multi_pids[multi_pids > 1].index.tolist()
+            if multi_pids:
+                print(f"\n  Multi-city workshop attendance resolved ({len(multi_pids)} PID(s)):")
+                for pid in sorted(multi_pids):
+                    cities_cnt = (freq[freq['pid'] == pid]
+                                  .set_index('matched_city_y')['cnt'].to_dict())
+                    print(f"    {pid}: {cities_cnt} → '{canonical_ws[pid]}'")
+            # Update matched_city_y ONLY for PIDs that have at least one target-city workshop;
+            # PIDs not in canonical_ws (off-target only) keep their original matched_city_y.
+            _new = survey_df.loc[ws_mask, 'pid'].map(canonical_ws)
+            _has = _new.notna()
+            # Use index labels directly — avoids shape mismatch from boolean-mask alignment
+            survey_df.loc[_new[_has].index, 'matched_city_y'] = _new[_has].values
+        # Report PIDs whose workshop was only in off-target cities
+        _offtgt_ws_pids = set(ws_sub['pid']) - set(ws_tgt['pid']) if len(ws_tgt) > 0 \
+                          else set(ws_sub['pid'])
+        if _offtgt_ws_pids:
+            print(f"\n  PID(s) with workshop ONLY in off-target cities ({len(_offtgt_ws_pids)}):")
+            for _p in sorted(_offtgt_ws_pids):
+                _cities = sorted(ws_sub.loc[ws_sub['pid'] == _p, 'matched_city_y'].unique())
+                print(f"    {_p}: {_cities}  — excluded from workshop analysis")
+
+    # ── Filter report ────────────────────────────────────────────────────────────
+    print(f"\n{'='*70}")
+    print("STAKEHOLDER DATA FILTER REPORT")
+    print(f"{'='*70}")
+    print(f"  Raw survey records  : {n_raw}")
+    if n_remapped_x > 0 or n_remapped_y > 0:
+        print(f"  City name remaps    : {n_remapped_x} matched_city_x  |  "
+              f"{n_remapped_y} matched_city_y records")
+        _orig = pd.read_csv(survey_path)
+        for orig_name, new_name in sorted(full_remap.items()):
+            orig_x = (_orig['matched_city_x'] == orig_name).sum()
+            if orig_x > 0:
+                label = 'spelling' if orig_name in name_norm_map else 'absorbed'
+                print(f"    [{label}] {orig_name:<25} → {new_name}  ({orig_x} reg. records)")
+    print(f"  Records kept        : {n_kept}  ({n_kept / n_raw * 100:.1f}%)")
+    print(f"  Records dropped     : {n_dropped}  (off-target cities)")
+    if n_dropped > 0:
+        dropped = (survey_raw[~survey_raw['matched_city_x'].isin(target_cities)]
+                   .groupby('matched_city_x').size()
+                   .sort_values(ascending=False))
+        print(f"\n  Off-target cities removed (present in survey but outside current target set):")
+        for city, cnt in dropped.items():
+            print(f"    {city:<30} {cnt:>4} record(s)")
+        print(f"  ℹ  These cities are excluded from all analysis and visualisations.")
+        print(f"  ℹ  To include them, change config.CITY_SELECTION_MODE and re-run NB01.")
+    print(f"\n  Unique PIDs in filtered data : {survey_df['pid'].nunique()}")
+    print(f"  Cities represented           : {survey_df['matched_city_x'].nunique()}")
+    print(f"{'='*70}")
+    print(f"✅ Stakeholder survey ready: {n_kept} records")
+
     return boundary_gdf, cities_df, survey_df
 
 
@@ -1086,16 +1206,30 @@ def load_osm_water_mask(city_name: str, lst_shape: tuple, lst_transform, lst_crs
     if aoi_dir is None:
         # Default to project structure
         project_root = Path.cwd()
-        if 'notebooks' in str(project_root):
+        if project_root.name.lower() in ('notebooks', 'notebook'):
             project_root = project_root.parent
         aoi_dir = project_root / 'data' / 'outputs' / '01_aoi_delineation'
     
     # Path to geospatial features (JRC water bodies from GEE)
-    water_file = aoi_dir / f'City_{city_name}' / 'Features' / 'OSM' / f'{city_name}_water_bodies.geojson'
-    
-    if not water_file.exists():
-        print(f"        No water bodies file found at: {water_file}")
-        print(f"        Run notebooks/01a_AOI_JRC_NatEarth_features.ipynb to extract water bodies")
+    # Try multiple path conventions in priority order.
+    # Prefer _102022 (ANALYSIS_CRS) version when the LST raster is in a projected CRS;
+    # fall back to _4326 which can be reprojected on-the-fly by rasterio.
+    city_slug = city_name.replace(' ', '_')
+    _water_candidates = [
+        # ANALYSIS_CRS version (preferred for projected/metric grids e.g. SEVIRI 102022)
+        aoi_dir / city_slug / f'{city_slug}_water_bodies_102022.geojson',
+        # WGS84 fallback (always reprojected to match LST CRS below)
+        aoi_dir / city_slug / f'{city_slug}_water_bodies_4326.geojson',
+        aoi_dir / city_name / f'{city_name}_water_bodies_4326.geojson',
+        # Legacy structure
+        aoi_dir / f'City_{city_name}' / 'Features' / 'OSM' / f'{city_name}_water_bodies.geojson',
+        aoi_dir / f'City_{city_slug}' / 'Features' / 'OSM' / f'{city_slug}_water_bodies.geojson',
+    ]
+    water_file = next((p for p in _water_candidates if p.exists()), None)
+
+    if water_file is None:
+        print(f"        No water bodies file found for {city_name}")
+        print(f"        Tried: {_water_candidates[0]}")
         return np.zeros(lst_shape, dtype=bool)
     
     try:
@@ -1685,7 +1819,7 @@ def load_landscape_data(landscape_path: Path = None, target_crs: str = "EPSG:432
             landscape_path = config.LANDSCAPE_DATA_PATH
         except AttributeError:
             # Fallback for legacy config
-            project_root = Path.cwd().parent if Path.cwd().name == 'notebooks' else Path.cwd()
+            project_root = Path.cwd().parent if Path.cwd().name.lower() in ('notebooks', 'notebook') else Path.cwd()
             landscape_path = project_root / "data" / "inputs" / "geospatial_features" / "landscape_ch_polygons_with_class_metrics.geojson"
     
     if not landscape_path.exists():

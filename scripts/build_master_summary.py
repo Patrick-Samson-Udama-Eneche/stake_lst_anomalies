@@ -58,6 +58,10 @@ SPOT_TYPES = ["hot", "cold"]
 
 LOG: list[str] = []
 DEVIATIONS: list[str] = []
+
+# The QA script replaces whatever sits between these two markers in _build/build_report.md.
+QA_BEGIN = "<!-- QA:BEGIN — written by scripts/qa_master_summary.py, do not edit by hand -->"
+QA_END = "<!-- QA:END -->"
 CHECKS: list[str] = []
 
 
@@ -570,13 +574,16 @@ def build_gps(ref, key):
         frames.append(g)
     g = pd.concat(frames, ignore_index=True)
     before = len(g)
-    g = g[g["pid"].isin(codes.index)].copy()      # drops cal235 (no registration/attendance city)
+    # Keep only the analysed cohort. Registration is the auditable record of participation,
+    # so a respondent with attendance data but no registration entry is excluded as
+    # unverifiable — see "Participant cohort" in the build report.
+    g = g[g["pid"].isin(codes.index)].copy()
     dropped = before - len(g)
     if dropped:
         DEVIATIONS.append(
-            f"stakeholder_spots_gps: dropped {dropped} point(s) from participant(s) absent from "
-            "the 105 (cal235 — no registration city, city match sourced from '55_other_cities'). "
-            f"Result {len(g)} points, not the 97 in the uncorrected source.")
+            f"stakeholder_spots_gps: dropped {dropped} point(s) belonging to respondent(s) outside "
+            f"the analysed cohort of {len(codes)} (no registration record, so participation could "
+            f"not be verified). Result {len(g)} points, not the 97 in the unfiltered source.")
     g["participant_code"] = g["pid"].map(codes)
     g["city"] = g["matched_city_y"].map(clean_city)
     g["city_slug"] = g["city"].map(slugify)
@@ -1008,6 +1015,32 @@ def write_readme(layers, out_dir: Path, gpkg: Path):
         f"| `{p.relative_to(out_dir).as_posix()}` | {size(p)} |"
         for p in sorted(out_dir.rglob("*"))
         if p.is_file() and "_build" not in p.relative_to(out_dir).parts)
+
+    n_part = len(layers["stakeholder_perception"])
+    # Disclose the mismatch only while it is real: the source hit-rate analysis filtered the
+    # stakeholder points on city of ATTENDANCE, so its denominators can exceed the cohort's
+    # point count. If that analysis is re-run under the cohort rule the numbers agree and this
+    # paragraph disappears by itself.
+    gps, hr = layers["stakeholder_spots_gps"], layers["hitrate_sensitivity"]
+    cohort_caveat = ""
+    if hr is not None and gps is not None:
+        # one buffer AND one period: every city is listed once per period, so summing across
+        # both would double every count
+        one = hr[(hr["buffer_m"] == hr["buffer_m"].min())
+                 & (hr["period"] == sorted(hr["period"].unique())[0])]
+        denom = {k: int(v) for k, v in one.groupby("spot_type")["n_total"].sum().items()}
+        counted = {k: int(v) for k, v in gps["spot_type"].value_counts().items()}
+        if denom != counted:
+            order = ["hot", "cold"]
+            d = ", ".join(f"{denom[k]} {k}" for k in order if k in denom)
+            c = ", ".join(f"{counted[k]} {k}" for k in order if k in counted)
+            cohort_caveat = (
+                f"\n**One exception, stated plainly.** `hitrate_sensitivity` is reproduced exactly as "
+                f"computed in the source analysis, which selected stakeholder points by city of "
+                f"attendance rather than by registration. Its denominators are therefore {d} points, "
+                f"against the {c} points in `stakeholder_spots_gps`. The difference is the excluded "
+                f"respondent's points. Recompute the hit rates from `stakeholder_spots_gps` and "
+                f"`spots` if you need figures on the cohort denominator.\n")
     txt = f"""# Dataset and protocol associated with the analysis of the diurnal surface thermal anomalies across 56 Nigerian cities situated in 16 physiographic landscape typologies
 
 Version {VERSION}. Built {date.today().isoformat()}.
@@ -1077,15 +1110,24 @@ No DOI is stated unless it was found in the project; all are marked `[PENDING-DO
 - **The raw questionnaire.** No free text, names, emails, phone numbers, device identifiers or timestamps. Only the perception items listed in the data dictionary are present.
 - **Rasters and per-city intermediates.** Regenerable from the code repository.
 
-## 7. Anonymisation
+## 7. Participant cohort and inclusion rule
 
-Participants are identified only by a pseudonymous code, `P001` to `P105`, assigned by sorting on city then original identifier. The mapping back to the original identifiers is held privately by the authors and is not part of this dataset. No free-text response is included. Stakeholder point coordinates are coarsened to three decimal degrees (about 110 m) before
+The {n_part} participants in `stakeholder_perception` are the respondents whose **registered** city is
+one of the study cities. Registration is the auditable record of participation, so a respondent
+recorded as attending a workshop but holding no registration entry is excluded: participation
+cannot be verified independently, as no per-person attendance register exists. One respondent falls
+in that category and is excluded from every layer, along with the spots they marked. The rule is
+deliberate and conservative — it omits an unverifiable record rather than admitting one.
+{cohort_caveat}
+## 8. Anonymisation
+
+Participants are identified only by a pseudonymous code, `P001` to `P{n_part:03d}`, assigned by sorting on city then original identifier. The mapping back to the original identifiers is held privately by the authors and is not part of this dataset. No free-text response is included. Stakeholder point coordinates are coarsened to three decimal degrees (about 110 m) before
 publication, so that a marked location cannot be resolved to an individual building or
 dwelling. The coarsening displaces points by 43 m on average (79 m at most) and changes no
 hit-or-miss outcome at the smallest published buffer radius of 500 m, so the stakeholder
 corroboration results are unaffected.
 
-## 8. Licence and citation
+## 9. Licence and citation
 
 Licence: **CC BY 4.0**.
 
@@ -1094,7 +1136,7 @@ Licence: **CC BY 4.0**.
 - Sustainable Cities and Society article: [PENDING]
 - Code repository: [PENDING-DOI], MIT licence.
 
-## 9. Map disclaimer
+## 10. Map disclaimer
 
 Map lines delineate study areas and do not necessarily depict accepted national boundaries.
 """
@@ -1132,21 +1174,83 @@ First published version.
 """, encoding="utf-8")
 
 
-def write_build_log(layers, dd, out_dir: Path, sources: dict):
-    lines = [f"# Phase 2 build log — v{VERSION}", "",
-             f"Built {date.today().isoformat()} by `scripts/build_master_summary.py`.", "",
-             "## Layers, sources and row counts", "",
+# Decisions taken during the build that a reader of the code cannot infer from it.
+# Kept here, in the script, so the record is version-controlled and reproduced on every run.
+DECISIONS = [
+    ("Participant cohort — 105, not 106",
+     "Inclusion is decided by the REGISTERED city (`matched_city_x`), not the city of workshop "
+     "attendance (`matched_city_y`). One respondent (`cal235`) is recorded as attending in Abuja, "
+     "a study city, with an exact city match and three marked spots (2 hot, 1 cold), but has no "
+     "registration entry — one of only 4 of 332 respondents in that state. No per-person "
+     "attendance register exists anywhere in the project, so attendance cannot be corroborated "
+     "independently. The record is therefore excluded as unverifiable and the cohort is 105. "
+     "Note that the earlier rationale given for this exclusion — that the city match came from "
+     "`55_other_cities` — was wrong: 59 of the 105 included participants are matched through that "
+     "same column, so it was never the disqualifier. The exclusion stands on verifiability alone."),
+    ("Hit rates keep the source denominators",
+     "NB05 §9 filters stakeholder points on attendance, so `hitrate_sensitivity` rests on 57 hot "
+     "and 40 cold points while `stakeholder_spots_gps` carries 55 and 39 under the cohort rule. "
+     "The hit rates are reproduced unchanged rather than recomputed, because recomputing them "
+     "would alter published analysis values and manuscript Figure 18. The mismatch is disclosed "
+     "in README §7. Applying the cohort rule in NB05 would give, at 500 m: hot day 4/55 and hot "
+     "night 3/55 (from 4/57 and 3/57), cold day 4/39 (from 5/40), cold night 0/39 (from 0/40)."),
+    ("GPS coordinates coarsened to 3 decimal degrees",
+     "About 110 m. Measured displacement is 43 m on average and 79 m at most, and it flips no "
+     "hit-or-miss outcome at any published buffer radius (500 m, 1 km, 2 km), so the corroboration "
+     "results are unaffected. Recorded in the scenario log as `gps_coordinate_decimals`."),
+    ("ERA5-Land, not MODIS, for event persistence",
+     "NB05 §7 originally read `modis_*_n_persistent_events` into the persistence fields. Those are "
+     "0 for cities that do have ERA5 events (Aba day: MODIS 0/0 against ERA5 7/13). The package "
+     "reads the ERA5-Land fields, and `n_modis_hot_days` was dropped as misleading."),
+    ("Trend statistics carry an explicit zone",
+     "The single trend value on each spot row in NB05 is the urban-core trend, not the SUHII trend "
+     "(Abeokuta day: 2.83362 against 2.20390). Trends are published in `trend_statistics` keyed by "
+     "city, zone and period so the zone can never be mistaken."),
+    ("Redundant exports retired, hot-biased names corrected",
+     "12 files were withdrawn after a dependency scan showed they had no readers: "
+     "`all_cities_dashboard.gpkg` duplicated this package exactly, and the GeoJSON, Shapefile and "
+     "columns-CSV side exports of the spot layers were regenerable. They are staged in "
+     "`Results/_to_delete/`, not erased. Two renames followed, because both layers hold cold spots "
+     "as well as hot: `master_hotspot_gdf.*` to `master_thermal_spots.*`, and `all_cities_hotspots` "
+     "to `all_cities_spots`. Approved and carried out in commit 25f1427."),
+    ("One build report, not a folder of them",
+     "The phase reports written while this package was assembled (inventory, participant-count "
+     "decision, proposed NB05 diff, QA report, deletion manifest, package summary) are superseded "
+     "by this single report; their substance is in sections 2 and 5 and in `results_inventory.csv`, "
+     "`nb_outputs.csv` and `duplicates.json` beside it. The originals are staged in "
+     "`Results/_to_delete/`."),
+    ("Zero rows are explicit in `spot_occurrence`",
+     "One city (Ikare) produced no spots at all and was absent from the source, giving 55 of 56 "
+     "cities. The layer is built on the complete city x period x type grid with explicit zeros, "
+     "so absence of a spot is distinguishable from absence of a record."),
+]
+
+
+def write_build_report(layers, dd, out_dir: Path, sources: dict):
+    """Single build report. The QA script fills the marked block; nothing else writes here."""
+    lines = [f"# Build report — {DATASET_STEM} v{VERSION}", "",
+             f"Built {date.today().isoformat()} by `scripts/build_master_summary.py`. "
+             f"Validated by `scripts/qa_master_summary.py`.", "",
+             "This folder is a build record and is **not** part of the published dataset. The "
+             "archived files sit at the top level of the dataset folder.", "",
+             "## 1. Layers, sources and row counts", "",
              "| layer | rows | fields | built from |", "|---|---|---|---|"]
     for n, d in layers.items():
         if d is None:
             continue
         lines.append(f"| `{n}` | {len(d):,} | {len(d.columns)} | {sources.get(n, '')} |")
-    lines += ["", "## Deviations from the target schema", ""]
+    lines += ["", "## 2. Decisions on record", ""]
+    for title, body in DECISIONS:
+        lines += [f"**{title}.** {body}", ""]
+    lines += ["## 3. Deviations from the target schema", ""]
     lines += [f"- {d}" for d in DEVIATIONS] or ["- none"]
     checks = sorted(set(CHECKS))
-    lines += ["", f"## `[CHECK]` items ({len(checks)})", ""]
+    lines += ["", f"## 4. `[CHECK]` items ({len(checks)})", "",
+              "Fields whose provenance is worth re-reading before release.", ""]
     lines += [f"- `{c}`" for c in checks] or ["- none"]
-    (out_dir / "_build" / "02_build_log.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    lines += ["", "## 5. Validation", "", QA_BEGIN,
+              "_Not yet run for this build. Run `python scripts/qa_master_summary.py`._", QA_END, ""]
+    (out_dir / "_build" / "build_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def write_checksums(out_dir: Path):
@@ -1274,7 +1378,7 @@ def main():
     write_changelog(out_dir)
     n = write_checksums(out_dir)
     log(f"  checksums: {n} files")
-    write_build_log(layers, dd, out_dir, SOURCES)
+    write_build_report(layers, dd, out_dir, SOURCES)
     log(f"  deviations: {len(DEVIATIONS)} | [CHECK] items: {len(set(CHECKS))}")
     return layers, dd, out_dir
 

@@ -1,9 +1,12 @@
 #!/usr/bin/env python
-"""Phase 3 QA for the master summary package. Writes _build/03_qa_report.md and
-_build/package_summary.md. Read-only apart from those two reports."""
+"""QA for the published composite package. Read-only apart from the marked validation block
+it fills in _build/build_report.md."""
 from __future__ import annotations
 import hashlib, json, re, shutil, subprocess, sys, tempfile, warnings
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from build_master_summary import QA_BEGIN, QA_END  # the markers are defined once, with the writer
 
 import geopandas as gpd
 import numpy as np
@@ -57,7 +60,24 @@ def main():
     nh, nc = (gps.spot_type == "hot").sum(), (gps.spot_type == "cold").sum()
     check("stakeholder_spots_gps == 94 (55 hot / 39 cold)",
           len(gps) == 94 and nh == 55 and nc == 39,
-          f"got {len(gps)} ({nh} hot / {nc} cold) — revised from 97/57/40, cal235 excluded")
+          f"got {len(gps)} ({nh} hot / {nc} cold) — 97/57/40 in the unfiltered source; the "
+          "3 points of one unregistered respondent are excluded with the cohort rule")
+
+    # NB05 §9 selects stakeholder points by city of attendance, the cohort rule by registration,
+    # so the hit-rate denominators can legitimately exceed the published point count. The
+    # invariant is that any such difference is DISCLOSED in the README, not that it is absent.
+    _hr = d["hitrate_sensitivity"]
+    # one buffer AND one period — each city is listed once per period
+    _hr = _hr[(_hr.buffer_m == _hr.buffer_m.min())
+              & (_hr.period == sorted(_hr.period.unique())[0])]
+    _denom = {k: int(v) for k, v in _hr.groupby("spot_type")["n_total"].sum().items()}
+    _counted = {k: int(v) for k, v in gps.spot_type.value_counts().items()}
+    _agree = _denom == _counted
+    _disclosed = "reproduced exactly as" in (PKG / "README.md").read_text(encoding="utf-8")
+    check("hit-rate denominators match the GPS layer, or the difference is disclosed",
+          _agree or _disclosed,
+          "they match" if _agree else
+          f"hit-rate {_denom} vs points {_counted}; disclosed in README §7")
 
     # ── 2. key integrity ────────────────────────────────────────────────────
     print("\n2. Key integrity")
@@ -218,32 +238,38 @@ def main():
               f"identical: {len(same)}; differ: {sorted(diff)}")
         shutil.rmtree(tmp.parent, ignore_errors=True)
 
-    # ── reports ─────────────────────────────────────────────────────────────
+    # ── report: fill the marked block in the single build report ────────────
     npass = sum(1 for _, o, _ in RES if o)
-    out = [f"# Phase 3 QA report", "",
-           f"`{GPKG.name}` — **{npass}/{len(RES)} checks passed**.", "",
+    files = [p for p in sorted(PKG.rglob("*")) if p.is_file() and "_build" not in p.relative_to(PKG).parts]
+    out = [QA_BEGIN, "",
+           f"Validated {pd.Timestamp.today().date().isoformat()} — "
+           f"**{npass}/{len(RES)} checks passed**.", "",
+           f"- Layers: **{len(d)}**",
+           f"- Total records: **{sum(len(x) for x in d.values()):,}**",
+           f"- Distinct fields described: **{len(dd)}**",
+           f"- Archived files: **{len(files)}**, total **{sum(p.stat().st_size for p in files)/1e6:.1f} MB**",
+           f"- Study years: **{', '.join(str(y) for y in sorted(d['spots'].study_year.unique()))}**",
+           f"- Scenarios: **{', '.join(sorted(d['spots'].scenario_id.unique()))}**", "",
+           "### Checks", "",
            "| # | check | result | detail |", "|---|---|---|---|"]
     out += [f"| {i} | {n} | {'PASS' if o else '**FAIL**'} | {t} |"
             for i, (n, o, t) in enumerate(RES, 1)]
-    out += ["", "## Side-by-side sampled values", "",
+    out += ["", "### Values sampled against their source", "",
             "| layer | item | package | source |", "|---|---|---|---|"]
     out += [f"| {l} | {k} | {v} | {s} |" for l, k, v, s in side]
-    (PKG / "_build" / "03_qa_report.md").write_text("\n".join(out) + "\n", encoding="utf-8")
+    out += ["", QA_END]
 
-    files = [p for p in sorted(PKG.rglob("*")) if p.is_file() and "_build" not in p.relative_to(PKG).parts]
-    ps = ["# Package summary", "",
-          f"Counts only. Generated {pd.Timestamp.today().date().isoformat()}.", "",
-          f"- Layers: **{len(d)}**",
-          f"- Total records: **{sum(len(x) for x in d.values()):,}**",
-          f"- Distinct fields described: **{len(dd)}**",
-          f"- Files: **{len(files)}**, total **{sum(p.stat().st_size for p in files)/1e6:.1f} MB**",
-          f"- Study years: **{', '.join(str(y) for y in sorted(d['spots'].study_year.unique()))}**",
-          f"- Scenarios: **{', '.join(sorted(d['spots'].scenario_id.unique()))}**", "",
-          "| layer | rows | fields |", "|---|---|---|"]
-    ps += [f"| `{n}` | {len(x):,} | {len(x.columns)} |" for n, x in d.items()]
-    ps += ["", "| file | size |", "|---|---|"]
-    ps += [f"| `{p.relative_to(PKG).as_posix()}` | {p.stat().st_size/1e6:.2f} MB |" for p in files]
-    (PKG / "_build" / "package_summary.md").write_text("\n".join(ps) + "\n", encoding="utf-8")
+    report = PKG / "_build" / "build_report.md"
+    if report.exists():
+        txt = report.read_text(encoding="utf-8")
+        i, j = txt.find(QA_BEGIN), txt.find(QA_END)
+        if i != -1 and j != -1:
+            report.write_text(txt[:i] + "\n".join(out) + txt[j + len(QA_END):], encoding="utf-8")
+            print(f"\n  validation written into {report.relative_to(PKG)}")
+        else:
+            print(f"\n  [WARN] markers missing in {report.name}; validation not written")
+    else:
+        print(f"\n  [WARN] {report.name} absent; run the build first")
 
     print(f"\n{npass}/{len(RES)} checks passed")
     return 0 if npass == len(RES) else 1
