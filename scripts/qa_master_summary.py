@@ -36,6 +36,16 @@ def main():
     SPATIAL = {n for n, t in lay.items() if t is not None}
     d = {n: L(n, n in SPATIAL) for n in lay}
 
+    # The package may legitimately hold several scenarios (a re-run under different
+    # settings appends rather than overwrites). QA validates the scenario being published:
+    # the one named in dataset_info.
+    _sid = d["dataset_info"].set_index("key")["value"].get("scenario_id")
+    if _sid is not None:
+        d = {n: (df[df["scenario_id"].astype(str) == str(_sid)].reset_index(drop=True)
+                 if "scenario_id" in getattr(df, "columns", []) else df)
+             for n, df in d.items()}
+        print(f"  validating scenario {_sid}\n")
+
     # ── 1. row counts ───────────────────────────────────────────────────────
     print("1. Row counts")
     exp = {"city_profile": 56, "city_year_summary": 56, "spot_occurrence": 224,
@@ -195,15 +205,16 @@ def main():
         check("rebuild succeeds", False, r.stderr[-200:])
     else:
         a = {l.split("  ", 1)[1]: l.split("  ", 1)[0]
-             for l in (PKG / "_build" / "checksums_md5.txt").read_text().strip().splitlines()}
+             for l in (PKG / "checksums_md5.txt").read_text().strip().splitlines()}
         b = {l.split("  ", 1)[1]: l.split("  ", 1)[0]
-             for l in (tmp / "_build" / "checksums_md5.txt").read_text().strip().splitlines()}
+             for l in (tmp / "checksums_md5.txt").read_text().strip().splitlines()}
         same = [k for k in a if k in b and a[k] == b[k]]
         diff = [k for k in a if k in b and a[k] != b[k]]
         check("rebuild reproduces the same files", set(a) == set(b), f"{sorted(set(a) ^ set(b))}")
         check("checksums identical except date-bearing files",
               set(diff) <= {"surface_thermal_anomaly_stakeholder_composite.gpkg",
-                            "data_dictionary.csv", "data_dictionary.md"},
+                            "data_dictionary.csv", "data_dictionary.md",
+                            "README.md", "CHANGELOG.md"},
               f"identical: {len(same)}; differ: {sorted(diff)}")
         shutil.rmtree(tmp.parent, ignore_errors=True)
 

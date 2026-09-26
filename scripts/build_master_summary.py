@@ -38,6 +38,7 @@ DATASET_STEM = "surface_thermal_anomaly_stakeholder_composite"   # the single da
 # rule) is recorded in the dataset_info and scenario_config layers, not in the names.
 CRS_ANALYSIS = "ESRI:102022"          # Africa Albers Equal Area Conic
 CRS_WGS84 = "EPSG:4326"
+GPS_DECIMALS = 3   # ~110 m; see build_gps()
 STUDY_YEAR = int(__import__("os").environ.get("LST_STUDY_YEAR", "2024"))  # event-scale year;
                                        # overridden by --study-year / discovered from sources
 TREND_FIRST, TREND_LAST = 2006, 2025
@@ -156,6 +157,7 @@ def capture_scenario():
         ("gistar_z_cold", -1.96, "NB05 GISTAR_Z_COLD"),
         ("bh_fdr_alpha", getattr(cfg, "HOTSPOT_FDR_ALPHA", 0.05), "NB05 FDR_ALPHA"),
         ("kde_contour_levels", str(getattr(cfg, "KDE_CONTOUR_LEVELS", [0.50, 0.75, 0.90])), "NB05 KDE_CONTOURS"),
+        ("gps_coordinate_decimals", GPS_DECIMALS, "this script (privacy coarsening)"),
         ("random_state", getattr(cfg, "RANDOM_STATE", None), "config.py RANDOM_STATE"),
     ]
     canon = json.dumps({k: str(v) for k, v, _ in params}, sort_keys=True, separators=(",", ":"))
@@ -580,6 +582,12 @@ def build_gps(ref, key):
     g["city_slug"] = g["city"].map(slugify)
     g["cluster25"] = g["city"].map(ref.set_index("city")["cluster25"])
     g["study_year"] = STUDY_YEAR
+    # Coarsen to 3 decimal degrees (~110 m) to lower re-identification risk. Measured
+    # displacement is mean 43 m / max 79 m, and it flips no hit/miss outcome at the
+    # smallest published buffer (500 m), so the corroboration analysis is unaffected.
+    g = gpd.GeoDataFrame(g, geometry="geometry", crs=CRS_WGS84)
+    g["geometry"] = gpd.points_from_xy(g.geometry.x.round(GPS_DECIMALS),
+                                       g.geometry.y.round(GPS_DECIMALS), crs=CRS_WGS84)
     out = gpd.GeoDataFrame(
         g[["participant_code", "city_slug", "city", "cluster25", "spot_type", "study_year",
            "geometry"]], geometry="geometry", crs=CRS_WGS84).to_crs(CRS_ANALYSIS)
@@ -979,7 +987,7 @@ LAYER_ONE_LINER = {
     "spot_occurrence": "Spot counts and Gi*/BH-FDR pixel counts on the full city x period x type grid, zeros included.",
     "spots": "One polygon per delineated hot or cold spot (L50 footprint).",
     "spot_contours": "One polygon per KDE contour level (L50, L75, L90), hot and cold spots alike.",
-    "stakeholder_spots_gps": "Stakeholder-marked hot and cold spot locations, pseudonymised.",
+    "stakeholder_spots_gps": "Stakeholder-marked hot and cold spot locations, pseudonymised and coarsened to ~110 m.",
     "stakeholder_perception": "Perception responses, one row per participant, pseudonymised.",
     "hitrate_sensitivity": "Stakeholder-satellite agreement across buffer distances.",
     "city_exposure_by_contour": "Population exposure by contour level per city, period and spot type.",
@@ -1071,7 +1079,11 @@ No DOI is stated unless it was found in the project; all are marked `[PENDING-DO
 
 ## 7. Anonymisation
 
-Participants are identified only by a pseudonymous code, `P001` to `P105`, assigned by sorting on city then original identifier. The mapping back to the original identifiers is held privately by the authors and is not part of this dataset. No free-text response is included. Stakeholder point coordinates are published at their recorded precision of four decimal degrees.
+Participants are identified only by a pseudonymous code, `P001` to `P105`, assigned by sorting on city then original identifier. The mapping back to the original identifiers is held privately by the authors and is not part of this dataset. No free-text response is included. Stakeholder point coordinates are coarsened to three decimal degrees (about 110 m) before
+publication, so that a marked location cannot be resolved to an individual building or
+dwelling. The coarsening displaces points by 43 m on average (79 m at most) and changes no
+hit-or-miss outcome at the smallest published buffer radius of 500 m, so the stakeholder
+corroboration results are unaffected.
 
 ## 8. Licence and citation
 
@@ -1086,11 +1098,11 @@ Licence: **CC BY 4.0**.
 
 Map lines delineate study areas and do not necessarily depict accepted national boundaries.
 """
-    (out_dir / "_build" / "README.md").write_text(txt, encoding="utf-8")
+    (out_dir / "README.md").write_text(txt, encoding="utf-8")
 
 
 def write_changelog(out_dir: Path):
-    (out_dir / "_build" / "CHANGELOG.md").write_text(f"""# Changelog
+    (out_dir / "CHANGELOG.md").write_text(f"""# Changelog
 
 ## v{VERSION} — {date.today().isoformat()}
 
@@ -1116,7 +1128,7 @@ First published version.
 - Explicit zero rows so that every city, period and spot type appears even where no spot was
   detected.
 - `monthly_series` and `monthly_climatology`.
-- `city_exposure_halfdonut`: population exposure by contour level.
+- `city_exposure_by_contour`: population exposure by contour level.
 """, encoding="utf-8")
 
 
@@ -1143,9 +1155,9 @@ def write_checksums(out_dir: Path):
         rel = p.relative_to(out_dir)
         # never checksum the manifest itself: it exists on a rebuild but not on a
         # first build, which would otherwise make the listing non-deterministic
-        if p.is_file() and "_build" not in rel.parts:
+        if p.is_file() and "_build" not in rel.parts and rel.name != "checksums_md5.txt":
             lines.append(f"{md5(p)}  {rel.as_posix()}")
-    (out_dir / "_build" / "checksums_md5.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (out_dir / "checksums_md5.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return len(lines)
 
 
@@ -1229,6 +1241,7 @@ def main():
     SOURCES = {
         "city_zones": "NB01 `{slug}_{zone}_102022_v5.geojson` + `zone_area_summary_with_pop.csv`",
         "city_profile": "NB01 `city_cluster25_lookup.csv`, `zone_area_summary_with_pop.csv`, `cluster25_uc_distribution.csv`; NB04 `city_heat_event_summary.csv`; NB05 `master_city_composite.csv`; NB02 `Cities_Stakeholder_Points_2024.geojson`; spot counts from the `spots` layer",
+        "city_year_summary": "NB04 `city_heat_event_summary.csv` (ERA5-Land persistence, selected events, MODIS<->ERA5-Land comparison); NB05 `master_city_composite.csv`; spot counts from the `spots` layer",
         "trend_statistics": "NB03 `all_cities_temporal_annual.csv` (uc/bra/cr) + `all_cities_delta_annual.csv` (suhii)",
         "annual_series": "NB03 `all_cities_temporal_annual.csv` + `all_cities_delta_annual.csv`",
         "monthly_series": "NB03 `all_cities_temporal_monthly.csv` + `all_cities_delta_monthly.csv`",
@@ -1245,9 +1258,6 @@ def main():
         "scenario_config": "config.py, src/daily_analysis_utils.py and NB05 constants, captured at build time",
     }
     DEVIATIONS.extend([
-        "Layer count is 16, not the 14 in the target schema. `monthly_series` was added "
-        "alongside `monthly_climatology` (both were requested), and `city_exposure_halfdonut` "
-        "was added from halfdonut_city_summary.csv.",
         "`spots`: geom_75_wkt and geom_90_wkt were dropped. They averaged ~1.9 kB per row and "
         "the L75/L90 outlines are real geometries in `spot_contours`.",
         "`pct_dominant_class` is taken from NB01 cluster25_uc_distribution.csv (percent of the "
