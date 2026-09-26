@@ -3,12 +3,22 @@ Master Runner Script for LST Modeling Project
 ==============================================
 
 Executes all project notebooks in the correct dependency order:
-    01 → 01a → 02 → 03 → 04 → 05 → 06
+    01 → 02 → 03 → 04 → 05 → 06 → pub
+
+All notebooks live in Notebook/. Notebook 01 merges the former 01a (OSM/JRC + water
+extraction); `pub` (publication_outputs.ipynb) assembles the manuscript artwork from cache.
 
 Usage:
 ------
   # Run all notebooks for all cities (from CSV):
   python run_all.py
+
+  # Choose what to generate (prompted automatically if omitted):
+  #   manuscript = assemble figures/tables/appendices from cached Results/
+  #   analytic   = run the analysis notebooks 01-06 only
+  #   all        = run the analysis pipeline, then assemble manuscript outputs
+  python run_all.py --scope manuscript
+  python run_all.py --scope all
 
   # Run for specific cities only, see readme for valid names:
   python run_all.py --cities "Lagos" "Abuja" "Kano"
@@ -27,13 +37,15 @@ Usage:
 
 Notes:
 ------
-  - Notebook 01 requires city selection. When run via this script, cities
-    are injected automatically (bypassing the interactive widget).
-  - Notebooks 01a, 03, 04 require Google Earth Engine credentials.
+  - City selection is controlled in config.py (CITY_SELECTION_MODE); the analysis
+    notebooks auto-discover the selected cities.
+  - Notebooks 01, 03, 04, 05 require Google Earth Engine credentials
+    (Notebook 01 now includes the merged OSM/JRC + GHSL water extraction).
   - Notebook 04 (SEVIRI section) requires EUMETSAT credentials.
-  - Notebook 02 is independent and can run in parallel with 01a/03.
+  - Notebook 02 is independent and can run in parallel with 03.
   - Notebook 05 requires outputs from Notebook 04 (SEVIRI rasters).
-    - Notebook 06 requires outputs from Notebook 05 (hotspot polygons).
+  - Notebook 06 requires outputs from Notebook 05 (hotspot polygons).
+  - pub (publication_outputs) requires cached Results/ from 01-06 (no credentials).
 """
 
 import argparse
@@ -62,7 +74,7 @@ except ImportError:
 # Configuration
 # ---------------------------------------------------------------------------
 
-NOTEBOOKS_DIR = PROJECT_ROOT / "notebooks"
+NOTEBOOKS_DIR = PROJECT_ROOT / "Notebook"
 
 # Ordered list of notebooks with metadata
 NOTEBOOK_REGISTRY = [
@@ -70,21 +82,12 @@ NOTEBOOK_REGISTRY = [
         "id": "01",
         "file": "01_AOI_delineation.ipynb",
         "name": "AOI Delineation",
-        "description": "Define Areas of Interest for selected Nigerian cities",
-        "requires_gee": False,
+        "description": "Define city AOIs (zones, population, Cluster25) and extract OSM/JRC "
+                       "water/road features (former 01a is merged in)",
+        "requires_gee": True,          # merged OSM/JRC + GHSL water extraction
         "requires_eumetsat": False,
-        "accepts_cities": True,        # Can receive city selection
+        "accepts_cities": True,        # selection via config.py CITY_SELECTION_MODE
         "depends_on": [],
-    },
-    {
-        "id": "01a",
-        "file": "01a_AOI_OSM_JRC_features.ipynb",
-        "name": "OSM/JRC Feature Extraction",
-        "description": "Extract OpenStreetMap and JRC geospatial features for AOIs",
-        "requires_gee": True,
-        "requires_eumetsat": False,
-        "accepts_cities": False,       # Auto-discovers from 01 outputs
-        "depends_on": ["01"],
     },
     {
         "id": "02",
@@ -136,7 +139,51 @@ NOTEBOOK_REGISTRY = [
         "accepts_cities": False,
         "depends_on": ["05"],
     },
+    {
+        "id": "pub",
+        "file": "publication_outputs.ipynb",
+        "name": "Publication Outputs",
+        "description": "Assemble manuscript figures, tables and appendices from cached Results/ (no GEE/OSM)",
+        "requires_gee": False,
+        "requires_eumetsat": False,
+        "accepts_cities": False,
+        "category": "manuscript",        # produced from cache, not part of the analytic pipeline
+        "depends_on": ["01", "02"],
+    },
+    {
+        "id": "data",
+        "script": "scripts/build_master_summary.py",
+        "file": "build_master_summary.py",
+        "name": "Master Summary Dataset",
+        "description": "Assemble the publication dataset (GeoPackage + data dictionary) from "
+                       "cached Results/, then run its QA suite",
+        "requires_gee": False,
+        "requires_eumetsat": False,
+        "category": "dataset",          # packaged from cache, like the manuscript scope
+        "depends_on": ["01", "02", "03", "04", "05"],
+    },
 ]
+
+# ---------------------------------------------------------------------------
+# Registry defaults + per-notebook directory
+# ---------------------------------------------------------------------------
+# All notebooks live in Notebook/. Each entry may override its folder with a "dir" key.
+for _nb in NOTEBOOK_REGISTRY:
+    _nb.setdefault("category", "analytic")
+    _nb.setdefault("dir", "Notebook")
+
+# Output-scope → which categories to run
+SCOPE_CATEGORIES = {
+    "analytic":   {"analytic"},                          # only the analysis notebooks (01–06)
+    "manuscript": {"manuscript"},                        # only publication_outputs (from cache)
+    "dataset":    {"dataset"},                           # only the published dataset build
+    "all":        {"analytic", "manuscript", "dataset"}, # pipeline, artwork, then dataset
+}
+
+
+def notebook_dir(nb_info: dict) -> Path:
+    """Absolute directory that holds this notebook's .ipynb file."""
+    return PROJECT_ROOT / nb_info.get("dir", "Notebook")
 
 
 def list_notebook_files() -> list:
@@ -162,7 +209,11 @@ def validate_registry_coverage() -> tuple[list, list]:
     disk_files = set(list_notebook_files())
     registry_files = {nb["file"] for nb in NOTEBOOK_REGISTRY}
     unregistered_files = sorted(disk_files - registry_files)
-    missing_files = sorted(registry_files - disk_files)
+    # A registry entry is "missing" only if absent from its own directory.
+    missing_files = sorted(
+        nb["file"] for nb in NOTEBOOK_REGISTRY
+        if not (notebook_dir(nb) / nb["file"]).exists()
+    )
     return unregistered_files, missing_files
 
 
@@ -297,6 +348,48 @@ print(f"[run_all.py] Processing {{len(_INJECTED_CITIES)}} cities: {{', '.join(_I
     return nb
 
 
+def execute_script(nb_info: dict, timeout: int = 7200) -> dict:
+    """Run a registry entry that points at a Python script rather than a notebook.
+
+    Used by the `dataset` scope: the packaging step is a re-runnable script so it can
+    ship with the code repository. The dataset build is followed by its QA suite; a QA
+    failure is reported but does not fail the step, since the dataset is already written.
+    """
+    import subprocess
+
+    script = PROJECT_ROOT / nb_info["script"]
+    print("\n" + "=" * 70)
+    print(f"  Step {nb_info['id']}: {nb_info['name']}")
+    print(f"  Script: {nb_info['script']}")
+    print(f"{'='*70}")
+    if not script.exists():
+        return {"success": False, "duration": 0,
+                "error": f"Script not found: {script}", "output_path": None}
+
+    start_time = time.time()
+    try:
+        r = subprocess.run([sys.executable, str(script)], cwd=PROJECT_ROOT,
+                           timeout=timeout, capture_output=True, text=True)
+        if r.returncode != 0:
+            return {"success": False, "duration": time.time() - start_time,
+                    "error": (r.stderr or r.stdout)[-800:], "output_path": None}
+        print(r.stdout.rstrip())
+        qa = PROJECT_ROOT / "scripts" / "qa_master_summary.py"
+        if qa.exists():
+            q = subprocess.run([sys.executable, str(qa)], cwd=PROJECT_ROOT,
+                               timeout=timeout, capture_output=True, text=True)
+            tail = (q.stdout or "").strip().splitlines()[-1:] or ["(no QA output)"]
+            print(f"  QA: {tail[0]}")
+            if q.returncode != 0:
+                print("  [WARNING] QA reported at least one failing check — see "
+                      "the dataset's _build/03_qa_report.md")
+        return {"success": True, "duration": time.time() - start_time,
+                "error": None, "output_path": str(script)}
+    except subprocess.TimeoutExpired:
+        return {"success": False, "duration": timeout,
+                "error": f"Timed out after {timeout}s", "output_path": None}
+
+
 def execute_notebook(
     nb_info: dict,
     cities: Optional[list] = None,
@@ -321,9 +414,14 @@ def execute_notebook(
     -------
     dict with keys: success, duration, error, output_path
     """
-    nb_path = NOTEBOOKS_DIR / nb_info["file"]
+    # Script entries (e.g. the dataset build) are plain Python, not notebooks.
+    if nb_info.get("script"):
+        return execute_script(nb_info, timeout=timeout)
+
+    nbdir = notebook_dir(nb_info)
+    nb_path = nbdir / nb_info["file"]
     if output_dir is None:
-        output_dir = NOTEBOOKS_DIR
+        output_dir = nbdir
 
     output_path = output_dir / f"executed_{nb_info['file']}"
 
@@ -357,7 +455,7 @@ def execute_notebook(
             nb,
             timeout=timeout,
             kernel_name="python3",
-            resources={"metadata": {"path": str(NOTEBOOKS_DIR)}},
+            resources={"metadata": {"path": str(nbdir)}},
         )
 
         print(f"  Executing... (timeout: {timeout}s)")
@@ -431,6 +529,33 @@ def resolve_notebook_order(requested_ids: Optional[list] = None, start_from: Opt
     return [nb for nb in NOTEBOOK_REGISTRY if nb["id"] in run_ids]
 
 
+def prompt_output_scope() -> str:
+    """
+    Ask the user which outputs to generate. Returns one of
+    'manuscript' | 'all' | 'analytic'. Falls back to 'all' when the session is
+    non-interactive (no TTY), so automated/CI runs are unaffected.
+    """
+    try:
+        if not sys.stdin.isatty():
+            return "all"
+    except Exception:
+        return "all"
+    print("\nWhich outputs would you like to generate?")
+    print("  [1] Manuscript outputs only  — assemble figures, tables & appendices from cached Results/")
+    print("  [2] All project outputs      — run the full analysis pipeline, then assemble manuscript outputs")
+    print("  [3] Analytic outputs only    — run the analysis notebooks (01-06); skip manuscript assembly")
+    choices = {"1": "manuscript", "2": "all", "3": "analytic"}
+    while True:
+        try:
+            choice = input("Enter 1, 2 or 3 [2]: ").strip() or "2"
+        except (EOFError, KeyboardInterrupt):
+            print("\n  No input received — defaulting to 'all'.")
+            return "all"
+        if choice in choices:
+            return choices[choice]
+        print("  Please enter 1, 2 or 3.")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Run all LST Modeling Project notebooks in sequence",
@@ -445,7 +570,7 @@ def main():
     parser.add_argument(
         "--notebooks",
         nargs="+",
-        help="Specific notebook IDs to run (e.g., 01 01a 03 05 06)",
+        help="Specific notebook IDs to run (e.g., 01 03 05 06 pub)",
     )
     parser.add_argument(
         "--start-from",
@@ -472,6 +597,14 @@ def main():
         type=str,
         default=None,
         help="Directory for executed notebook outputs (default: notebooks/)",
+    )
+    parser.add_argument(
+        "--scope",
+        choices=["manuscript", "all", "analytic"],
+        default=None,
+        help="Which outputs to generate: 'manuscript' (assemble figures/tables from cached "
+             "Results/), 'analytic' (run analysis notebooks 01-06 only), or 'all' (both). "
+             "If omitted and no --notebooks given, you will be prompted.",
     )
     parser.add_argument(
         "--dry-run",
@@ -541,8 +674,25 @@ def main():
     has_gee = check_gee_credentials()
     has_eumetsat = check_eumetsat_credentials()
 
+    # ---- Step 2b: Resolve output scope ----
+    # An explicit --notebooks selection is honoured as-is (scope not applied);
+    # otherwise use --scope, or prompt interactively.
+    if args.notebooks:
+        scope = None
+    else:
+        scope = args.scope or prompt_output_scope()
+
     # ---- Step 3: Resolve notebook order ----
     notebooks_to_run = resolve_notebook_order(args.notebooks, args.start_from)
+
+    # Apply output-scope filter (category-based)
+    if scope:
+        cats = SCOPE_CATEGORIES[scope]
+        notebooks_to_run = [nb for nb in notebooks_to_run if nb["category"] in cats]
+        print(f"\nOutput scope: {scope}  (categories: {', '.join(sorted(cats))})")
+        if not notebooks_to_run:
+            print("[ABORT] No notebooks match the selected scope.")
+            return
 
     # Apply skip filters
     if args.skip_gee:

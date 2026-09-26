@@ -12,8 +12,8 @@ import pyogrio
 
 warnings.filterwarnings("ignore")
 ROOT = Path(__file__).resolve().parents[1]
-PKG = ROOT / "Results" / "05_hotspot_analysis" / "master_summary"
-GPKG = PKG / "diurnal_thermal_anomaly_summary.gpkg"
+PKG = ROOT / "Results" / "05_hotspot_analysis" / "surface_thermal_anomaly_stakeholder_composite"
+GPKG = PKG / "surface_thermal_anomaly_stakeholder_composite.gpkg"
 R01, R03 = ROOT / "Results" / "01_aoi_delineation", ROOT / "Results" / "03_temporal_analysis"
 R04, R05 = ROOT / "Results" / "04_temporal_analysis_daily", ROOT / "Results" / "05_hotspot_analysis"
 
@@ -58,7 +58,6 @@ def main():
             check(f"{n}.city_slug ⊆ city_profile", not bad, f"orphans: {sorted(bad)[:5]}")
     su = set(d["spots"].spot_uid)
     check("spot_contours.spot_uid ⊆ spots", not (set(d["spot_contours"].spot_uid) - su))
-    check("h3_grid.spot_uid ⊆ spots", not (set(d["h3_grid"].spot_uid.dropna()) - su))
     pk = {"spots": ["spot_uid"], "spot_contours": ["contour_uid"],
           "city_profile": ["scenario_id", "city_slug"],
           "city_year_summary": ["scenario_id", "city_slug", "study_year"],
@@ -196,15 +195,15 @@ def main():
         check("rebuild succeeds", False, r.stderr[-200:])
     else:
         a = {l.split("  ", 1)[1]: l.split("  ", 1)[0]
-             for l in (PKG / "checksums_md5.txt").read_text().strip().splitlines()}
+             for l in (PKG / "_build" / "checksums_md5.txt").read_text().strip().splitlines()}
         b = {l.split("  ", 1)[1]: l.split("  ", 1)[0]
-             for l in (tmp / "checksums_md5.txt").read_text().strip().splitlines()}
+             for l in (tmp / "_build" / "checksums_md5.txt").read_text().strip().splitlines()}
         same = [k for k in a if k in b and a[k] == b[k]]
         diff = [k for k in a if k in b and a[k] != b[k]]
         check("rebuild reproduces the same files", set(a) == set(b), f"{sorted(set(a) ^ set(b))}")
         check("checksums identical except date-bearing files",
-              set(diff) <= {"diurnal_thermal_anomaly_summary.gpkg", "README.md", "CHANGELOG.md",
-                            "checksums_md5.txt", "data_dictionary.csv", "data_dictionary.md"},
+              set(diff) <= {"surface_thermal_anomaly_stakeholder_composite.gpkg",
+                            "data_dictionary.csv", "data_dictionary.md"},
               f"identical: {len(same)}; differ: {sorted(diff)}")
         shutil.rmtree(tmp.parent, ignore_errors=True)
 

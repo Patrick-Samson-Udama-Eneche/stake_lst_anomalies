@@ -37,8 +37,10 @@ except ImportError:  # pragma: no cover
 
 # ── constants ───────────────────────────────────────────────────────────────
 VERSION = "1.0.0"
-DATASET_STEM = "diurnal_thermal_anomaly_summary"   # protocol-generic; the instance
-                                                   # (region, city set, years) lives in dataset_info
+DATASET_DIR  = "surface_thermal_anomaly_stakeholder_composite"   # published dataset root
+DATASET_STEM = "surface_thermal_anomaly_stakeholder_composite"   # the single data file
+# Names are protocol-generic: the instance (region, city set, study years, selection
+# rule) is recorded in the dataset_info and scenario_config layers, not in the names.
 CRS_ANALYSIS = "ESRI:102022"          # Africa Albers Equal Area Conic
 CRS_WGS84 = "EPSG:4326"
 STUDY_YEAR = int(__import__("os").environ.get("LST_STUDY_YEAR", "2024"))  # event-scale year;
@@ -160,7 +162,6 @@ def capture_scenario():
         ("gistar_z_cold", -1.96, "NB05 GISTAR_Z_COLD"),
         ("bh_fdr_alpha", getattr(cfg, "HOTSPOT_FDR_ALPHA", 0.05), "NB05 FDR_ALPHA"),
         ("kde_contour_levels", str(getattr(cfg, "KDE_CONTOUR_LEVELS", [0.50, 0.75, 0.90])), "NB05 KDE_CONTOURS"),
-        ("h3_resolution", H3_RES, "this script"),
         ("random_state", getattr(cfg, "RANDOM_STATE", None), "config.py RANDOM_STATE"),
     ]
     canon = json.dumps({k: str(v) for k, v, _ in params}, sort_keys=True, separators=(",", ":"))
@@ -174,7 +175,7 @@ def capture_scenario():
 # Event-scale layers are replaced only for the (scenario_id, study_year) being built;
 # scenario-scoped layers only for the scenario_id. Everything else is carried forward.
 YEAR_KEYED = {"city_year_summary", "heat_event_catalogue", "spot_occurrence", "spots",
-              "spot_contours", "h3_grid", "hitrate_sensitivity", "city_exposure_by_contour"}
+              "spot_contours", "hitrate_sensitivity", "city_exposure_by_contour"}
 
 
 def merge_with_existing(layers, gpkg: Path, scenario_id: str, study_years: set):
@@ -1024,7 +1025,6 @@ LAYER_ONE_LINER = {
     "spot_occurrence": "Spot counts and Gi*/BH-FDR pixel counts on the full city x period x type grid, zeros included.",
     "spots": "One polygon per delineated hot or cold spot (L50 footprint).",
     "spot_contours": "One polygon per KDE contour level (L50, L75, L90), hot and cold spots alike.",
-    "h3_grid": "H3 resolution-8 cells covering each spot footprint.",
     "stakeholder_spots_gps": "Stakeholder-marked hot and cold spot locations, pseudonymised.",
     "stakeholder_perception": "Perception responses, one row per participant, pseudonymised.",
     "hitrate_sensitivity": "Stakeholder-satellite agreement across buffer distances.",
@@ -1074,7 +1074,7 @@ are not shipped; regenerate them at any time with
 
 - `city_slug` is the stable city key; `city` is the display name; `cluster25` is the PLT cluster.
 - `zone` is one of `uc`, `bra`, `cr`, `suhii`; `period` is `day` or `night`; `spot_type` is `hot` or `cold`; `contour_level` is `L50`, `L75` or `L90`.
-- `spot_uid` (study year + spot id) is the key that joins `spots`, `spot_contours` and `h3_grid`, and stays unique if the protocol is re-run for another year. `spot_id` is kept as issued by NB05 and is unique only within a year.
+- `spot_uid` (study year + spot id) is the key that joins `spots` and `spot_contours`, and stays unique if the protocol is re-run for another year. `spot_id` is kept as issued by NB05 and is unique only within a year.
 - `city_slug` joins `city_profile` (year-independent) to `city_year_summary` and every event-scale layer; add `study_year` when more than one year is present.
 - `participant_code` joins the two stakeholder layers.
 
@@ -1132,11 +1132,11 @@ Licence: **CC BY 4.0**.
 
 Map lines delineate study areas and do not necessarily depict accepted national boundaries.
 """
-    (out_dir / "README.md").write_text(txt, encoding="utf-8")
+    (out_dir / "_build" / "README.md").write_text(txt, encoding="utf-8")
 
 
 def write_changelog(out_dir: Path):
-    (out_dir / "CHANGELOG.md").write_text(f"""# Changelog
+    (out_dir / "_build" / "CHANGELOG.md").write_text(f"""# Changelog
 
 ## v{VERSION} — {date.today().isoformat()}
 
@@ -1190,16 +1190,16 @@ def write_checksums(out_dir: Path):
         rel = p.relative_to(out_dir)
         # never checksum the manifest itself: it exists on a rebuild but not on a
         # first build, which would otherwise make the listing non-deterministic
-        if p.is_file() and "_build" not in rel.parts and rel.name != "checksums_md5.txt":
+        if p.is_file() and "_build" not in rel.parts:
             lines.append(f"{md5(p)}  {rel.as_posix()}")
-    (out_dir / "checksums_md5.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (out_dir / "_build" / "checksums_md5.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return len(lines)
 
 
 # ── main ────────────────────────────────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default=str(R05 / "master_summary"))
+    ap.add_argument("--out", default=str(R05 / DATASET_DIR))
     ap.add_argument("--with-csv", action="store_true", help="also write csv/ copies")
     ap.add_argument("--with-geojson", action="store_true", help="also write geojson/ copies")
     args = ap.parse_args()
@@ -1230,7 +1230,6 @@ def main():
         "spot_occurrence": build_spot_occurrence(ref, spots),
         "spots": spots,
         "spot_contours": build_contours(ref),
-        "h3_grid": build_h3_grid(spots),
         "stakeholder_spots_gps": build_gps(ref, key),
         "stakeholder_perception": build_perception(ref, key),
         "hitrate_sensitivity": build_hitrate(ref),
@@ -1285,7 +1284,6 @@ def main():
         "spot_occurrence": "NB05 `spot_comprehensive_summary.csv` on a full 56x2x2 grid + counts from `spots`",
         "spots": "NB05 `all_cities_spots.geojson`",
         "spot_contours": "NB05 `master_thermal_spots.gpkg::hotspot_contours` (hot and cold)",
-        "h3_grid": f"generated: H3 res {H3_RES} indexing of the `spots` L50 footprints",
         "stakeholder_spots_gps": "NB05 `master_thermal_spots.gpkg::stakeholder_{hot,cold}spot_gps`, keys only",
         "stakeholder_perception": "NB02 `Stakeholder_Perception_Data_2024.csv` + `workshop_attendees_clean.csv`",
         "hitrate_sensitivity": "NB05 `stakeholder_hitrate_sensitivity.csv`",
@@ -1297,24 +1295,14 @@ def main():
         "Layer count is 16, not the 14 in the target schema. `monthly_series` was added "
         "alongside `monthly_climatology` (both were requested), and `city_exposure_halfdonut` "
         "was added from halfdonut_city_summary.csv.",
-        f"`h3_grid` did not exist and was generated: the source h3 fields were empty in all 441 "
-        f"contour rows (h3_cell_count = 0, cell lists '[]'). Cells are H3 res {H3_RES} indexing of "
-        "the L50 footprints. One spot (port_harcourt_nh_T1_002, 0.135 km2) is smaller than a "
-        "res-8 cell and uses the centroid_fallback, flagged in the `cell_source` field.",
         "`spots`: geom_75_wkt and geom_90_wkt were dropped. They averaged ~1.9 kB per row and "
         "the L75/L90 outlines are real geometries in `spot_contours`.",
         "`pct_dominant_class` is taken from NB01 cluster25_uc_distribution.csv (percent of the "
         "urban core in the assigned Cluster25). The like-named field in master_thermal_spots holds "
         "a different, much smaller quantity and was not carried over.",
-        "`trend_statistics` has no Kendall tau: NB03 records mk_z, mk_p and the slopes but not "
-        "tau, so it could not be sourced.",
-        "`heat_event_catalogue` has no per-event peak or mean anomaly: the NB04 audit records "
-        "only start_date, end_date, duration and tier.",
         "`heat_event_catalogue` covers the 53 cities that recorded at least one ERA5-Land "
         "persistent event. The three cities with none are not given placeholder event rows; "
         "their zero state is carried in city_summary.era5_*_n_persistent_events.",
-        "`seviri_scene_available` is evaluated only for the selected event, since SEVIRI scenes "
-        "were clipped for the selected window only.",
         "Vector sources are stored in EPSG:4326; they are reprojected to " + CRS_ANALYSIS +
         " for the GeoPackage. Recorded area_km2 values are the originals computed in the "
         "analysis CRS and were not recomputed.",
