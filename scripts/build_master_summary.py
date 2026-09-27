@@ -674,7 +674,7 @@ DESCR = {
     "city_slug": ("Stable city key, as used in the AoI file names.", "", "derived", "keying", "NB01 AoI file names"),
     "city": ("City display name.", "", "derived", "keying", "NB01 study_cities_final.csv"),
     "cluster25": ("Physiographic landscape typology (PLT) cluster identifier.", "", "derived", "PLT typology overlay", "NB01 city_cluster25_lookup.csv"),
-    "zone": ("Spatial zone: uc urban core, bra built-up rural area ring, cr city region, suhii the urban-core minus BRA difference.", "", "derived", "three-zone delineation", "NB01 AoI v5"),
+    "zone": ("Spatial zone: uc urban core, bra background reference area, cr city region, suhii the urban-core minus BRA difference.", "", "derived", "three-zone delineation", "NB01 AoI v5"),
     "period": ("Overpass period: day or night.", "", "derived", "", "all notebooks"),
     "spot_type": ("Thermal anomaly type: hot or cold.", "", "derived", "Gi* sign", "NB05"),
     "contour_level": ("KDE contour level: L50 outer extent, L75 inner zone, L90 dense core.", "", "derived", "Gaussian KDE", "NB05 section 6"),
@@ -705,7 +705,8 @@ DESCR = {
     "start_date": ("First day of the persistent heat event.", "date", "ERA5-Land", "P90 threshold, >= 2 consecutive days", "NB04 event audit"),
     "end_date": ("Last day of the persistent heat event.", "date", "ERA5-Land", "P90 threshold, >= 2 consecutive days", "NB04 event audit"),
     "duration_days": ("Event length.", "days", "ERA5-Land", "P90 threshold, >= 2 consecutive days", "NB04 event audit"),
-    "tier": ("Event quality tier assigned during selection.", "", "ERA5-Land", "event selection", "NB04 event audit"),
+    # NB: "tier" means the event quality tier here and the delineation tier in `spots`, so both
+    # live in LAYER_DESCR / DESCR respectively — see LAYER_DESCR above.
     "is_selected": ("True for the event chosen for SEVIRI compositing.", "", "ERA5-Land", "event selection", "NB04 event audit"),
     "era5_p90_threshold_c": ("City and period specific 90th percentile of the ERA5-Land daily LST series.", "C", "ERA5-Land", "P90 threshold", "NB04 event audit"),
     "n_spots": ("Number of delineated spots.", "count", "SEVIRI", "Gi* |Z| >= 1.96 then KDE delineation", "NB05"),
@@ -766,15 +767,15 @@ DESCR.update({
     "lowest_year_value_c": ("Zone value in the lowest year.", "C", "MODIS", "series extremes", "NB03"),
     # zone geometry / delineation (NB01)
     "uc_area_km2": ("Urban-core area.", "km2", "GHS-SMOD", "three-zone delineation", "NB01"),
-    "bra_area_km2": ("Built-up rural area ring area.", "km2", "GHS-SMOD", "three-zone delineation", "NB01"),
+    "bra_area_km2": ("Area of the background reference area (BRA).", "km2", "GHS-SMOD", "three-zone delineation", "NB01"),
     "cr_area_km2": ("City-region area.", "km2", "GHS-SMOD", "three-zone delineation", "NB01"),
-    "bra_uc_ratio": ("Ratio of BRA ring area to urban-core area.", "ratio", "derived", "three-zone delineation", "NB01"),
-    "bra_dist_km": ("Radial distance from the urban core at which the BRA ring was fixed.", "km", "derived", "three-zone delineation", "NB01"),
-    "bra_converged": ("True when the BRA ring search met its convergence criterion.", "", "derived", "three-zone delineation", "NB01"),
-    "bra_coastal": ("True when the BRA ring is truncated by coastline or water.", "", "JRC Global Surface Water", "three-zone delineation", "NB01"),
-    "bra_water_frac": ("Fraction of the BRA ring covered by permanent water.", "fraction", "JRC Global Surface Water", "water masking", "NB01"),
-    "bra_smod_builtup_frac": ("Fraction of the BRA ring classed as built-up.", "fraction", "GHS-SMOD", "three-zone delineation", "NB01"),
-    "bra_effective_area_km2": ("BRA ring area after water and built-up exclusion.", "km2", "derived", "three-zone delineation", "NB01"),
+    "bra_uc_ratio": ("Ratio of BRA area to urban-core area.", "ratio", "derived", "three-zone delineation", "NB01"),
+    "bra_dist_km": ("Radial distance from the urban core at which the BRA was fixed.", "km", "derived", "three-zone delineation", "NB01"),
+    "bra_converged": ("True when the BRA search met its convergence criterion.", "", "derived", "three-zone delineation", "NB01"),
+    "bra_coastal": ("True when the BRA is truncated by coastline or water.", "", "JRC Global Surface Water", "three-zone delineation", "NB01"),
+    "bra_water_frac": ("Fraction of the BRA covered by permanent water.", "fraction", "JRC Global Surface Water", "water masking", "NB01"),
+    "bra_smod_builtup_frac": ("Fraction of the BRA classed as built-up.", "fraction", "GHS-SMOD", "three-zone delineation", "NB01"),
+    "bra_effective_area_km2": ("BRA area after water and built-up exclusion.", "km2", "derived", "three-zone delineation", "NB01"),
     "smod_epoch_year": ("GHS-SMOD epoch used to delineate the zones.", "year", "GHS-SMOD", "three-zone delineation", "NB01"),
     "uc_flags": ("Delineation flags raised for the urban core.", "", "derived", "three-zone delineation", "NB01"),
     "population_wup_k": ("City population from UN World Urbanization Prospects.", "thousand persons", "UN WUP", "lookup", "NB01"),
@@ -882,7 +883,23 @@ _PATTERNS = [
 ]
 
 
-def describe(field: str):
+# Field names whose meaning depends on the layer they sit in. Checked before DESCR, which is
+# keyed on the field name alone and so can only hold one meaning per name.
+LAYER_DESCR = {
+    ("heat_event_catalogue", "tier"): (
+        "Quality tier of the event window, assigned during event selection.", "",
+        "ERA5-Land", "event selection", "NB04 event audit"),
+    ("city_profile", "geometry"): (
+        "Point geometry: the centroid of the city's urban-core polygon. It is a label point for "
+        "the record, not a surveyed or gazetteer city location; it sits a median 1.1 km from the "
+        "UN WUP city coordinate (39.3 km at most, where an absorbed city was remapped).", "",
+        "derived", "urban-core centroid", "NB01 urban-core polygon"),
+}
+
+
+def describe(field: str, layer: str | None = None):
+    if (layer, field) in LAYER_DESCR:
+        return LAYER_DESCR[(layer, field)]
     if field in DESCR:
         return DESCR[field]
     for pat, (d, unit, sensor, method, prov) in _PATTERNS:
@@ -911,7 +928,7 @@ def build_dictionary(layers):
             continue
         for f in df.columns:
             s = df[f]
-            d, unit, sensor, method, prov = describe(f)
+            d, unit, sensor, method, prov = describe(f, lname)
             if d.startswith("[CHECK]"):
                 CHECKS.append(f"{lname}.{f}")
             if f == "geometry":
@@ -983,7 +1000,7 @@ def md5(p: Path) -> str:
 
 
 LAYER_ONE_LINER = {
-    "city_zones": "Urban-core, BRA ring and city-region polygons for every city.",
+    "city_zones": "Urban-core, background reference area and city-region polygons for every city.",
     "city_profile": "One record per city, year-independent: PLT classes, zone areas, population, participants.",
     "city_year_summary": "One record per city and study year: ERA5-Land persistence, selected events, sensor comparison, spot counts.",
     "trend_statistics": "Long-term LST trend tests per city, zone and period.",

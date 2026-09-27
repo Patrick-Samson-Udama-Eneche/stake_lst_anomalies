@@ -79,6 +79,25 @@ def main():
           "they match" if _agree else
           f"hit-rate {_denom} vs points {_counted}; disclosed in README §7")
 
+    # A field name repeated in the DESCR literal is collapsed by Python with the last one
+    # silently winning, which is how heat_event_catalogue.tier came to carry the spot-tier
+    # text. Parse the source and refuse to let that recur.
+    import ast as _ast, collections as _coll
+    _src = (ROOT / "scripts" / "build_master_summary.py").read_text(encoding="utf-8")
+    _keys = []
+    for _n in _ast.walk(_ast.parse(_src)):
+        _dicts = []
+        if isinstance(_n, _ast.Assign) and getattr(_n.targets[0], "id", "") == "DESCR":
+            _dicts = [_n.value]
+        elif (isinstance(_n, _ast.Call) and isinstance(_n.func, _ast.Attribute)
+              and _n.func.attr == "update" and getattr(_n.func.value, "id", "") == "DESCR"):
+            _dicts = [a for a in _n.args if isinstance(a, _ast.Dict)]
+        for _dd in _dicts:
+            _keys += [k.value for k in _dd.keys if isinstance(k, _ast.Constant)]
+    _dup = sorted(k for k, c in _coll.Counter(_keys).items() if c > 1)
+    check("no duplicate field key in DESCR", not _dup,
+          f"{len(_keys)} entries, {len(set(_keys))} unique" + (f"; duplicated: {_dup}" if _dup else ""))
+
     # ── 2. key integrity ────────────────────────────────────────────────────
     print("\n2. Key integrity")
     cities = set(d["city_profile"].city_slug)
