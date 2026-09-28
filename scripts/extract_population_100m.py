@@ -17,7 +17,15 @@ pilot truth values. No intermediate raster is produced and nothing is resampled.
 reduceRegions is deliberately NOT used -- see _reduce for the measured reason.
 
 One request per city, cached to Results/05_hotspot_analysis/population_100m/{slug}.csv.
-A rerun skips cities already cached, so a timeout never costs completed work.
+A rerun skips cities already cached, so a failure never costs completed work.
+
+Failures are handled by kind, because they are not the same problem:
+  * a GEOMETRY error (GEE reports a bare "internal error") skips the tileScale ladder --
+    raising tileScale cannot fix a malformed geometry -- and drops to one polygon at a time;
+  * a CAPACITY error escalates tileScale 1 -> 4 -> 8 -> 16 with increasing waits;
+  * a polygon GEE still refuses is reduced from a buffer(0)-repaired COPY, and only if the
+    repair leaves the area within AREA_TOL. Stored geometries are never modified.
+See the README beside the cache for the measured numbers behind each of these.
 
 Usage:
     python scripts/extract_population_100m.py              # all cities, resume from cache
@@ -51,7 +59,14 @@ TILE_SCALES = [1, 4, 8, 16]       # GEE default first (fastest); raised on each 
                                   # real time: at tileScale=4 a city took ~4 min against
                                   # ~2 s at the default, so it is a fallback, not a default.
 WAITS = [5, 20, 60, 60]           # seconds before each retry
-BATCH_SIZE = 10                   # fallback: split a failing city into batches of this size
+EXTRACTION_LABEL = "mapped reduceRegion sum, native 100 m grid, fractional overlap"
+
+# GEE reports a malformed geometry as a bare "internal error". That is not a capacity
+# problem, so raising tileScale cannot help and only wastes time: Onitsha burned 4 attempts
+# and ~8 minutes before reaching the path that actually worked. Capacity problems announce
+# themselves differently, and those are the ones tileScale is for.
+GEOMETRY_ERROR = re.compile(r"internal error", re.I)
+CAPACITY_ERROR = re.compile(r"timed? ?out|memory|too many|user memory|computation timed", re.I)
 
 
 def slugify(s: str) -> str:
@@ -161,15 +176,18 @@ def _repair(geom):
     return fixed, rel
 
 
-def extract_city(ee, img, sub: gpd.GeoDataFrame, city: str) -> tuple[dict, int]:
-    """Reduce one city, escalating tileScale and then batching. Returns (values, n_retries)."""
+def extract_city(ee, img, sub: gpd.GeoDataFrame, city: str) -> tuple[dict, int, set]:
+    """Reduce one city. Returns (values, n_retries, keys whose geometry needed repair)."""
     last = None
     for attempt, ts in enumerate(TILE_SCALES):
         try:
-            return _reduce(ee, img, sub, ts), attempt
+            return _reduce(ee, img, sub, ts), attempt, set()
         except Exception as exc:
             last = exc
             print(f"      attempt {attempt + 1} (tileScale={ts}) failed: {str(exc)[:110]}")
+            if GEOMETRY_ERROR.search(str(exc)) and not CAPACITY_ERROR.search(str(exc)):
+                print("      -> geometry error, not capacity: skipping the tileScale ladder")
+                break
             if attempt < len(TILE_SCALES) - 1:
                 time.sleep(WAITS[attempt])
 
@@ -198,7 +216,7 @@ def extract_city(ee, img, sub: gpd.GeoDataFrame, city: str) -> tuple[dict, int]:
               f"the stored geometry is untouched")
     if failed:
         raise RuntimeError(f"{city}: {len(failed)} polygon(s) failed: {failed} ({last})")
-    return values, len(TILE_SCALES)
+    return values, len(TILE_SCALES), {k for k, _ in repaired}
 
 
 def main() -> int:
@@ -236,7 +254,7 @@ def main() -> int:
         print(f"[{n:>2}/{len(cities)}] {city} — {len(sub)} polygons")
         t0 = time.time()
         try:
-            values, retries = extract_city(ee, img, sub, city)
+            values, retries, repaired_keys = extract_city(ee, img, sub, city)
         except Exception as exc:
             print(f"      FAILED: {str(exc)[:200]}")
             failed.append(city)
@@ -244,7 +262,8 @@ def main() -> int:
         out = sub.drop(columns="geometry").copy()
         out["population_100m"] = out["key"].map(values)
         out["ghs_epoch"] = epoch
-        out["extraction"] = "reduceRegions sum, native 100 m, fractional overlap"
+        out["extraction"] = EXTRACTION_LABEL
+        out["geometry_repaired"] = out["key"].isin(repaired_keys)
         out.to_csv(cache, index=False)
         dt = time.time() - t0
         print(f"      {len(out)} values, {dt:6.1f}s, {retries} retr{'y' if retries == 1 else 'ies'}"
