@@ -194,6 +194,13 @@ def capture_scenario():
         ("gistar_z_cold", -1.96, "NB05 GISTAR_Z_COLD"),
         ("bh_fdr_alpha", getattr(cfg, "HOTSPOT_FDR_ALPHA", 0.05), "NB05 FDR_ALPHA"),
         ("kde_contour_levels", str(getattr(cfg, "KDE_CONTOUR_LEVELS", [0.50, 0.75, 0.90])), "NB05 KDE_CONTOURS"),
+        # NB: the method is a MAPPED reduceRegion, not reduceRegions. reduceRegions counts
+        # a pixel once per part of a multi-part geometry and came out 2.0% high on a test
+        # zone, so the label states what actually runs.
+        ("ghs_pop_extraction", "mapped reduceRegion sum, native 100 m grid, fractional overlap",
+         "scripts/extract_population_100m.py"),
+        ("ghs_pop_display_raster", "1 km, mean x pixelArea/1e4",
+         "src/data_io.py download_ghsl_population_raster (display only)"),
         ("gps_coordinate_decimals", GPS_DECIMALS, "this script (privacy coarsening)"),
         ("random_state", getattr(cfg, "RANDOM_STATE", None), "config.py RANDOM_STATE"),
     ]

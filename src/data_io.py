@@ -2080,6 +2080,20 @@ def download_ghsl_population_raster(
     """
     Download the national Nigeria GHSL population raster from GEE at 1 km.
 
+    **Not used for population counts.** This raster is a DISPLAY product only. It is
+    resampled from GHS-POP's native 100 m grid by ``getDownloadURL(scale=1000)``, which
+    picks a representative cell value rather than summing the ~100 cells beneath each
+    1 km cell, so its zonal sums understate population by roughly 100x (measured: Jos
+    city region 15,970 against a true 1,550,542, a factor of 97). Every population figure
+    in the study comes from ``scripts/extract_population_100m.py``, which sums GHS-POP
+    server-side on its own 100 m grid and never downloads a raster at all.
+
+    If you need a correctly scaled 1 km raster for a map, aggregate as
+    ``mean() * pixelArea/1e4`` rather than ``sum()``: a plain ``reduceResolution(sum())``
+    is overlap-weighted and behaves like a mean, while ``sum().unweighted()`` double-counts
+    boundary pixels (measured 1.21x too high over a Jos window). The mean-times-area form
+    came within 0.6% of the server-side truth.
+
     The raster is saved permanently to ``data/inputs/geospatial_features/``
     and reused on subsequent runs (skip-if-exists logic).
 
@@ -2155,20 +2169,18 @@ def download_ghsl_population_raster(
         download_region = nigeria_ee
         print(f"  Using bounding box fallback: {ghsl_pop_config['nigeria_bounds']}")
 
-    # Aggregate 100 m → 1 km using sum (population is additive)
-    # Download at native resolution and let the scale parameter handle resampling.
-    # For population data, we use reduceResolution server-side to get proper sums.
+    # NOTE: this does NOT aggregate by sum. scale=1000 asks GEE for 1 km pixels and it
+    # resamples rather than adding, so each output cell carries a representative 100 m
+    # value. That is acceptable for a display map and wrong for a population count -- see
+    # the docstring. Population counts come from scripts/extract_population_100m.py.
     scale = ghsl_pop_config['scale']
     crs = ghsl_pop_config['crs']
 
     # Clip to Nigeria first (reduces data volume)
     image_clipped = image.clip(nigeria_ee)
 
-    # Download via getDownloadURL
-    # scale=1000 requests 1 km pixels. Without reduceResolution, GEE uses
-    # default (nearest-neighbour) resampling, which is imperfect for
-    # population counts but acceptable at national overview level.
-    # The per-polygon zonal sums are extracted later at this resolution.
+    # Download via getDownloadURL at 1 km, for display only. Per-polygon population is
+    # NOT taken from this file; it is extracted at native 100 m server-side.
     try:
         url = image_clipped.getDownloadURL({
             'scale': scale,
