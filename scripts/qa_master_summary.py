@@ -79,6 +79,44 @@ def main():
           "they match" if _agree else
           f"hit-rate {_denom} vs points {_counted}; disclosed in README §7")
 
+    # ── merged (post-absorption) city population ────────────────────────────
+    # Step 3 of the zonation protocol absorbs 11 cities into larger neighbours and reassigns
+    # their population. These checks tie the published totals back to the UN WUP 2024 table.
+    _cp = d["city_profile"]
+    _wup = (pd.read_csv(ROOT / "data" / "inputs" / "geospatial_features" /
+                        "Major_cities_population_Nigeria_WUP_2025.csv", thousands=",")
+            .set_index("City_Name")["2024"].astype(float))
+    _ab = pd.read_csv(R01 / "absorbed_cities.csv")
+
+    _listed = [c.strip() for s in _cp["absorbed_cities"].dropna() for c in str(s).split(";") if c.strip()]
+    _dupes = sorted({c for c in _listed if _listed.count(c) > 1})
+    _retained = set(_cp["city"])
+    _overlap = sorted(set(_listed) & _retained)
+    check("absorbed_cities lists 11 cities, each once, none of them retained",
+          len(_listed) == 11 and not _dupes and not _overlap,
+          f"{len(_listed)} listed; duplicated {_dupes or 'none'}; also retained {_overlap or 'none'}")
+
+    _expected = _cp["city"].map(
+        _ab.assign(pop=_ab.absorbed_city.map(_wup)).groupby("parent_aoi")["pop"].sum()).fillna(0.0)
+    _delta = (_cp["population_wup_merged_k"] - _cp["population_wup_k"] - _expected).abs()
+    check("population_wup_merged_k == population_wup_k + absorbed populations",
+          bool((_delta < 0.51).all()), f"max deviation {_delta.max():.3f} thousand")
+
+    _tot, _all67 = _cp["population_wup_merged_k"].sum(), _wup.sum()
+    check("merged population totals the 67 candidate cities",
+          abs(_tot - _all67) < 0.51,
+          f"{_tot:,.0f}k vs {_all67:,.0f}k over {len(_wup)} candidates ({_tot/1000:.1f} million)")
+
+    _cl = _cp.groupby("cluster25")[["population_wup_k", "population_wup_merged_k"]].sum().round(0)
+    _t3 = {13: 37960, 9: 8361, 16: 1203}
+    _wrong = [f"C{int(c)}={r.population_wup_merged_k:.0f}!={_t3[int(c)]}"
+              for c, r in _cl.iterrows() if int(c) in _t3 and abs(r.population_wup_merged_k - _t3[int(c)]) >= 1]
+    _moved = [f"C{int(c)}" for c, r in _cl.iterrows()
+              if int(c) not in _t3 and r.population_wup_k != r.population_wup_merged_k]
+    check("cluster sums match manuscript Table 3; other clusters unchanged",
+          not _wrong and not _moved,
+          f"C13/C9/C16 {'match' if not _wrong else _wrong}; unexpectedly changed: {_moved or 'none'}")
+
     # A field name repeated in the DESCR literal is collapsed by Python with the last one
     # silently winning, which is how heat_event_catalogue.tier came to carry the spot-tier
     # text. Parse the source and refuse to let that recur.

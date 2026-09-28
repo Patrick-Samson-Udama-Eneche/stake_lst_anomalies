@@ -50,6 +50,8 @@ R03 = ROOT / "Results" / "03_temporal_analysis"
 R04 = ROOT / "Results" / "04_temporal_analysis_daily"
 R05 = ROOT / "Results" / "05_hotspot_analysis"
 MASTER_GPKG = R05 / "master_thermal_spots.gpkg"
+# the UN WUP 2024 table NB01 used for city selection (config.AOI_DATA_PATHS['cities_csv'])
+WUP_CSV = ROOT / "data" / "inputs" / "geospatial_features" / "Major_cities_population_Nigeria_WUP_2025.csv"
 
 ZONE_MAP = {"urban_core": "uc", "bra": "bra", "city_region": "cr", "delta_uc_bra": "suhii"}
 ZONE_ORDER = ["uc", "bra", "cr", "suhii"]
@@ -87,6 +89,33 @@ def nullify(df: pd.DataFrame, cols, sentinel=0) -> pd.DataFrame:
     return df
 
 
+# ── merged (post-absorption) city population ────────────────────────────────
+# Step 3 of the zonation protocol absorbs a city whose urban core falls entirely
+# inside a larger neighbour and reassigns its population to the parent. population_wup_k
+# holds only the parent's OWN figure, so the two fields added here carry the reassigned
+# total and the names behind it. Both are read from files; no population is typed in.
+def add_merged_population(ref: pd.DataFrame) -> pd.DataFrame:
+    wup = (pd.read_csv(WUP_CSV, thousands=",")
+           .set_index("City_Name")["2024"].astype(float))          # UN WUP 2024, thousands
+    ab = pd.read_csv(R01 / "absorbed_cities.csv")                  # NB01 deduplication step
+    missing = sorted(set(ab["absorbed_city"]) - set(wup.index))
+    if missing:
+        raise SystemExit(f"absorbed cities absent from the UN WUP table: {missing}")
+
+    ab["pop"] = ab["absorbed_city"].map(wup)
+    added = ab.groupby("parent_aoi")["pop"].sum()
+    names = ab.groupby("parent_aoi")["absorbed_city"].apply(lambda s: "; ".join(sorted(s)))
+
+    ref = ref.copy()
+    ref["population_wup_merged_k"] = ref["population_wup_k"] + ref["city"].map(added).fillna(0.0)
+    ref["absorbed_cities"] = ref["city"].map(names)                # NaN where nothing was absorbed
+
+    # place both immediately after population_wup_k
+    cols = [c for c in ref.columns if c not in ("population_wup_merged_k", "absorbed_cities")]
+    i = cols.index("population_wup_k") + 1
+    return ref[cols[:i] + ["population_wup_merged_k", "absorbed_cities"] + cols[i:]]
+
+
 # ── shared reference tables ─────────────────────────────────────────────────
 def load_reference():
     lookup = pd.read_csv(R01 / "city_cluster25_lookup.csv")
@@ -109,6 +138,7 @@ def load_reference():
              "bra_dist_km", "bra_converged", "bra_coastal")
     ref = ref.merge(areas.drop(columns=[c for c in _drop if c in areas.columns]),
                     on="city", how="left")
+    ref = add_merged_population(ref)
     # percent of the urban core occupied by the assigned Cluster25
     ucd = pd.read_csv(R01 / "cluster25_uc_distribution.csv").rename(columns={"City Region": "city"})
     pct = []
@@ -774,7 +804,9 @@ DESCR.update({
     "bra_effective_area_km2": ("BRA BOUNDING BOX area after water and peri-urban exclusion. Measured on the bbox and therefore LARGER than bra_area_km2, which also excludes the urban core.", "km2", "derived", "three-zone delineation", "NB01"),
     "smod_epoch_year": ("GHS-SMOD epoch used to delineate the zones.", "year", "GHS-SMOD", "three-zone delineation", "NB01"),
     "uc_flags": ("Delineation flags raised for the urban core.", "", "derived", "three-zone delineation", "NB01"),
-    "population_wup_k": ("City population from UN World Urbanization Prospects.", "thousand persons", "UN WUP", "lookup", "NB01"),
+    "population_wup_k": ("City population from UN World Urbanization Prospects, 2024 estimate. The parent city's own figure; it excludes any city absorbed into it.", "thousand persons", "UN WUP", "lookup", "NB01"),
+    "population_wup_merged_k": ("City population after spatial deduplication: the city's own UN WUP 2024 population plus that of every city absorbed into it. Equals population_wup_k where nothing was absorbed. This is the total used for city- and cluster-level population reporting.", "thousand persons", "UN WUP", "spatial deduplication", "NB01 absorbed_cities.csv + UN WUP 2024 table"),
+    "absorbed_cities": ("Names of the cities absorbed into this one, semicolon-separated, in UN WUP spelling. A city is absorbed when its urban core falls entirely within a larger adjacent city.", "", "derived", "spatial deduplication", "NB01 absorbed_cities.csv"),
     "is_absorbed": ("True when a neighbouring settlement was absorbed into this AoI.", "", "derived", "AoI absorption", "NB01"),
     "absorbed_by": ("Parent AoI when this settlement was absorbed.", "", "derived", "AoI absorption", "NB01"),
     "land_code25": ("PLT typology code, climate-geology-elevation.", "", "derived", "PLT typology", "NB01"),
@@ -906,6 +938,7 @@ def describe(field: str, layer: str | None = None):
 
 
 NULL_MEANING = {
+    "absorbed_cities": "No city was absorbed into this one.",
     "area_l75_km2": "L75 not defined for tier-2 spots.",
     "area_l90_km2": "L90 not defined for tier-2 spots.",
     "pop_l75_persons": "L75 not defined for tier-2 spots.",
@@ -1184,6 +1217,10 @@ First published version.
   detected.
 - `monthly_series` and `monthly_climatology`.
 - `city_exposure_by_contour`: population exposure by contour level.
+- `city_profile.population_wup_merged_k` and `city_profile.absorbed_cities`, so that the dataset
+  matches Step 3 of the zonation protocol: a city whose urban core falls entirely within a larger
+  adjacent city is absorbed, and its population is reassigned to the parent. `population_wup_k`
+  is unchanged and still holds the parent's own population.
 """, encoding="utf-8")
 
 
