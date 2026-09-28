@@ -117,6 +117,35 @@ def main():
           not _wrong and not _moved,
           f"C13/C9/C16 {'match' if not _wrong else _wrong}; unexpectedly changed: {_moved or 'none'}")
 
+    # ── MSG-SEVIRI against ERA5-Land ────────────────────────────────────────
+    # These are carried over from NB04, never recomputed, so the only thing to verify is that
+    # the package reproduces the source CSV exactly.
+    _sev_csv = R04 / "correlation" / "SEVIRI_vs_ERA5_target_metrics.csv"
+    _cys = d["city_year_summary"]
+    if _sev_csv.exists():
+        _sev = pd.read_csv(_sev_csv).set_index("city")
+        _pairs = [(f"{p}_{s}", f"{p}_seviri_era5land_{t}")
+                  for p in ("day", "night")
+                  for s, t in (("n_obs", "n"), ("bias", "bias_c"),
+                               ("rmse", "rmse_c"), ("mae", "mae_c"))]
+        _worst, _missing = 0.0, []
+        for src, dst in _pairs:
+            if dst not in _cys.columns:
+                _missing.append(dst); continue
+            _j = _cys.set_index("city")[dst].astype(float)
+            _e = _sev[src].reindex(_j.index).astype(float)
+            _both = _j.notna() & _e.notna()
+            if _both.any():
+                _worst = max(_worst, float((_j[_both] - _e[_both]).abs().max()))
+            if (_j.notna() != _e.notna()).any():
+                _missing.append(f"{dst}(null mismatch)")
+        check("seviri_era5land values equal the source CSV",
+              not _missing and _worst < 1e-9,
+              f"{len(_pairs)} fields, max |difference| {_worst:.2e}"
+              + (f"; problems: {_missing}" if _missing else ""))
+    else:
+        check("seviri_era5land values equal the source CSV", False, "source CSV not found")
+
     # A field name repeated in the DESCR literal is collapsed by Python with the last one
     # silently winning, which is how heat_event_catalogue.tier came to carry the spot-tier
     # text. Parse the source and refuse to let that recur.

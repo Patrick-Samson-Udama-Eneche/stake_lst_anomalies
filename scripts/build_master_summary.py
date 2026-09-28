@@ -309,6 +309,24 @@ def build_city_year_summary(ref, spots, study_year=STUDY_YEAR):
                          (f"{p_}_corr_mae", f"{p_}_modis_era5land_mae_c")):
             df[dst] = df["city"].map(ce.set_index("city")[src]) if src in ce.columns else np.nan
 
+    # MSG-SEVIRI against ERA5-Land over the selected event window, read as computed by NB04
+    # §11a; nothing is recomputed here. Bias is SEVIRI urban-core mean minus the mean of the
+    # ERA5-Land daily urban-core medians across the event days, so positive means SEVIRI warmer.
+    sev_csv = R04 / "correlation" / "SEVIRI_vs_ERA5_target_metrics.csv"
+    if sev_csv.exists():
+        sev = pd.read_csv(sev_csv).set_index("city")
+        for p_ in ("day", "night"):
+            for src, dst in ((f"{p_}_n_obs", f"{p_}_seviri_era5land_n"),
+                             (f"{p_}_bias", f"{p_}_seviri_era5land_bias_c"),
+                             (f"{p_}_rmse", f"{p_}_seviri_era5land_rmse_c"),
+                             (f"{p_}_mae", f"{p_}_seviri_era5land_mae_c")):
+                df[dst] = df["city"].map(sev[src]) if src in sev.columns else np.nan
+    else:
+        CHECKS.append("city_year_summary.*_seviri_era5land_* (source CSV absent)")
+        for p_ in ("day", "night"):
+            for suf in ("n", "bias_c", "rmse_c", "mae_c"):
+                df[f"{p_}_seviri_era5land_{suf}"] = np.nan
+
     sy = spots[spots["study_year"] == study_year] if "study_year" in spots.columns else spots
     cnt = sy.groupby(["city_slug", "period", "spot_type"]).size().rename("n").reset_index()
     bh = (sy[sy["bh_significant"].astype(str).str.lower().isin(["true", "1"])]
@@ -904,6 +922,25 @@ _PATTERNS = [
     (_re.compile(r"^(day|night)_modis_era5land_mae_c$"),
      ("Mean absolute error between MODIS and ERA5-Land {0} LST.", "C", "MODIS; ERA5-Land",
       "paired comparison", "NB04 city_heat_event_summary.csv")),
+    (_re.compile(r"^(day|night)_seviri_era5land_n$"),
+     ("ERA5-Land daily urban-core values over the selected {0} event window, i.e. the number of "
+      "event days the comparison averages over.", "count", "ERA5-Land",
+      "event-window comparison", "NB04 SEVIRI_vs_ERA5_target_metrics.csv")),
+    (_re.compile(r"^(day|night)_seviri_era5land_bias_c$"),
+     ("MSG-SEVIRI urban-core {0} composite minus the mean of the ERA5-Land daily urban-core "
+      "medians across the selected event days; positive means SEVIRI warmer.", "C",
+      "MSG-SEVIRI; ERA5-Land", "event-window comparison",
+      "NB04 SEVIRI_vs_ERA5_target_metrics.csv")),
+    (_re.compile(r"^(day|night)_seviri_era5land_rmse_c$"),
+     ("Root mean squared difference between the single MSG-SEVIRI urban-core {0} composite and "
+      "each ERA5-Land daily value across the selected event days.", "C",
+      "MSG-SEVIRI; ERA5-Land", "event-window comparison",
+      "NB04 SEVIRI_vs_ERA5_target_metrics.csv")),
+    (_re.compile(r"^(day|night)_seviri_era5land_mae_c$"),
+     ("Mean absolute difference between the single MSG-SEVIRI urban-core {0} composite and each "
+      "ERA5-Land daily value across the selected event days.", "C",
+      "MSG-SEVIRI; ERA5-Land", "event-window comparison",
+      "NB04 SEVIRI_vs_ERA5_target_metrics.csv")),
     (_re.compile(r"^n_(hot|cold)_(day|night)_spots$"),
      ("{0} spots delineated in the {1} period; 0 means none detected.", "count", "SEVIRI",
       "Gi* then KDE delineation", "derived from the spots layer")),
@@ -1223,6 +1260,13 @@ First published version.
   matches Step 3 of the zonation protocol: a city whose urban core falls entirely within a larger
   adjacent city is absorbed, and its population is reassigned to the parent. `population_wup_k`
   is unchanged and still holds the parent's own population.
+
+- `city_year_summary`: eight `*_seviri_era5land_*` fields holding the MSG-SEVIRI against
+  ERA5-Land comparison over each city's selected persistent heat event, for day and night —
+  the number of event days, the bias, the RMSE and the MAE. The values are read from NB04's
+  `SEVIRI_vs_ERA5_target_metrics.csv` as computed; nothing was recomputed. Bias is the SEVIRI
+  urban-core composite minus the mean of the ERA5-Land daily urban-core medians across the event
+  days, so a positive value means SEVIRI is warmer.
 
 ### Removed
 
