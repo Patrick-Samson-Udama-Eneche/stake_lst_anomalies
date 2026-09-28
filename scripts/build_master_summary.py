@@ -103,9 +103,11 @@ def load_reference():
                               "Landcover_Class": "landcover_class",
                               "Elevation_Class": "elevation_class",
                               "Geology_Class": "geology_class"})
-    ref = ref.merge(areas.drop(columns=[c for c in ("Cluster25", "Climate_Class",
-                                                    "Geology_Class", "Elevation_Class")
-                                        if c in areas.columns]),
+    # bra_dist_km / bra_converged / bra_coastal are fossils of the retired equal-area ring
+    # search: all-zero and all-null in the source. Dropped rather than published empty.
+    _drop = ("Cluster25", "Climate_Class", "Geology_Class", "Elevation_Class",
+             "bra_dist_km", "bra_converged", "bra_coastal")
+    ref = ref.merge(areas.drop(columns=[c for c in _drop if c in areas.columns]),
                     on="city", how="left")
     # percent of the urban core occupied by the assigned Cluster25
     ucd = pd.read_csv(R01 / "cluster25_uc_distribution.csv").rename(columns={"City Region": "city"})
@@ -149,9 +151,6 @@ def capture_scenario():
         ("smod_builtup_classes", str(getattr(cfg, "SMOD_BUILTUP_CLASSES", "")), "config.py"),
         ("smod_merge_radius_m", getattr(cfg, "SMOD_MERGE_RADIUS_M", None), "config.py"),
         ("bra_buffer_m", getattr(cfg, "BRA_BUFFER_M", None), "config.py BRA_BUFFER_M"),
-        ("bra_tolerance", getattr(cfg, "BRA_TOLERANCE", None), "config.py BRA_TOLERANCE"),
-        ("bra_max_dist_m", getattr(cfg, "BRA_MAX_DIST_M", None), "config.py"),
-        ("bra_min_ring_m", getattr(cfg, "BRA_MIN_RING_M", None), "config.py"),
         ("jrc_occurrence_threshold_pct", getattr(cfg, "JRC_OCCURRENCE_THRESHOLD", None), "config.py"),
         ("jrc_min_water_area_m2", getattr(cfg, "JRC_MIN_WATER_AREA_M2", None), "config.py"),
         ("era5_min_pixels", getattr(cfg, "ERA5_MIN_PIXELS", None), "config.py ERA5_MIN_PIXELS"),
@@ -770,12 +769,9 @@ DESCR.update({
     "bra_area_km2": ("Area of the background reference area (BRA).", "km2", "GHS-SMOD", "three-zone delineation", "NB01"),
     "cr_area_km2": ("City-region area.", "km2", "GHS-SMOD", "three-zone delineation", "NB01"),
     "bra_uc_ratio": ("Ratio of BRA area to urban-core area.", "ratio", "derived", "three-zone delineation", "NB01"),
-    "bra_dist_km": ("Radial distance from the urban core at which the BRA was fixed.", "km", "derived", "three-zone delineation", "NB01"),
-    "bra_converged": ("True when the BRA search met its convergence criterion.", "", "derived", "three-zone delineation", "NB01"),
-    "bra_coastal": ("True when the BRA is truncated by coastline or water.", "", "JRC Global Surface Water", "three-zone delineation", "NB01"),
-    "bra_water_frac": ("Fraction of the BRA covered by permanent water.", "fraction", "JRC Global Surface Water", "water masking", "NB01"),
-    "bra_smod_builtup_frac": ("Fraction of the BRA classed as built-up.", "fraction", "GHS-SMOD", "three-zone delineation", "NB01"),
-    "bra_effective_area_km2": ("BRA area after water and built-up exclusion.", "km2", "derived", "three-zone delineation", "NB01"),
+    "bra_water_frac": ("Fraction of the BRA BOUNDING BOX covered by permanent water. Measured on the bbox, before the urban core is subtracted.", "fraction", "JRC Global Surface Water", "water masking", "NB01"),
+    "bra_smod_builtup_frac": ("Fraction of the BRA BOUNDING BOX classed as peri-urban (SMOD 21). Measured on the bbox, before the urban core is subtracted.", "fraction", "GHS-SMOD", "three-zone delineation", "NB01"),
+    "bra_effective_area_km2": ("BRA BOUNDING BOX area after water and peri-urban exclusion. Measured on the bbox and therefore LARGER than bra_area_km2, which also excludes the urban core.", "km2", "derived", "three-zone delineation", "NB01"),
     "smod_epoch_year": ("GHS-SMOD epoch used to delineate the zones.", "year", "GHS-SMOD", "three-zone delineation", "NB01"),
     "uc_flags": ("Delineation flags raised for the urban core.", "", "derived", "three-zone delineation", "NB01"),
     "population_wup_k": ("City population from UN World Urbanization Prospects.", "thousand persons", "UN WUP", "lookup", "NB01"),
@@ -1223,6 +1219,24 @@ DECISIONS = [
      "The single trend value on each spot row in NB05 is the urban-core trend, not the SUHII trend "
      "(Abeokuta day: 2.83362 against 2.20390). Trends are published in `trend_statistics` keyed by "
      "city, zone and period so the zone can never be mistaken."),
+    ("The equal-area ring search was never used and is now retired",
+     "The zones were built with a FIXED buffer: BRA bbox = envelope(UC_raw.buffer(10 km)), "
+     "CR = bbox - water, BRA = bbox - UC_raw - water - SMOD 21. The Dynamic Equal-Area ring "
+     "search (Yang et al. 2024) existed as compute_bra_dea(), was imported by NB01 and never "
+     "called. Three independent proofs: every city's zone metadata records "
+     "bra_method = 'fixed_buffer'; envelope(UC.buffer(10 km)) reproduces the CR envelope to "
+     "within 1% for 54 of 56 cities; and the BRA:UC area ratio is 2.4-49.5 (mean 10.8) where the "
+     "ring search targets 1:1 within 5%, so 0 of 56 cities are consistent with it. The function, "
+     "its config parameters (BRA_TOLERANCE, BRA_MAX_DIST_M, BRA_MIN_RING_M, BRA_MIN_ITER) and the "
+     "scenario entries that advertised them have been removed, and the fossil fields bra_dist_km, "
+     "bra_converged and bra_coastal are no longer published. No geometry changed; scenario_id "
+     "changed from 4c24e467 because the scenario log now describes only what actually runs."),
+    ("bra_water_frac, bra_smod_builtup_frac and bra_effective_area_km2 measure the bounding box",
+     "NB01 computes the BRA fraction fields with _zone_fracs(bra_bbox_geom, ...), so they are "
+     "measured on the BRA bounding box rather than on the BRA itself. bra_effective_area_km2 is "
+     "consequently LARGER than bra_area_km2 for all 56 cities (Abuja: 2946.70 against 2508.15 "
+     "km2), because the bbox excludes water and peri-urban but not the urban core. The values are "
+     "published unchanged and the descriptions now say which geometry they refer to."),
     ("Redundant exports retired, hot-biased names corrected",
      "12 files were withdrawn after a dependency scan showed they had no readers: "
      "`all_cities_dashboard.gpkg` duplicated this package exactly, and the GeoJSON, Shapefile and "

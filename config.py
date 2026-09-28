@@ -11,6 +11,7 @@ PROJECT_ROOT = Path(__file__).parent
 DATA_DIR = PROJECT_ROOT / "data"
 INPUT_DIR = DATA_DIR / "inputs"
 OUTPUT_DIR = DATA_DIR / "outputs"
+RESULTS_DIR = PROJECT_ROOT / "Results"   # New outputs for revised methodology
 DOCS_DIR = PROJECT_ROOT / "docs"
 SRC_DIR = PROJECT_ROOT / "src"
 SECRETS_DIR = PROJECT_ROOT / "secrets"  # Secure credentials storage
@@ -20,7 +21,9 @@ INPUT_DATA_PATH = os.getenv("INPUT_DATA_PATH", str(INPUT_DIR))
 OUTPUT_DATA_PATH = os.getenv("OUTPUT_DATA_PATH", str(OUTPUT_DIR))
 
 # Project parameters
-PROJECT_STUDY_YEAR = 2024  # Reference year for analysis
+# Single source of truth for the study year.  All GEE epoch/data selection
+# (SMOD, JRC, MODIS, ERA5) resolves to the available year closest to this value.
+PROJECT_STUDY_YEAR = 2024
 
 # Processing parameters
 RANDOM_STATE = int(os.getenv("RANDOM_STATE", "42"))
@@ -90,6 +93,64 @@ if EXPORT_MODE == "svg_only":
 WGS84 = "EPSG:4326"
 WEB_MERCATOR = "EPSG:3857"
 UTM_ZONE_32N = "EPSG:32632"  # For Nigeria (approximate)
+
+# =============================================================================
+# REVISED METHODOLOGY CRS SETTINGS  (MODIFICATION_SPEC §2.3)
+# =============================================================================
+# All spatial operations (area calculation, buffering, zone construction) are performed in
+# ESRI:102022 (Africa Albers Equal Area Conic) — an equal-area projection that
+# preserves areas accurately across Nigeria.  Outputs are saved in both CRS.
+ANALYSIS_CRS = "ESRI:102022"   # All spatial ops + metric calculations
+STORAGE_CRS  = "EPSG:4326"     # Output GeoJSON storage (WGS84)
+
+# =============================================================================
+# DUAL-ZONE AOI PARAMETERS  (MODIFICATION_SPEC §2.1 — NB01_v4_SMOD)
+# =============================================================================
+# Urban Core : GHS-SMOD classes 30+23+22 connected component containing the city point,
+#              plus any other component within SMOD_MERGE_RADIUS_M, minus water.
+# BRA bbox   : envelope(UC_raw.buffer(BRA_BUFFER_M)) — a fixed radius, not a search.
+# BRA        : BRA bbox minus UC_raw, water and SMOD peri-urban (21).
+# City-Region: BRA bbox minus water — the extraction domain for all rasters.
+#
+# The equal-area ring search of Yang et al. (2024) was evaluated and NOT adopted: it
+# produced degenerate extents for small cities. It was retired in full on 2026-09-28.
+
+# ── GHS-SMOD ─────────────────────────────────────────────────────────────────
+# GHS-SMOD V2.0 — ImageCollection; filter by calendarRange(year, year, 'year').
+# Band name: 'smod_code'
+SMOD_GEE_ASSET        = 'JRC/GHSL/P2023A/GHS_SMOD_V2-0'
+SMOD_AVAILABLE_EPOCHS = [1975, 1980, 1985, 1990, 1995, 2000, 2005, 2010, 2015, 2020, 2025]
+# Epoch selection: image whose year is closest to PROJECT_STUDY_YEAR (resolved at runtime)
+# UC = Urban Centre (30) + Dense Urban Cluster (23) + Semi-dense Urban Cluster (22)
+SMOD_UC_CLASSES        = [30, 23, 22]   # Urban Core classes (NB01_v5_SMOD)
+# BRA built-up mask: only peri-urban/suburban (21); UC classes already removed via UC_raw subtraction
+SMOD_BUILTUP_CLASSES   = [21]           # Peri-urban class masked from BRA effective area
+SMOD_FALLBACK_RADIUS_M = 1_000          # (m) search radius if centroid misses all UC pixels
+SMOD_MERGE_RADIUS_M    = 1_000          # (m) nearby UC components within this distance are merged
+SMOD_DOWNLOAD_RADIUS_M = 82_500         # (m) GEE raster envelope (~165×165 km per city)
+
+# ── JRC Global Surface Water ──────────────────────────────────────────────────
+JRC_GEE_ASSET            = 'JRC/GSW1_4/GlobalSurfaceWater'
+JRC_OCCURRENCE_THRESHOLD = 50           # minimum occurrence % to classify pixel as water
+JRC_MIN_WATER_AREA_M2    = 900          # minimum water polygon area (900 m² = 1 Landsat px)
+JRC_TILE_SIZE_M          = 50_000       # tiled download tile edge length (50 km)
+
+# ── BRA — fixed buffer approach (NB01_v5_SMOD) ───────────────────────────────
+# BRA bbox = envelope of UC_raw.buffer(BRA_BUFFER_M).
+# Users can change BRA_BUFFER_M to suit their study (e.g. 5_000 or 15_000).
+BRA_BUFFER_M = 10_000                   # (m) fixed buffer radius around UC_raw
+
+# SEVIRI national bounding box (Nigeria + 1-degree padding)
+# Used for the national-mosaic reprojection in NB04.
+SEVIRI_NATIONAL_BBOX = {
+    "west":  2.0,   # °E
+    "east":  15.5,  # °E
+    "south":  3.5,  # °N
+    "north": 14.5,  # °N
+}
+
+# ERA5 pixel-count rule: cities with < 4 ERA5 pixels in a zone → use City-Region proxy
+ERA5_MIN_PIXELS = 4
 
 # =============================================================================
 # VALID CITY NAMES (from Major_cities_population_Nigeria_WUP_2025.csv)
@@ -355,9 +416,12 @@ def get_cities_to_process() -> List[str]:
 
 # Paths to your geospatial input files (relative to project root):
 AOI_DATA_PATHS = {
-    'cities_csv': 'data/inputs/geospatial_features/Major_cities_population_Nigeria_WUP_2025.csv', # ← CHANGE THIS  (UN WUP 2025 CSV with 'City_Name' column)
-    'urban_geojson': 'data/inputs/geospatial_features/urban_landscape_typology_Nigeria.geojson', # ← CHANGE THIS  (urban area polygons)
-    'boundary_geojson': 'data/inputs/geospatial_features/boundary_Nigeria.geojson'               # ← CHANGE THIS  (country boundary for clipping)
+    'cities_csv':         'data/inputs/geospatial_features/Major_cities_population_Nigeria_WUP_2025.csv',
+    # L50 (built-up) typology only — used for Urban Core construction:
+    'urban_geojson':      'data/inputs/geospatial_features/urban_landscape_typology_Nigeria.geojson',
+    # ALL landscape classes — used for BRA built-up masking:
+    'landscape_geojson':  'data/inputs/geospatial_features/landscape_ch_polygons_with_class_metrics.geojson',
+    'boundary_geojson':   'data/inputs/geospatial_features/boundary_Nigeria.geojson',
 }
 
 # Buffer distances around city polygons (in metres):
@@ -664,13 +728,13 @@ PROCESSING_OPTIONS = {
 # When True, each step checks for existing output files and skips regeneration.
 # Set individual flags to False to force regeneration of specific outputs.
 SKIP_EXISTING = {
-    'lst_visualization':       True,   # Cell 16: Dask-based LST map visualization
-    'qa_maps':                 True,   # Cell 17: QA map visualization
-    'lst_summary_stats':       True,   # Cell 19: LST summary statistics CSV/HTML
-    'trend_plots':             True,   # Cell 21: LST trend line plots per city
-    'heatmaps':                True,   # Cell 22: 4 single-page heatmaps
-    'stakeholder_yearly':      True,   # Cell 24: Yearly stakeholder validation chart
-    'stakeholder_monthly':     True,   # Cell 25: Monthly stakeholder validation chart
+    # ── Data extraction / computation (expensive, cache is appropriate) ───────
+    'lst_visualization':   True,   # Dask-based LST map visualization
+    'qa_maps':             True,   # QA map visualization
+    'lst_summary_stats':   True,   # LST summary statistics CSV/HTML
+    # ── Charts are always regenerated — no skip keys needed ──────────────────
+    # trend_plots, heatmaps, stakeholder_yearly, stakeholder_monthly:
+    # skip logic removed from notebook cells; charts always re-run on cell exec.
 }
 
 
@@ -809,7 +873,7 @@ MODIS_QA_CONFIG = {
 
 # Dask parallelisation — tune to your machine's resources
 DASK_CONFIG = {
-    'n_workers': 4,                                        # ← CHANGE THIS  (number of parallel workers)
+    'n_workers': 2,                                        # ← CHANGE THIS  (number of parallel workers)
     'threads_per_worker': 2,                               # ← CHANGE THIS  (threads per worker)
     'memory_limit': '2GB',                                 # ← CHANGE THIS  (RAM per worker)
 }
@@ -1273,6 +1337,37 @@ RESAMPLE_CONFIG = {
 LANDSCAPE_DATA_PATH = INPUT_DIR / "geospatial_features" / "landscape_ch_polygons_with_class_metrics.geojson"  # ← CHANGE THIS
 LANDSCAPE_CLASS_ATTRIBUTES = ['Elevation_Class', 'Climate_Class', 'Landcover_Class', 'Geology_Class']       # ← CHANGE THIS  (columns in your landscape GeoJSON)
 LANDSCAPE_CLUSTER_ATTRIBUTE = 'Cluster25'                                                                   # ← CHANGE THIS  (cluster ID column)
+
+# =============================================================================
+# NB05_v5_SMOD — Flat parameters (used directly in NB05; complement HOTSPOT_CONFIG above)
+# =============================================================================
+
+# ── Percentile thresholds ─────────────────────────────────────────────────────
+HOTSPOT_PERCENTILE_HOT  = 90    # P90: top 10% of LST pixels → hot candidates
+HOTSPOT_PERCENTILE_COLD = 10    # P10: bottom 10% of LST pixels → cold candidates
+
+# ── Spatial statistics ────────────────────────────────────────────────────────
+HOTSPOT_FDR_ALPHA = 0.05        # Benjamini-Hochberg FDR significance level for Gi*
+
+# ── KDE ───────────────────────────────────────────────────────────────────────
+KDE_WEIGHTED = True             # Weight KDE by exceedance magnitude (LST − P90 for hot;
+                                # P10 − LST for cold). Set False for uniform-weight KDE.
+KDE_CONTOUR_LEVELS = [0.50, 0.75, 0.90]  # Contour thresholds (density fraction).
+                                # 0.50 = broadest extent (used as IS_PRIMARY polygon for area aggregation).
+                                # 0.75 / 0.90 = core zones (characterisation only; not summed for total area).
+MIN_PIXELS_TIER1 = 10           # ≥ this many validated pixels → Tier-1 KDE; else Tier-2 buffer
+KDE_TIER2_BUFFER_M = 500        # (m) buffer radius for Tier-2 delineation (< MIN_PIXELS_TIER1 pixels)
+KDE_DP_TOLERANCE_M = 50         # (m) Douglas-Peucker simplification tolerance
+
+# ── Stakeholder spatial validation ───────────────────────────────────────────
+# Buffer around detected hotspot polygons within which a stakeholder GPS point
+# is counted as a "hit".  Accounts for GPS precision in field surveys.
+#
+# Default: 1 000 m (1 km) — matches typical handheld GPS accuracy in peri-urban Africa.
+# Options: 500 m to 10 km in 500 m steps.  Change STAKEHOLDER_VALIDATION_BUFFER_M to
+# any value in STAKEHOLDER_VALIDATION_BUFFER_OPTIONS_M to re-run §9 sensitivity analysis.
+STAKEHOLDER_VALIDATION_BUFFER_M = 1_000                          # ← CHANGE THIS (metres)
+STAKEHOLDER_VALIDATION_BUFFER_OPTIONS_M = list(range(500, 10_500, 500))  # [500, 1000, ..., 10000]
 
 # GHSL Population raster — downloaded once from GEE and reused.
 # Adjust bounds if adapting to a different country.
