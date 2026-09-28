@@ -133,9 +133,13 @@ def load_reference():
                               "Elevation_Class": "elevation_class",
                               "Geology_Class": "geology_class"})
     # bra_dist_km / bra_converged / bra_coastal are fossils of the retired equal-area ring
-    # search: all-zero and all-null in the source. Dropped rather than published empty.
+    # search: all-zero and all-null in the source. is_absorbed / absorbed_by record whether THIS
+    # city was absorbed into another, which is False and null for all 56 survivors by
+    # construction; the absorption is published in the active direction by absorbed_cities.
+    # All five are dropped rather than published empty.
     _drop = ("Cluster25", "Climate_Class", "Geology_Class", "Elevation_Class",
-             "bra_dist_km", "bra_converged", "bra_coastal")
+             "bra_dist_km", "bra_converged", "bra_coastal",
+             "is_absorbed", "absorbed_by")
     ref = ref.merge(areas.drop(columns=[c for c in _drop if c in areas.columns]),
                     on="city", how="left")
     ref = add_merged_population(ref)
@@ -807,8 +811,6 @@ DESCR.update({
     "population_wup_k": ("City population from UN World Urbanization Prospects, 2024 estimate. The parent city's own figure; it excludes any city absorbed into it.", "thousand persons", "UN WUP", "lookup", "NB01"),
     "population_wup_merged_k": ("City population after spatial deduplication: the city's own UN WUP 2024 population plus that of every city absorbed into it. Equals population_wup_k where nothing was absorbed. This is the total used for city- and cluster-level population reporting.", "thousand persons", "UN WUP", "spatial deduplication", "NB01 absorbed_cities.csv + UN WUP 2024 table"),
     "absorbed_cities": ("Names of the cities absorbed into this one, semicolon-separated, in UN WUP spelling. A city is absorbed when its urban core falls entirely within a larger adjacent city.", "", "derived", "spatial deduplication", "NB01 absorbed_cities.csv"),
-    "is_absorbed": ("True when a neighbouring settlement was absorbed into this AoI.", "", "derived", "AoI absorption", "NB01"),
-    "absorbed_by": ("Parent AoI when this settlement was absorbed.", "", "derived", "AoI absorption", "NB01"),
     "land_code25": ("PLT typology code, climate-geology-elevation.", "", "derived", "PLT typology", "NB01"),
     # spot / contour attributes (NB05)
     "spot_id": ("Spot key as issued by NB05, unique within a study year.", "", "derived", "keying", "NB05"),
@@ -1221,6 +1223,14 @@ First published version.
   matches Step 3 of the zonation protocol: a city whose urban core falls entirely within a larger
   adjacent city is absorbed, and its population is reassigned to the parent. `population_wup_k`
   is unchanged and still holds the parent's own population.
+
+### Removed
+
+- `city_profile.is_absorbed` and `city_profile.absorbed_by`. Both recorded whether a city had
+  itself been absorbed into another. Only the 56 surviving cities are published, and by
+  construction none of them was absorbed, so the fields were `False` and null on every row. The
+  absorption is published in the active direction instead, by `absorbed_cities` and
+  `population_wup_merged_k`.
 """, encoding="utf-8")
 
 
