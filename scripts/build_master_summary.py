@@ -116,6 +116,37 @@ def add_merged_population(ref: pd.DataFrame) -> pd.DataFrame:
     return ref[cols[:i] + ["population_wup_merged_k", "absorbed_cities"] + cols[i:]]
 
 
+def add_zone_population(ref: pd.DataFrame) -> pd.DataFrame:
+    """GHS-POP totals for the three zones, from the native 100 m extraction.
+
+    `population_cr_persons` is the denominator to use for exposure shares. Spots are
+    detected across the whole city region and do not respect the urban-core boundary: of
+    the 185 L50 footprints only 16 lie wholly inside the UC, 75 wholly inside the BRA, 36
+    straddle the two and 8 sit mostly in neither. Mean composition is 20.9% UC, 69.2% BRA,
+    9.9% elsewhere in the CR, so UC understates the base and only CR covers every spot.
+    """
+    zdir = R05 / "population_100m" / "zones"
+    files = sorted(zdir.glob("*.csv"))
+    if not files:
+        CHECKS.append("city_profile.population_{uc,bra,cr}_persons (zone cache absent)")
+        for c in ("population_uc_persons", "population_bra_persons", "population_cr_persons"):
+            ref[c] = np.nan
+        return ref
+    z = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
+    z = z[z["city"].astype(str).isin(set(ref["city"].astype(str)))]
+    wide = z.pivot_table(index="city", columns="zone", values="population_100m", aggfunc="first")
+    ref = ref.copy()
+    for col, zone in (("population_uc_persons", "urban_core"),
+                      ("population_bra_persons", "bra"),
+                      ("population_cr_persons", "city_region")):
+        ref[col] = ref["city"].map(wide[zone]) if zone in wide.columns else np.nan
+    cols = [c for c in ref.columns if not c.startswith("population_uc_")
+            and not c.startswith("population_bra_") and not c.startswith("population_cr_")]
+    i = cols.index("population_wup_merged_k") + 1
+    return ref[cols[:i] + ["population_uc_persons", "population_bra_persons",
+                           "population_cr_persons"] + cols[i:]]
+
+
 # ── shared reference tables ─────────────────────────────────────────────────
 def load_reference():
     lookup = pd.read_csv(R01 / "city_cluster25_lookup.csv")
@@ -143,6 +174,7 @@ def load_reference():
     ref = ref.merge(areas.drop(columns=[c for c in _drop if c in areas.columns]),
                     on="city", how="left")
     ref = add_merged_population(ref)
+    ref = add_zone_population(ref)
     # percent of the urban core occupied by the assigned Cluster25
     ucd = pd.read_csv(R01 / "cluster25_uc_distribution.csv").rename(columns={"City Region": "city"})
     pct = []
@@ -835,6 +867,9 @@ DESCR.update({
     "uc_flags": ("Delineation flags raised for the urban core.", "", "derived", "three-zone delineation", "NB01"),
     "population_wup_k": ("City population from UN World Urbanization Prospects, 2024 estimate. The parent city's own figure; it excludes any city absorbed into it.", "thousand persons", "UN WUP", "lookup", "NB01"),
     "population_wup_merged_k": ("City population after spatial deduplication: the city's own UN WUP 2024 population plus that of every city absorbed into it. Equals population_wup_k where nothing was absorbed. This is the total used for city- and cluster-level population reporting.", "thousand persons", "UN WUP", "spatial deduplication", "NB01 absorbed_cities.csv + UN WUP 2024 table"),
+    "population_uc_persons": ("Resident population inside the urban core, GHS-POP summed on its native 100 m grid.", "persons", "GHS-POP", "zonal sum at 100 m", "scripts/extract_population_100m.py"),
+    "population_bra_persons": ("Resident population inside the background reference area, GHS-POP summed on its native 100 m grid.", "persons", "GHS-POP", "zonal sum at 100 m", "scripts/extract_population_100m.py"),
+    "population_cr_persons": ("Resident population inside the city region, GHS-POP summed on its native 100 m grid. USE THIS as the denominator for exposure shares: spots are detected across the whole city region and do not respect the urban-core boundary. Of the 185 L50 footprints only 16 lie wholly inside the UC, 75 wholly inside the BRA, 36 straddle the two and 8 sit mostly in neither, so UC understates the base and only CR covers every spot.", "persons", "GHS-POP", "zonal sum at 100 m", "scripts/extract_population_100m.py"),
     "absorbed_cities": ("Names of the cities absorbed into this one, semicolon-separated, in UN WUP spelling. A city is absorbed when its urban core falls entirely within a larger adjacent city.", "", "derived", "spatial deduplication", "NB01 absorbed_cities.csv"),
     "land_code25": ("PLT typology code, climate-geology-elevation.", "", "derived", "PLT typology", "NB01"),
     # spot / contour attributes (NB05)
@@ -1274,6 +1309,12 @@ First published version.
   `SEVIRI_vs_ERA5_target_metrics.csv` as computed; nothing was recomputed. Bias is the SEVIRI
   urban-core composite minus the mean of the ERA5-Land daily urban-core medians across the event
   days, so a positive value means SEVIRI is warmer.
+
+- `city_profile.population_uc_persons`, `population_bra_persons` and
+  `population_cr_persons`: GHS-POP totals for the three zones, summed on the native 100 m
+  grid. `population_cr_persons` is the denominator to use for exposure shares, because
+  spots are detected across the whole city region and do not respect the urban-core
+  boundary; only 16 of the 185 L50 footprints lie wholly inside the urban core.
 
 ### Removed
 
