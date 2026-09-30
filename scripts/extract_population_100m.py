@@ -262,8 +262,18 @@ def run(kind, polys, only_city, force):
         sub = polys[polys["city"] == city].reset_index(drop=True)
         cache = out_dir / (slugify(city) + ".csv")
         if cache.exists() and not force:
-            skipped += 1
-            continue
+            # The cache carries no year in its name, so a cached file from a different
+            # GHS epoch would otherwise be reused silently after PROJECT_STUDY_YEAR
+            # changes. Check the epoch recorded in the file and re-extract if it moved.
+            try:
+                cached_epoch = int(pd.read_csv(cache, nrows=1)["ghs_epoch"].iloc[0])
+            except Exception:
+                cached_epoch = None
+            if cached_epoch == epoch:
+                skipped += 1
+                continue
+            print("  " + city + ": cached epoch " + str(cached_epoch)
+                  + " != current " + str(epoch) + " -- re-extracting")
         print("  [" + str(n) + "/" + str(len(cities)) + "] " + city + " - "
               + str(len(sub)) + " polygons", flush=True)
         t0 = time.time()
