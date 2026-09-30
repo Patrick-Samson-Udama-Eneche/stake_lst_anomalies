@@ -34,6 +34,11 @@ from shapely.geometry import Polygon
 VERSION = "1.0.0"
 DATASET_DIR  = "surface_thermal_anomaly_stakeholder_composite"   # published dataset root
 DATASET_STEM = "surface_thermal_anomaly_stakeholder_composite"
+# The Zenodo record title. Deliberately free of counts and years so it stays stable across
+# versions; the scope of each version belongs in the README body and the version notes.
+DATASET_TITLE = ("Dataset associated with the analysis of surface thermal anomalies, "
+                 "population exposure and stakeholder insights across Nigerian cities")
+DATASET_DOI = "10.5281/zenodo.23050560"
 # Build records live OUTSIDE the deposit folder. Everything inside the deposit folder is
 # published to Zenodo, so nothing internal may sit there.
 BUILD_DIR_NAME = "dataset_build"
@@ -737,9 +742,7 @@ def git_commit() -> str:
 
 def build_dataset_info(layers, n_cities, n_clusters, study_years, scenario_id, scen_df):
     rows = [
-        ("title", "Dataset and protocol associated with the analysis of the diurnal surface "
-                  "thermal anomalies across 56 Nigerian cities situated in 16 physiographic "
-                  "landscape typologies"),
+        ("title", DATASET_TITLE),
         ("version", VERSION),
         ("build_date", date.today().isoformat()),
         ("crs_geopackage", CRS_ANALYSIS),
@@ -759,8 +762,7 @@ def build_dataset_info(layers, n_cities, n_clusters, study_years, scenario_id, s
         ("licence", "CC BY 4.0"),
         ("build_script", "scripts/build_master_summary.py"),
         ("git_commit", git_commit()),
-        ("dataset_doi", "[PENDING-DOI]"),
-        ("code_repository_doi", "[PENDING-DOI]"),
+        ("dataset_doi", DATASET_DOI),
     ]
     rows += [("scenario_ids_in_package", "see the scenario_config layer")]
     rows += [(f"rows_{n}", str(len(d))) for n, d in layers.items() if d is not None]
@@ -1176,11 +1178,16 @@ def write_readme(layers, out_dir: Path, gpkg: Path):
                 f"against the {c} points in `stakeholder_spots_gps`. The difference is the excluded "
                 f"respondent's points. Recompute the hit rates from `stakeholder_spots_gps` and "
                 f"`spots` if you need figures on the cohort denominator.\n")
-    txt = f"""# Dataset and protocol associated with the analysis of the diurnal surface thermal anomalies across 56 Nigerian cities situated in 16 physiographic landscape typologies
+    txt = f"""# {DATASET_TITLE}
 
 Version {VERSION}. Built {date.today().isoformat()}.
 
-Authors: P. S. U. Eneche (ORCID [PENDING]), Y. Zeng (ORCID [PENDING]), F. Atun (ORCID [PENDING]), K. Pfeffer (ORCID [PENDING]).
+This version covers the 56 Nigerian cities that remain after spatial deduplication of the 67
+UN World Urbanization Prospects 2024 candidates with a population of at least 300,000. The
+land-surface temperature record runs 2006-2025; persistent heat events, surface hot and cold
+spots, population exposure and stakeholder evidence are for 2024.
+
+Authors: P. S. U. Eneche (https://orcid.org/0000-0002-0504-9677), Y. Zeng (https://orcid.org/0000-0002-2166-5314), F. Atun (https://orcid.org/0000-0002-6222-8049), K. Pfeffer (https://orcid.org/0000-0002-6080-1323).
 Contact: P. S. U. Eneche.
 
 ## 1. What this dataset contains
@@ -1226,18 +1233,19 @@ joined = spots.merge(trends.query("zone == 'suhii'"), on=["city_slug", "period"]
 
 ## 5. Input data sources
 
-| source | use | identifier |
-|---|---|---|
-| MODIS Aqua MYD11A1 | long-term day and night LST | [PENDING-DOI] |
-| ERA5-Land | daily LST for persistent heat events | [PENDING-DOI] |
-| LSA-SAF MSG-SEVIRI LST | event-scale composites for spot detection | [PENDING-DOI] |
-| GHS-SMOD | settlement model for the three-zone delineation | [PENDING-DOI] |
-| GHS-POP (P2023A, epoch 2025) | resident population; summed on the native 100 m grid per polygon, with fractional overlap | [PENDING-DOI] |
-| JRC Global Surface Water | water masking | [PENDING-DOI] |
-| UN World Urbanization Prospects | city population | [PENDING-DOI] |
-| PLT typology (Eneche et al., 4TU.ResearchData) | physiographic landscape typology | [PENDING-DOI] |
+| source | use |
+|---|---|
+| MODIS Aqua MYD11A1 Collection 6.1 (NASA LP DAAC) | long-term day and night land-surface temperature |
+| ERA5-Land hourly, skin temperature (ECMWF Copernicus Climate Change Service) | daily values for persistent heat events |
+| MSG LST with Directional Effects, MLST_DIR [LSA-004] (EUMETSAT LSA SAF) | event-scale composites for spot detection |
+| GHS-SMOD R2023A (European Commission JRC) | settlement model for the three-zone delineation |
+| GHS-POP R2023A, epoch 2025 (European Commission JRC) | resident population; summed on the native 100 m grid per polygon, with fractional overlap |
+| Global Surface Water v1.4 (European Commission JRC) | permanent-water masking |
+| OpenStreetMap water features, accessed 22 June 2026 | masking of the MSG-SEVIRI composites; (c) OpenStreetMap contributors, ODbL |
+| World Urbanization Prospects, 2025 revision (UN DESA) | city population and city selection |
+| Physiographic landscape typology (Eneche et al., 4TU.ResearchData, 2025) | landscape character class per city |
 
-No DOI is stated unless it was found in the project; all are marked `[PENDING-DOI]`.
+Full citations for every source are given in the associated Data in Brief article.
 
 ## 6. Bias conventions
 
@@ -1277,10 +1285,9 @@ corroboration results are unaffected.
 
 Licence: **CC BY 4.0**.
 
-- Dataset: [PENDING-DOI]
-- Data in Brief article: [PENDING]
-- Sustainable Cities and Society article: [PENDING]
-- Code record: [PENDING-DOI]
+- Dataset: https://doi.org/{DATASET_DOI}
+
+Related publications and the code record are listed on the Zenodo record page.
 
 The full licence text accompanies this dataset in `LICENSE.txt`.
 
@@ -1293,8 +1300,7 @@ Map lines delineate study areas and do not necessarily depict accepted national 
 
 def write_licence(out_dir: Path):
     """CC BY 4.0 notice. The deposit carries its licence with it."""
-    text = """Dataset and protocol associated with the analysis of the diurnal surface thermal anomalies
-across 56 Nigerian cities situated in 16 physiographic landscape typologies
+    text = f"""{DATASET_TITLE}
 
 Copyright (c) 2026 P. S. U. Eneche, Y. Zeng, F. Atun, K. Pfeffer
 University of Twente, Faculty of Geo-Information Science and Earth Observation (ITC)
