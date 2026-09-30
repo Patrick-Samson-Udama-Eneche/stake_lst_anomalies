@@ -149,8 +149,6 @@ SEVIRI_NATIONAL_BBOX = {
     "north": 14.5,  # °N
 }
 
-# ERA5 pixel-count rule: cities with < 4 ERA5 pixels in a zone → use City-Region proxy
-ERA5_MIN_PIXELS = 4
 
 # =============================================================================
 # VALID CITY NAMES (from Major_cities_population_Nigeria_WUP_2025.csv)

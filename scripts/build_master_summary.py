@@ -219,7 +219,6 @@ def capture_scenario():
         ("bra_buffer_m", getattr(cfg, "BRA_BUFFER_M", None), "config.py BRA_BUFFER_M"),
         ("jrc_occurrence_threshold_pct", getattr(cfg, "JRC_OCCURRENCE_THRESHOLD", None), "config.py"),
         ("jrc_min_water_area_m2", getattr(cfg, "JRC_MIN_WATER_AREA_M2", None), "config.py"),
-        ("era5_min_pixels", getattr(cfg, "ERA5_MIN_PIXELS", None), "config.py ERA5_MIN_PIXELS"),
         ("event_percentile", _DEFAULT_PERCENTILE, "src/daily_analysis_utils.py _DEFAULT_PERCENTILE"),
         ("event_min_consecutive_days", _DEFAULT_PERSISTENT, "src/daily_analysis_utils.py _DEFAULT_PERSISTENT"),
         ("gistar_z_hot", 1.96, "NB05 GISTAR_Z_HOT"),
@@ -343,7 +342,7 @@ def build_city_year_summary(ref, spots, study_year=STUDY_YEAR):
                          (f"{p_}_corr_n", f"{p_}_modis_era5land_n"),
                          (f"{p_}_corr_r", f"{p_}_modis_era5land_r"),
                          (f"{p_}_corr_r2", f"{p_}_modis_era5land_r2"),
-                         (f"{p_}_corr_bias", f"{p_}_modis_era5land_bias_c"),
+                         (f"{p_}_corr_bias", f"{p_}_era5land_minus_modis_bias_c"),
                          (f"{p_}_corr_rmse", f"{p_}_modis_era5land_rmse_c"),
                          (f"{p_}_corr_mae", f"{p_}_modis_era5land_mae_c")):
             df[dst] = df["city"].map(ce.set_index("city")[src]) if src in ce.columns else np.nan
@@ -356,15 +355,16 @@ def build_city_year_summary(ref, spots, study_year=STUDY_YEAR):
         sev = pd.read_csv(sev_csv).set_index("city")
         for p_ in ("day", "night"):
             for src, dst in ((f"{p_}_n_obs", f"{p_}_seviri_era5land_n"),
-                             (f"{p_}_bias", f"{p_}_seviri_era5land_bias_c"),
+                             (f"{p_}_bias", f"{p_}_seviri_minus_era5land_bias_c"),
                              (f"{p_}_rmse", f"{p_}_seviri_era5land_rmse_c"),
                              (f"{p_}_mae", f"{p_}_seviri_era5land_mae_c")):
                 df[dst] = df["city"].map(sev[src]) if src in sev.columns else np.nan
     else:
         CHECKS.append("city_year_summary.*_seviri_era5land_* (source CSV absent)")
         for p_ in ("day", "night"):
-            for suf in ("n", "bias_c", "rmse_c", "mae_c"):
+            for suf in ("n", "rmse_c", "mae_c"):
                 df[f"{p_}_seviri_era5land_{suf}"] = np.nan
+            df[f"{p_}_seviri_minus_era5land_bias_c"] = np.nan
 
     sy = spots[spots["study_year"] == study_year] if "study_year" in spots.columns else spots
     cnt = sy.groupby(["city_slug", "period", "spot_type"]).size().rename("n").reset_index()
@@ -488,8 +488,13 @@ def build_heat_events(ref):
     sev_root = R04 / "seviri"
     for _, r in ref.iterrows():
         city, s = r["city"], r["city_slug"]
-        f = R04 / "events" / f"{city}_event_audit.json"
+        # NB04 writes these as city.replace(' ', '_') + '_event_audit.json'. Matching on the
+        # display name silently lost the three cities whose names contain a space -- Ado Ekiti,
+        # Benin City and Port Harcourt -- even though all three have events. 37 events were
+        # missing from the catalogue as a result.
+        f = R04 / "events" / f"{city.replace(' ', '_')}_event_audit.json"
         if not f.exists():
+            CHECKS.append(f"heat_event_catalogue: no audit file for {city}")
             continue
         audit = json.loads(f.read_text(encoding="utf-8"))
         for p in PERIODS:
@@ -955,7 +960,7 @@ _PATTERNS = [
     (_re.compile(r"^(day|night)_modis_era5land_r2$"),
      ("Coefficient of determination, MODIS against ERA5-Land, {0}.", "", "MODIS; ERA5-Land",
       "paired comparison", "NB04 city_heat_event_summary.csv")),
-    (_re.compile(r"^(day|night)_modis_era5land_bias_c$"),
+    (_re.compile(r"^(day|night)_era5land_minus_modis_bias_c$"),
      ("Mean ERA5-Land minus MODIS {0} difference; positive means ERA5-Land warmer.", "C",
       "MODIS; ERA5-Land", "paired comparison", "NB04 city_heat_event_summary.csv")),
     (_re.compile(r"^(day|night)_modis_era5land_rmse_c$"),
@@ -965,10 +970,10 @@ _PATTERNS = [
      ("Mean absolute error between MODIS and ERA5-Land {0} LST.", "C", "MODIS; ERA5-Land",
       "paired comparison", "NB04 city_heat_event_summary.csv")),
     (_re.compile(r"^(day|night)_seviri_era5land_n$"),
-     ("ERA5-Land daily urban-core values over the selected {0} event window, i.e. the number of "
-      "event days the comparison averages over.", "count", "ERA5-Land",
+     ("Number of event days in the selected {0} window over which the MSG-SEVIRI composite was "
+      "compared with ERA5-Land daily values.", "count", "ERA5-Land",
       "event-window comparison", "NB04 SEVIRI_vs_ERA5_target_metrics.csv")),
-    (_re.compile(r"^(day|night)_seviri_era5land_bias_c$"),
+    (_re.compile(r"^(day|night)_seviri_minus_era5land_bias_c$"),
      ("MSG-SEVIRI urban-core {0} composite minus the mean of the ERA5-Land daily urban-core "
       "medians across the selected event days; positive means SEVIRI warmer.", "C",
       "MSG-SEVIRI; ERA5-Land", "event-window comparison",

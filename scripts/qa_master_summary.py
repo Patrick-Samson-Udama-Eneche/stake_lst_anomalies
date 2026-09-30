@@ -117,6 +117,24 @@ def main():
           not _wrong and not _moved,
           f"C13/C9/C16 {'match' if not _wrong else _wrong}; unexpectedly changed: {_moved or 'none'}")
 
+    # ── heat event catalogue completeness ───────────────────────────────────
+    # The catalogue is built by reading one audit JSON per city. Matching those files on the
+    # display name silently dropped the three cities whose names contain a space, so the
+    # count is checked against the persistence figures city_year_summary carries independently.
+    _ev, _cys2 = d["heat_event_catalogue"], d["city_year_summary"]
+    _counted = _ev.groupby(["city", "period"]).size()
+    _mismatch = []
+    for _r in _cys2.itertuples():
+        for _p in ("day", "night"):
+            _expect = int(getattr(_r, f"era5_{_p}_n_persistent_events", 0) or 0)
+            _got = int(_counted.get((_r.city, _p), 0))
+            if _got != _expect:
+                _mismatch.append(f"{_r.city}/{_p} {_got}!={_expect}")
+    check("heat_event_catalogue rows match era5_*_n_persistent_events per city and period",
+          not _mismatch,
+          f"{len(_ev)} rows, {_ev.city.nunique()} cities"
+          + ("" if not _mismatch else f"; {len(_mismatch)} mismatch: {_mismatch[:6]}"))
+
     # ── MSG-SEVIRI against ERA5-Land ────────────────────────────────────────
     # These are carried over from NB04, never recomputed, so the only thing to verify is that
     # the package reproduces the source CSV exactly.
@@ -124,9 +142,9 @@ def main():
     _cys = d["city_year_summary"]
     if _sev_csv.exists():
         _sev = pd.read_csv(_sev_csv).set_index("city")
-        _pairs = [(f"{p}_{s}", f"{p}_seviri_era5land_{t}")
+        _pairs = [(f"{p}_{s}", f"{p}_seviri_{t}" if t.startswith("minus") else f"{p}_seviri_era5land_{t}")
                   for p in ("day", "night")
-                  for s, t in (("n_obs", "n"), ("bias", "bias_c"),
+                  for s, t in (("n_obs", "n"), ("bias", "minus_era5land_bias_c"),
                                ("rmse", "rmse_c"), ("mae", "mae_c"))]
         _worst, _missing = 0.0, []
         for src, dst in _pairs:
