@@ -320,6 +320,110 @@ def main():
     check("no [CHECK] left in the dictionary",
           not dd.description.astype(str).str.contains(r"\[CHECK\]").any())
 
+    # ── 8b. deposit readiness ───────────────────────────────────────────────
+    print("\n8b. Deposit readiness")
+
+    # geometry validity and CRS, per spatial layer
+    _bad_geom, _crs_seen = [], {}
+    for _n, _gt in pyogrio.list_layers(GPKG):
+        _g = gpd.read_file(GPKG, layer=_n)
+        if "geometry" not in _g.columns or _g.geometry.isna().all():
+            continue
+        _crs_seen[_n] = _g.crs.to_string() if _g.crs else "NONE"
+        _inv = int((~_g.geometry.is_valid).sum())
+        if _inv:
+            _bad_geom.append(f"{_n}:{_inv}")
+    check("every geometry in every spatial layer is valid", not _bad_geom,
+          f"{len(_crs_seen)} spatial layers: " + ", ".join(f"{k}={v}" for k, v in _crs_seen.items())
+          + ("" if not _bad_geom else f"; invalid: {_bad_geom}"))
+    check("every spatial layer is in the analysis CRS",
+          set(_crs_seen.values()) == {"ESRI:102022"}, f"{sorted(set(_crs_seen.values()))}")
+
+    # population ordering
+    _sp = d["spots"]
+    _o1 = int(((_sp.pop_l75_persons > _sp.population_persons + 0.5)).sum())
+    _o2 = int(((_sp.pop_l90_persons > _sp.pop_l75_persons + 0.5)).sum())
+    _cp2 = d["city_profile"]
+    _o3 = int((_cp2.population_uc_persons > _cp2.population_cr_persons + 0.5).sum())
+    _o4 = int((_cp2.population_uc_persons + _cp2.population_bra_persons
+               > _cp2.population_cr_persons + 0.5).sum())
+    check("population ordering holds (L90<=L75<=L50, UC<=CR, UC+BRA<=CR)",
+          not (_o1 or _o2 or _o3 or _o4),
+          f"L75>L50 {_o1}, L90>L75 {_o2}, UC>CR {_o3}, UC+BRA>CR {_o4}")
+
+    # population comes from the 100 m extraction, not the retired 1 km raster
+    _cache_files = sorted((R05 / "population_100m" / "contours").glob("*.csv"))
+    if _cache_files:
+        _cache = pd.concat([pd.read_csv(f) for f in _cache_files],
+                           ignore_index=True).set_index("key")["population_100m"].astype(float)
+        _sc2 = d["spot_contours"].copy()
+        _sc2["k"] = _sc2["spot_id"].astype(str) + "_" + _sc2["contour_level"].astype(str)
+        _m = _sc2.set_index("k")["population_persons"].astype(float)
+        _both = _m.index.intersection(_cache.index)
+        _worst = float((_m[_both] - _cache[_both]).abs().max()) if len(_both) else float("inf")
+        check("population matches the native 100 m extraction, not the retired 1 km raster",
+              len(_both) == len(_sc2) and _worst < 1e-6,
+              f"{len(_both)}/{len(_sc2)} contours compared, max |difference| {_worst:.2e}")
+    else:
+        check("population matches the native 100 m extraction, not the retired 1 km raster",
+              False, "100 m cache not found")
+
+    # key integrity across layers
+    _ki = []
+    if d["city_profile"].city_slug.isna().any() or d["city_profile"].city_slug.duplicated().any():
+        _ki.append("city_profile.city_slug")
+    if d["spots"].spot_uid.isna().any() or d["spots"].spot_uid.duplicated().any():
+        _ki.append("spots.spot_uid")
+    _pc = d["stakeholder_perception"].participant_code
+    if _pc.isna().any() or _pc.duplicated().any():
+        _ki.append("stakeholder_perception.participant_code")
+    if not set(d["stakeholder_spots_gps"].participant_code).issubset(set(_pc)):
+        _ki.append("gps participant_code not in perception")
+    check("keys are complete and unique (city_slug, spot_uid, participant_code)", not _ki,
+          f"{len(d['city_profile'])} slugs, {d['spots'].spot_uid.nunique()} spot_uids, "
+          f"{_pc.nunique()} participant codes" + ("" if not _ki else f"; problems: {_ki}"))
+
+    # GPS precision
+    _g = L("stakeholder_spots_gps", geom=True).to_crs("EPSG:4326")
+    # Coordinates were rounded in EPSG:4326 and are stored projected, so counting decimals
+    # after a round-trip just measures float noise. Test the property that matters instead:
+    # every point lies ON the 3-decimal grid. Unrounded data would sit ~29 m off on average.
+    _xy = np.array([[p.x, p.y] for p in _g.geometry])
+    _off_m = float(np.max(np.hypot(*(np.abs(_xy - np.round(_xy, 3)).T))) * 111_000)
+    check("stakeholder GPS is published at three decimal degrees (~110 m)", _off_m < 0.5,
+          f"maximum distance from the 3-decimal grid: {_off_m:.4f} m")
+
+    # the deposit folder holds exactly the published files
+    _expect = {"surface_thermal_anomaly_stakeholder_composite.gpkg", "data_dictionary.csv",
+               "data_dictionary.md", "README.md", "CHANGELOG.md", "LICENSE.txt",
+               "checksums_md5.txt"}
+    _present = {p.name for p in PKG.iterdir()}
+    check("deposit folder holds exactly the seven published files",
+          _present == _expect,
+          f"{len(_present)} entries" + ("" if _present == _expect else
+          f"; unexpected {sorted(_present - _expect)}; missing {sorted(_expect - _present)}"))
+
+    # provenance rows and retired parameters
+    _info = d["dataset_info"].set_index("key")["value"]
+    _retired = {"era5_min_pixels", "bra_tolerance", "bra_max_dist_m", "bra_min_ring_m"}
+    _found = _retired & set(d["scenario_config"].parameter)
+    check("dataset_info carries build_date and git_commit; scenario_config has no retired parameter",
+          bool(_info.get("build_date")) and bool(_info.get("git_commit")) and not _found,
+          f"build_date={_info.get('build_date')}, git_commit={str(_info.get('git_commit'))[:7]}, "
+          f"scenario rows={len(d['scenario_config'])}"
+          + ("" if not _found else f"; retired present: {sorted(_found)}"))
+
+    # the package opens in both stacks and every layer reads
+    _fails = []
+    for _n, _ in pyogrio.list_layers(GPKG):
+        try:
+            pyogrio.read_dataframe(GPKG, layer=_n, read_geometry=False)
+            gpd.read_file(GPKG, layer=_n)
+        except Exception as _e:
+            _fails.append(f"{_n}: {str(_e)[:40]}")
+    check("every layer opens in both GDAL/pyogrio and geopandas", not _fails,
+          f"{len(list(pyogrio.list_layers(GPKG)))} layers read" + ("" if not _fails else f"; {_fails}"))
+
     # ── 9. reproducibility ──────────────────────────────────────────────────
     print("\n9. Reproducibility")
     tmp = Path(tempfile.mkdtemp()) / "repro"
@@ -344,7 +448,7 @@ def main():
 
     # ── report: fill the marked block in the single build report ────────────
     npass = sum(1 for _, o, _ in RES if o)
-    files = [p for p in sorted(PKG.rglob("*")) if p.is_file() and "_build" not in p.relative_to(PKG).parts]
+    files = [p for p in sorted(PKG.rglob("*")) if p.is_file()]
     out = [QA_BEGIN, "",
            f"Validated {pd.Timestamp.today().date().isoformat()} — "
            f"**{npass}/{len(RES)} checks passed**.", "",
@@ -363,13 +467,13 @@ def main():
     out += [f"| {l} | {k} | {v} | {s} |" for l, k, v, s in side]
     out += ["", QA_END]
 
-    report = PKG / "_build" / "build_report.md"
+    report = PKG.parent / "dataset_build" / "build_report.md"
     if report.exists():
         txt = report.read_text(encoding="utf-8")
         i, j = txt.find(QA_BEGIN), txt.find(QA_END)
         if i != -1 and j != -1:
             report.write_text(txt[:i] + "\n".join(out) + txt[j + len(QA_END):], encoding="utf-8")
-            print(f"\n  validation written into {report.relative_to(PKG)}")
+            print(f"\n  validation written into {report.relative_to(ROOT)}")
         else:
             print(f"\n  [WARN] markers missing in {report.name}; validation not written")
     else:
