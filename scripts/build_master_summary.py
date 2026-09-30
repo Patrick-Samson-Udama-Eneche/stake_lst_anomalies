@@ -814,9 +814,9 @@ DESCR = {
     "n_gistar_pixels": ("Pixels passing the Gi* significance test.", "count", "SEVIRI", "Gi* |Z| >= 1.96, Queen contiguity", "NB05 spot_comprehensive_summary.csv"),
     "n_bh_fdr_pixels": ("Pixels surviving BH-FDR control.", "count", "SEVIRI", "BH-FDR q = 0.05", "NB05 spot_comprehensive_summary.csv"),
     "bh_significant": ("True when the spot survives BH-FDR control.", "", "SEVIRI", "BH-FDR q = 0.05", "NB05"),
-    "population_persons": ("Resident population within the L50 footprint.", "persons", "GHS-POP", "zonal sum", "NB05"),
-    "pop_l75_persons": ("Resident population within the L75 zone.", "persons", "GHS-POP", "zonal sum", "NB05"),
-    "pop_l90_persons": ("Resident population within the L90 dense core.", "persons", "GHS-POP", "zonal sum", "NB05"),
+    "population_persons": ("Resident population within the L50 footprint, GHS-POP summed on its native 100 m grid with fractional overlap. Express as a share of population_cr_persons in city_profile; see that field for why the city region is the right denominator.", "persons", "GHS-POP", "zonal sum at 100 m", "GHS-POP P2023A epoch 2025"),
+    "pop_l75_persons": ("Resident population within the L75 zone, GHS-POP summed on its native 100 m grid with fractional overlap.", "persons", "GHS-POP", "zonal sum at 100 m", "GHS-POP P2023A epoch 2025"),
+    "pop_l90_persons": ("Resident population within the L90 dense core, GHS-POP summed on its native 100 m grid with fractional overlap.", "persons", "GHS-POP", "zonal sum at 100 m", "GHS-POP P2023A epoch 2025"),
     "suhii_event_c": ("Event-scale surface urban heat island intensity, urban core minus BRA.", "C", "SEVIRI", "zonal mean difference", "NB05"),
     "participant_code": ("Pseudonymous participant code, P001 to P105.", "", "stakeholder", "pseudonymisation", "NB02, remapped here"),
     "perceived_warming_10yr": ("Perceived temperature increase over the last ten years.", "", "stakeholder", "questionnaire item 61", "NB02"),
@@ -913,7 +913,7 @@ DESCR.update({
     "std_lst_c": ("Standard deviation of LST within the spot footprint.", "C", "SEVIRI", "zonal statistics", "NB05"),
     "max_lst_c": ("Maximum LST within the spot footprint.", "C", "SEVIRI", "zonal statistics", "NB05"),
     "min_lst_c": ("Minimum LST within the spot footprint.", "C", "SEVIRI", "zonal statistics", "NB05"),
-    "pop_l50_persons": ("Resident population within the L50 outer extent.", "persons", "GHS-POP", "zonal sum", "NB05"),
+    "pop_l50_persons": ("Resident population within the L50 outer extent, GHS-POP summed on its native 100 m grid with fractional overlap. Express as a share of population_cr_persons in city_profile.", "persons", "GHS-POP", "zonal sum at 100 m", "GHS-POP P2023A epoch 2025"),
     "nb04_val_tier": ("Quality tier of the NB04 event window underlying the SEVIRI composite.", "", "ERA5-Land", "event selection", "NB04 via NB05"),
     "persistent_dn": ("True when the city shows a persistent day and night anomaly.", "", "SEVIRI", "day-night persistence check", "NB05"),
     # events
@@ -1171,7 +1171,7 @@ def write_readme(layers, out_dir: Path, gpkg: Path):
             c = ", ".join(f"{counted[k]} {k}" for k in order if k in counted)
             cohort_caveat = (
                 f"\n**One exception, stated plainly.** `hitrate_sensitivity` is reproduced exactly as "
-                f"computed in the source analysis, which selected stakeholder points by city of "
+                f"computed in the study, which selected stakeholder points by city of "
                 f"attendance rather than by registration. Its denominators are therefore {d} points, "
                 f"against the {c} points in `stakeholder_spots_gps`. The difference is the excluded "
                 f"respondent's points. Recompute the hit rates from `stakeholder_spots_gps` and "
@@ -1186,9 +1186,8 @@ Contact: P. S. U. Eneche.
 ## 1. What this dataset contains
 
 **One GeoPackage, {sum(1 for d in layers.values() if d is not None)} layers.** Spatial and attribute-only layers live side by side in the same
-file, so there is a single data artefact to cite, download and checksum. CSV and GeoJSON copies
-are not shipped; regenerate them at any time with
-`python scripts/build_master_summary.py --with-csv --with-geojson`.
+file, so there is a single data artefact to cite, download and checksum. Any layer can be read
+with GDAL/OGR, geopandas, QGIS, R (sf) or any GeoPackage-aware tool.
 
 | layer | rows | contents |
 |---|---|---|
@@ -1204,7 +1203,7 @@ are not shipped; regenerate them at any time with
 
 - `city_slug` is the stable city key; `city` is the display name; `cluster25` is the PLT cluster.
 - `zone` is one of `uc`, `bra`, `cr`, `suhii`; `period` is `day` or `night`; `spot_type` is `hot` or `cold`; `contour_level` is `L50`, `L75` or `L90`.
-- `spot_uid` (study year + spot id) is the key that joins `spots` and `spot_contours`, and stays unique if the protocol is re-run for another year. `spot_id` is kept as issued by NB05 and is unique only within a year.
+- `spot_uid` (study year + spot id) is the key that joins `spots` and `spot_contours`, and stays unique if the protocol is re-run for another year. `spot_id` is the identifier used within a single year and is not unique across years.
 - `city_slug` joins `city_profile` (year-independent) to `city_year_summary` and every event-scale layer; add `study_year` when more than one year is present.
 - `participant_code` joins the two stakeholder layers.
 
@@ -1218,8 +1217,10 @@ joined = spots.merge(trends.query("zone == 'suhii'"), on=["city_slug", "period"]
 
 ## 4. Coordinate reference system and coverage
 
-- GeoPackage: {CRS_ANALYSIS} (Africa Albers Equal Area Conic), the analysis CRS. All areas were computed in it.
-- GeoJSON copies: {CRS_WGS84}, per RFC 7946.
+- Every layer is in {CRS_ANALYSIS} (Africa Albers Equal Area Conic), the analysis CRS; all areas
+  and distances were computed in it. Five layers carry geometry (`city_zones`, `city_profile`,
+  `spots`, `spot_contours`, `stakeholder_spots_gps`); the other twelve are attribute-only tables
+  stored in the same file.
 - Spatial coverage: Nigeria, about 4-14 N and 2-15 E.
 - Temporal coverage: MODIS Aqua MYD11A1 {TREND_FIRST}-{TREND_LAST}; ERA5-Land {STUDY_YEAR}; MSG-SEVIRI composites over the selected {STUDY_YEAR} heat events.
 
@@ -1231,21 +1232,31 @@ joined = spots.merge(trends.query("zone == 'suhii'"), on=["city_slug", "period"]
 | ERA5-Land | daily LST for persistent heat events | [PENDING-DOI] |
 | LSA-SAF MSG-SEVIRI LST | event-scale composites for spot detection | [PENDING-DOI] |
 | GHS-SMOD | settlement model for the three-zone delineation | [PENDING-DOI] |
-| GHS-POP | population grid for exposure | [PENDING-DOI] |
+| GHS-POP (P2023A, epoch 2025) | resident population; summed on the native 100 m grid per polygon, with fractional overlap | [PENDING-DOI] |
 | JRC Global Surface Water | water masking | [PENDING-DOI] |
 | UN World Urbanization Prospects | city population | [PENDING-DOI] |
 | PLT typology (Eneche et al., 4TU.ResearchData) | physiographic landscape typology | [PENDING-DOI] |
 
 No DOI is stated unless it was found in the project; all are marked `[PENDING-DOI]`.
 
-## 6. What is deliberately not included
+## 6. Bias conventions
+
+Two sensor comparisons are published, and each field name states the direction of the subtraction
+so the sign cannot be misread. `day_era5land_minus_modis_bias_c` and its night counterpart are the
+mean of ERA5-Land minus MODIS across the days when both have a valid urban-core value, so a
+positive value means ERA5-Land is the warmer of the two. `day_seviri_minus_era5land_bias_c` and its
+night counterpart are the MSG-SEVIRI urban-core composite minus the mean of the ERA5-Land daily
+urban-core medians across the selected event days, so a positive value means SEVIRI is warmer. The
+accompanying `*_n`, `*_r`, `*_r2`, `*_rmse_c` and `*_mae_c` fields are sign-free.
+
+## 7. What is deliberately not included
 
 - **Association analysis.** Kruskal-Wallis, Dunn post-hoc, chi-square, effect sizes, forest-plot data and the synthesis association tables belong to the research article.
 - **Cluster-level and national aggregates.** They are findings of the article and can be rebuilt from the city-level records with a group-by on `cluster25`.
 - **The raw questionnaire.** No free text, names, emails, phone numbers, device identifiers or timestamps. Only the perception items listed in the data dictionary are present.
-- **Rasters and per-city intermediates.** Regenerable from the code repository.
+- **Rasters and per-city intermediates.** The source imagery is available from the providers listed above, and the derived rasters are reproducible from the code record.
 
-## 7. Participant cohort and inclusion rule
+## 8. Participant cohort and inclusion rule
 
 The {n_part} participants in `stakeholder_perception` are the respondents whose **registered** city is
 one of the study cities. Registration is the auditable record of participation, so a respondent
@@ -1254,7 +1265,7 @@ cannot be verified independently, as no per-person attendance register exists. O
 in that category and is excluded from every layer, along with the spots they marked. The rule is
 deliberate and conservative — it omits an unverifiable record rather than admitting one.
 {cohort_caveat}
-## 8. Anonymisation
+## 9. Anonymisation
 
 Participants are identified only by a pseudonymous code, `P001` to `P{n_part:03d}`, assigned by sorting on city then original identifier. The mapping back to the original identifiers is held privately by the authors and is not part of this dataset. No free-text response is included. Stakeholder point coordinates are coarsened to three decimal degrees (about 110 m) before
 publication, so that a marked location cannot be resolved to an individual building or
@@ -1262,16 +1273,18 @@ dwelling. The coarsening displaces points by 43 m on average (79 m at most) and 
 hit-or-miss outcome at the smallest published buffer radius of 500 m, so the stakeholder
 corroboration results are unaffected.
 
-## 9. Licence and citation
+## 10. Licence and citation
 
 Licence: **CC BY 4.0**.
 
 - Dataset: [PENDING-DOI]
 - Data in Brief article: [PENDING]
 - Sustainable Cities and Society article: [PENDING]
-- Code repository: [PENDING-DOI], MIT licence.
+- Code record: [PENDING-DOI]
 
-## 10. Map disclaimer
+The full licence text accompanies this dataset in `LICENSE.txt`.
+
+## 11. Map disclaimer
 
 Map lines delineate study areas and do not necessarily depict accepted national boundaries.
 """
@@ -1311,59 +1324,50 @@ national boundaries.
     (out_dir / "LICENSE.txt").write_text(text, encoding="utf-8")
 
 
-def write_changelog(out_dir: Path):
+def write_changelog(out_dir: Path, n_layers: int = 17, n_cities: int = 56):
+    """First public release: describe what the deposit contains, not how it was built.
+
+    The internal correction history lives in the build report, which is not published.
+    """
     (out_dir / "CHANGELOG.md").write_text(f"""# Changelog
 
-## v{VERSION} — {date.today().isoformat()}
+All notable changes to this dataset are recorded here. Versions follow the deposit, not the
+software that produced it.
 
-First published version.
+## v{VERSION} - {date.today().isoformat()}
 
-### Corrected
+First public release.
 
-- **Persistence fields now come from ERA5-Land.** In the previous aggregation
-  (`master_thermal_spots`) the fields `n_persistent_events` and `longest_event_days` carried the
-  **MODIS** values on every row, and `n_modis_hot_days` was present. The locked methodological
-  decision is that persistence is derived from ERA5-Land only. This dataset reads
-  `era5_<period>_n_persistent_events` and `era5_<period>_longest_event_days`, and
-  `n_modis_hot_days` has been removed, because the P90 definition fixes the number of hot days
-  per year and the MODIS count carries no extra information.
-- **Trend statistics restructured.** `sen_slope_C_per_decade`, `mk_p_value` and `mk_trend` were
-  attached to each spot record but were the **urban-core** series, not SUHII, which was
-  ambiguous. They now live in `trend_statistics` with an explicit `zone` field covering
-  `uc`, `bra`, `cr` and `suhii`, and have been removed from the spot records.
+### Contents
 
-### Added
+One GeoPackage of {n_layers} layers covering {n_cities} Nigerian cities, grouped as:
 
-- `heat_event_catalogue`: the ERA5-Land persistent heat events, previously not published.
-- Explicit zero rows so that every city, period and spot type appears even where no spot was
-  detected.
-- `monthly_series` and `monthly_climatology`.
-- `city_exposure_by_contour`: population exposure by contour level.
-- `city_profile.population_wup_merged_k` and `city_profile.absorbed_cities`, so that the dataset
-  matches Step 3 of the zonation protocol: a city whose urban core falls entirely within a larger
-  adjacent city is absorbed, and its population is reassigned to the parent. `population_wup_k`
-  is unchanged and still holds the parent's own population.
+- **Zonation** - urban core, background reference area and city region for every city, plus a
+  year-independent city profile carrying the physiographic typology, zone areas and populations.
+- **Long-term temperature** - annual and monthly land-surface temperature series per city, zone
+  and period for 2006-2025, their calendar-month climatology, and Mann-Kendall / Sen trend
+  statistics.
+- **Persistent heat events** - the full ERA5-Land event catalogue for 2024, with the event
+  selected for event-scale analysis flagged.
+- **Surface hot and cold spots** - spot polygons and their 50/75/90% kernel-density contours,
+  detected from MSG-SEVIRI composites over the selected events, with Getis-Ord Gi* and
+  Benjamini-Hochberg FDR counts on the complete city x period x spot-type grid.
+- **Population exposure** - resident population inside each spot and contour, and by city,
+  period, spot type and contour level.
+- **Stakeholder evidence** - pseudonymised perception responses, pseudonymised marked locations,
+  and stakeholder-satellite agreement across buffer distances.
 
-- `city_year_summary`: eight `*_seviri_era5land_*` fields holding the MSG-SEVIRI against
-  ERA5-Land comparison over each city's selected persistent heat event, for day and night —
-  the number of event days, the bias, the RMSE and the MAE. The values are read from NB04's
-  `SEVIRI_vs_ERA5_target_metrics.csv` as computed; nothing was recomputed. Bias is the SEVIRI
-  urban-core composite minus the mean of the ERA5-Land daily urban-core medians across the event
-  days, so a positive value means SEVIRI is warmer.
+### Notes for this version
 
-- `city_profile.population_uc_persons`, `population_bra_persons` and
-  `population_cr_persons`: GHS-POP totals for the three zones, summed on the native 100 m
-  grid. `population_cr_persons` is the denominator to use for exposure shares, because
-  spots are detected across the whole city region and do not respect the urban-core
-  boundary; only 16 of the 185 L50 footprints lie wholly inside the urban core.
-
-### Removed
-
-- `city_profile.is_absorbed` and `city_profile.absorbed_by`. Both recorded whether a city had
-  itself been absorbed into another. Only the 56 surviving cities are published, and by
-  construction none of them was absorbed, so the fields were `False` and null on every row. The
-  absorption is published in the active direction instead, by `absorbed_cities` and
-  `population_wup_merged_k`.
+- Coverage is the 56 cities that remain after spatial deduplication of the 67 UN WUP 2024
+  candidates with a population of at least 300,000.
+- The long-term record runs 2006-2025; events, spots, population exposure and stakeholder
+  evidence are for 2024.
+- Population is summed from GHS-POP on its native 100 m grid, per polygon, with fractional
+  overlap weighting.
+- Every layer carries a `scenario_id` recording the configuration behind the run, so results
+  produced under different settings or for another study year can coexist in one file and be
+  told apart from the data alone.
 """, encoding="utf-8")
 
 
@@ -1417,6 +1421,34 @@ DECISIONS = [
      "consequently LARGER than bra_area_km2 for all 56 cities (Abuja: 2946.70 against 2508.15 "
      "km2), because the bbox excludes water and peri-urban but not the urban core. The values are "
      "published unchanged and the descriptions now say which geometry they refer to."),
+    ("Population recomputed at native 100 m",
+     "Population had been summed from a 1 km raster resampled from GHS-POP's 100 m grid without "
+     "an additive reducer, so each 1 km cell held one 100 m value instead of the sum of the ~100 "
+     "beneath it. Zonal sums understated population by about 100x: the Jos city region read "
+     "15,970 against a true 1,550,542, and Lagos's urban core was 102x short of its UN WUP "
+     "population. Every polygon is now summed server-side on the native 100 m grid, per polygon, "
+     "with fractional overlap. A corrected 1 km raster was tested and rejected: the pixel-centre "
+     "rule left only 3 of 10 Jos polygons within 5% of truth. Contour population rose 243,841 to "
+     "24,521,914 with every KDE geometry byte-identical."),
+    ("Event catalogue completed",
+     "The catalogue read one audit file per city using the display name, but NB04 writes those "
+     "files with spaces replaced by underscores. The three cities whose names contain a space -- "
+     "Ado Ekiti, Benin City and Port Harcourt -- were never found, so 37 of their events were "
+     "missing even though city_year_summary recorded them. 770 -> 807 rows, 53 -> 56 cities. A "
+     "QA check now compares catalogue rows against era5_<period>_n_persistent_events."),
+    ("Bias fields renamed to carry their direction",
+     "day_/night_modis_era5land_bias_c became day_/night_era5land_minus_modis_bias_c, and "
+     "day_/night_seviri_era5land_bias_c became day_/night_seviri_minus_era5land_bias_c. The old "
+     "names did not say which sensor was subtracted from which, and the stored value is "
+     "ERA5-Land minus MODIS and SEVIRI minus ERA5-Land respectively. No value changed."),
+    ("ERA5_MIN_PIXELS retired",
+     "Declared in config.py with a comment describing a City-Region proxy for zones with fewer "
+     "than 4 ERA5 pixels, and never read by any code; the only other reference was the scenario "
+     "log. Removed from config.py and from scenario_config."),
+    ("The public changelog describes the release, not the repairs",
+     "v1.0.0 is the first public version, so a reader has no earlier version to compare against. "
+     "The correction history that used to sit in CHANGELOG.md is here instead, and this report is "
+     "not part of the deposit."),
     ("Redundant exports retired, hot-biased names corrected",
      "12 files were withdrawn after a dependency scan showed they had no readers: "
      "`all_cities_dashboard.gpkg` duplicated this package exactly, and the GeoJSON, Shapefile and "
@@ -1589,7 +1621,9 @@ def main():
         "analysis CRS and were not recomputed.",
     ])
     write_readme(layers, out_dir, gpkg)
-    write_changelog(out_dir)
+    write_changelog(out_dir,
+                    n_layers=sum(1 for d in layers.values() if d is not None),
+                    n_cities=len(layers['city_profile']))
     write_licence(out_dir)
     n = write_checksums(out_dir)
     log(f"  checksums: {n} files")
