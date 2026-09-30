@@ -33,7 +33,10 @@ from shapely.geometry import Polygon
 # ── constants ───────────────────────────────────────────────────────────────
 VERSION = "1.0.0"
 DATASET_DIR  = "surface_thermal_anomaly_stakeholder_composite"   # published dataset root
-DATASET_STEM = "surface_thermal_anomaly_stakeholder_composite"   # the single data file
+DATASET_STEM = "surface_thermal_anomaly_stakeholder_composite"
+# Build records live OUTSIDE the deposit folder. Everything inside the deposit folder is
+# published to Zenodo, so nothing internal may sit there.
+BUILD_DIR_NAME = "dataset_build"
 # Names are protocol-generic: the instance (region, city set, study years, selection
 # rule) is recorded in the dataset_info and scenario_config layers, not in the names.
 CRS_ANALYSIS = "ESRI:102022"          # Africa Albers Equal Area Conic
@@ -61,7 +64,7 @@ SPOT_TYPES = ["hot", "cold"]
 LOG: list[str] = []
 DEVIATIONS: list[str] = []
 
-# The QA script replaces whatever sits between these two markers in _build/build_report.md.
+# The QA script replaces whatever sits between these two markers in the build report.
 QA_BEGIN = "<!-- QA:BEGIN — written by scripts/qa_master_summary.py, do not edit by hand -->"
 QA_END = "<!-- QA:END -->"
 CHECKS: list[str] = []
@@ -1146,7 +1149,7 @@ def write_readme(layers, out_dir: Path, gpkg: Path):
     files = "\n".join(
         f"| `{p.relative_to(out_dir).as_posix()}` | {size(p)} |"
         for p in sorted(out_dir.rglob("*"))
-        if p.is_file() and "_build" not in p.relative_to(out_dir).parts)
+        if p.is_file())
 
     n_part = len(layers["stakeholder_perception"])
     # Disclose the mismatch only while it is real: the source hit-rate analysis filtered the
@@ -1273,6 +1276,39 @@ Licence: **CC BY 4.0**.
 Map lines delineate study areas and do not necessarily depict accepted national boundaries.
 """
     (out_dir / "README.md").write_text(txt, encoding="utf-8")
+
+
+def write_licence(out_dir: Path):
+    """CC BY 4.0 notice. The deposit carries its licence with it."""
+    text = """Dataset and protocol associated with the analysis of the diurnal surface thermal anomalies
+across 56 Nigerian cities situated in 16 physiographic landscape typologies
+
+Copyright (c) 2026 P. S. U. Eneche, Y. Zeng, F. Atun, K. Pfeffer
+University of Twente, Faculty of Geo-Information Science and Earth Observation (ITC)
+
+This work is licensed under the Creative Commons Attribution 4.0 International License
+(CC BY 4.0).
+
+You are free to:
+  Share  - copy and redistribute the material in any medium or format
+  Adapt  - remix, transform, and build upon the material for any purpose, even
+           commercially
+
+Under the following terms:
+  Attribution - You must give appropriate credit, provide a link to the licence, and
+                indicate if changes were made. You may do so in any reasonable manner,
+                but not in any way that suggests the licensor endorses you or your use.
+
+No additional restrictions - You may not apply legal terms or technological measures that
+legally restrict others from doing anything the licence permits.
+
+Full licence text:       https://creativecommons.org/licenses/by/4.0/legalcode
+Human-readable summary:  https://creativecommons.org/licenses/by/4.0/
+
+Map disclaimer: map lines delineate study areas and do not necessarily depict accepted
+national boundaries.
+"""
+    (out_dir / "LICENSE.txt").write_text(text, encoding="utf-8")
 
 
 def write_changelog(out_dir: Path):
@@ -1425,7 +1461,9 @@ def write_build_report(layers, dd, out_dir: Path, sources: dict):
     lines += [f"- `{c}`" for c in checks] or ["- none"]
     lines += ["", "## 5. Validation", "", QA_BEGIN,
               "_Not yet run for this build. Run `python scripts/qa_master_summary.py`._", QA_END, ""]
-    (out_dir / "_build" / "build_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _bd = out_dir.parent / BUILD_DIR_NAME
+    _bd.mkdir(parents=True, exist_ok=True)
+    (_bd / "build_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def write_checksums(out_dir: Path):
@@ -1434,7 +1472,7 @@ def write_checksums(out_dir: Path):
         rel = p.relative_to(out_dir)
         # never checksum the manifest itself: it exists on a rebuild but not on a
         # first build, which would otherwise make the listing non-deterministic
-        if p.is_file() and "_build" not in rel.parts and rel.name != "checksums_md5.txt":
+        if p.is_file() and rel.name != "checksums_md5.txt":
             lines.append(f"{md5(p)}  {rel.as_posix()}")
     (out_dir / "checksums_md5.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return len(lines)
@@ -1448,7 +1486,7 @@ def main():
     ap.add_argument("--with-geojson", action="store_true", help="also write geojson/ copies")
     args = ap.parse_args()
     out_dir = Path(args.out)
-    (out_dir / "_build").mkdir(parents=True, exist_ok=True)
+    (out_dir.parent / BUILD_DIR_NAME).mkdir(parents=True, exist_ok=True)
 
     log(f"Building master summary v{VERSION} -> {out_dir}")
     scenario_id, scen_df = capture_scenario()
@@ -1551,6 +1589,7 @@ def main():
     ])
     write_readme(layers, out_dir, gpkg)
     write_changelog(out_dir)
+    write_licence(out_dir)
     n = write_checksums(out_dir)
     log(f"  checksums: {n} files")
     write_build_report(layers, dd, out_dir, SOURCES)

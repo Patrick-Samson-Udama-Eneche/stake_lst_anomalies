@@ -81,3 +81,8 @@ sketch.jpg
 
 # participant re-identification key (never commit)
 private/
+
+# Internal build and working notes: never part of the Zenodo deposit
+Results/05_hotspot_analysis/dataset_build/
+Results/05_hotspot_analysis/population_100m/README.md
+Results/_to_delete/
