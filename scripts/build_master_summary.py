@@ -1486,7 +1486,8 @@ def main():
     ap.add_argument("--with-geojson", action="store_true", help="also write geojson/ copies")
     args = ap.parse_args()
     out_dir = Path(args.out)
-    (out_dir.parent / BUILD_DIR_NAME).mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)               # the deposit folder itself
+    (out_dir.parent / BUILD_DIR_NAME).mkdir(parents=True, exist_ok=True)   # build records
 
     log(f"Building master summary v{VERSION} -> {out_dir}")
     scenario_id, scen_df = capture_scenario()
