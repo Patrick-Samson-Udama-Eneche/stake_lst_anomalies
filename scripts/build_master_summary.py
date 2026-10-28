@@ -31,7 +31,11 @@ import pyogrio
 from shapely.geometry import Polygon
 
 # ── constants ───────────────────────────────────────────────────────────────
-VERSION = "1.0.0"
+VERSION = "1.0.1"
+# Date carried by the v1.0.0 package's own CHANGELOG.md, read off that file rather than
+# chosen here. v1.0.0 was finalised but never deposited, so this is a build date, not a
+# publication date, and v1.0.1 may legitimately carry the same one.
+V100_DATE = "2026-10-28"
 DATASET_DIR  = "surface_thermal_anomaly_stakeholder_composite"   # published dataset root
 DATASET_STEM = "surface_thermal_anomaly_stakeholder_composite"
 # The Zenodo record title. Deliberately free of counts and years so it stays stable across
@@ -191,6 +195,22 @@ def load_reference():
         col = f"C{int(r['cluster25'])}" if pd.notna(r["cluster25"]) else None
         pct.append(float(row.iloc[0][col]) if len(row) and col in ucd.columns else np.nan)
     ref["pct_dominant_class"] = pct
+
+    # A6: the same share measured on the CITY REGION, which is the zone the cluster was
+    # assigned on. pct_dominant_class measures that cluster inside the urban core instead,
+    # so the two differ and neither alone describes the assignment.
+    crd = R01 / "cluster25_cr_distribution.csv"
+    if crd.exists():
+        crdf = pd.read_csv(crd).rename(columns={"City Region": "city"})
+        pct_cr = []
+        for _, r in ref.iterrows():
+            row = crdf[crdf["city"] == r["city"]]
+            col = f"C{int(r['cluster25'])}" if pd.notna(r["cluster25"]) else None
+            pct_cr.append(float(row.iloc[0][col]) if len(row) and col in crdf.columns else np.nan)
+        ref["pct_assigned_class_cr"] = pct_cr
+    else:
+        CHECKS.append("city_profile.pct_assigned_class_cr (CR distribution CSV absent)")
+        ref["pct_assigned_class_cr"] = np.nan
     return ref.sort_values("city_slug").reset_index(drop=True)
 
 
@@ -355,6 +375,33 @@ def build_city_year_summary(ref, spots, study_year=STUDY_YEAR):
                          (f"{p_}_corr_mae", f"{p_}_modis_era5land_mae_c")):
             df[dst] = df["city"].map(ce.set_index("city")[src]) if src in ce.columns else np.nan
 
+    # A3: the MSG-SEVIRI three-zone event composite, copied from NB04 without recomputation.
+    # These are the values the event-scale SUHII in `spots` is built on, so publishing them
+    # lets a reader reproduce that column and Supplementary Figure S7.2 from the package.
+    sev3 = R04 / "seviri" / "City_SEVIRI_3zone_SUHII.csv"
+    if sev3.exists():
+        s3 = pd.read_csv(sev3)
+        for p_ in ("day", "night"):
+            sub = s3[s3["period"] == p_].set_index("city")
+            for src, dst in (("uc_lst_mean", f"{p_}_seviri_uc_mean_c"),
+                             ("bra_lst_mean", f"{p_}_seviri_bra_mean_c"),
+                             ("cr_lst_mean", f"{p_}_seviri_cr_mean_c"),
+                             ("suhii", f"{p_}_seviri_suhii_c")):
+                df[dst] = df["city"].map(sub[src]) if src in sub.columns else np.nan
+    else:
+        CHECKS.append("city_year_summary.*_seviri_{uc,bra,cr}_mean_c (3-zone CSV absent)")
+        for p_ in ("day", "night"):
+            for suf in ("uc_mean_c", "bra_mean_c", "cr_mean_c", "suhii_c"):
+                df[f"{p_}_seviri_{suf}"] = np.nan
+
+    # A3: the ERA5-Land event mean -- the mean of the daily urban-core medians across the
+    # days of the selected event. This is the quantity *_seviri_minus_era5land_bias_c is
+    # measured against, so publishing it makes that bias reproducible from the package.
+    _ev = _selected_event_windows()
+    for p_ in ("day", "night"):
+        df[f"{p_}_era5land_event_mean_c"] = df["city"].map(
+            lambda c, _p=p_: _era5land_event_mean(c, _p, _ev))
+
     # MSG-SEVIRI against ERA5-Land over the selected event window, read as computed by NB04
     # §11a; nothing is recomputed here. Bias is SEVIRI urban-core mean minus the mean of the
     # ERA5-Land daily urban-core medians across the event days, so positive means SEVIRI warmer.
@@ -389,6 +436,22 @@ def build_city_year_summary(ref, spots, study_year=STUDY_YEAR):
     for c in ("validation_tier", "bh_any"):
         if c in mcc.columns:
             df[c] = df["city"].map(mcc.set_index("city")[c])
+
+    # A5: the NB05 roll-up has no row for a city with no spots, leaving validation_tier
+    # empty (Ikare). Fall back to the city's own selected-event tiers, taking the weaker of
+    # the two so the field stays a conservative summary of the event evidence.
+    _ORDER = ["FAIR", "GOOD", "EXCELLENT"]
+    def _weaker(a, b):
+        got = [t for t in (a, b) if isinstance(t, str) and t in _ORDER]
+        return min(got, key=_ORDER.index) if got else np.nan
+    _miss = df["validation_tier"].isna()
+    if _miss.any():
+        df.loc[_miss, "validation_tier"] = [
+            _weaker(r.day_selected_event_tier, r.night_selected_event_tier)
+            for r in df[_miss].itertuples()]
+        DEVIATIONS.append(
+            f"city_year_summary.validation_tier: filled for {int(_miss.sum())} city(ies) with no "
+            "NB05 roll-up row (no spots detected) from the weaker of their two selected-event tiers.")
     return df.sort_values(["city_slug", "study_year"]).reset_index(drop=True)
 
 
@@ -439,6 +502,92 @@ def build_trend_statistics(ref):
             "lowest_year", "lowest_year_value_c"]
     t = t[[c for c in cols if c in t.columns]]
     t = t.sort_values(["city_slug", "zone", "period"]).reset_index(drop=True)
+    t["zone"] = t["zone"].astype(str)
+    return t
+
+
+# ── A3 helpers: the ERA5-Land mean over the selected event window ───────────
+# NB04 section 11a computes the SEVIRI-minus-ERA5-Land bias as
+#   seviri_uc_mean - mean(ERA5-Land daily urban-core medians within [start, end])
+# The second term was never published, so the bias could not be reproduced from the
+# package. These helpers recreate that term from the same daily CSVs and event windows.
+_ERA5_COL = {"day": "day_lst_median", "night": "night_lst_median"}
+
+
+def _selected_event_windows() -> dict:
+    """{(city, period): (start, end)} for the event chosen for SEVIRI compositing."""
+    ce = pd.read_csv(R04 / "city_heat_event_summary.csv")
+    out = {}
+    for r in ce.itertuples():
+        for p in ("day", "night"):
+            st, en = getattr(r, f"{p}_sel_start", None), getattr(r, f"{p}_sel_end", None)
+            if pd.notna(st) and pd.notna(en):
+                out[(str(r.city), p)] = (pd.to_datetime(st), pd.to_datetime(en))
+    return out
+
+
+def _era5land_event_mean(city: str, period: str, windows: dict) -> float:
+    """Mean ERA5-Land daily urban-core median across the selected event days."""
+    win = windows.get((str(city), period))
+    if win is None:
+        return np.nan
+    # NB04 names these files with the city's display name, spaces and all, whereas it names
+    # the event audit JSONs with underscores. Accept both rather than assume either: the
+    # underscore assumption silently lost Ado Ekiti, Benin City and Port Harcourt.
+    base = R04 / "raw_extractions"
+    f = next((p for p in (base / f"{city}_ERA5_UC_daily_{STUDY_YEAR}.csv",
+                          base / f"{str(city).replace(' ', '_')}_ERA5_UC_daily_{STUDY_YEAR}.csv")
+              if p.exists()), None)
+    if f is None:
+        CHECKS.append(f"era5land_event_mean: no daily ERA5 file for {city}")
+        return np.nan
+    d = pd.read_csv(f, parse_dates=["date"])
+    col = _ERA5_COL[period]
+    if col not in d.columns:
+        return np.nan
+    v = d[(d["date"] >= win[0]) & (d["date"] <= win[1])][col]
+    v = pd.to_numeric(v, errors="coerce").dropna()
+    return float(v.mean()) if len(v) else np.nan
+
+
+def build_composite_trends(annual: pd.DataFrame) -> pd.DataFrame:
+    """Cluster and national composites of the annual series (DiB eq. 17).
+
+    Each composite is the UNWEIGHTED mean of its member cities for a given year, zone and
+    period; the same four-layer protocol as trend_statistics is then run on that series.
+    Verified in two stages before use: temporal_analysis.run_trend_analysis reproduces all
+    448 rows of the released trend_statistics exactly, and these composites reproduce the
+    128 rows of NB03's Cluster25_Annual_Stats.csv and Cluster25_SUHII_Stats.csv to 1e-5.
+    """
+    sys.path.insert(0, str(ROOT / "src"))
+    from temporal_analysis import run_trend_analysis
+
+    rows = []
+    for (cl, z, p), g in annual.groupby(["cluster25", "zone", "period"]):
+        srs = g.groupby("year")["value_c"].mean().sort_index()
+        rows.append({"composite_type": "cluster", "composite_key": f"C{int(cl)}",
+                     "cluster25": int(cl), "zone": z, "period": p,
+                     "n_cities": int(g["city"].nunique()), **run_trend_analysis(srs, mode="annual")})
+    for (z, p), g in annual.groupby(["zone", "period"]):
+        srs = g.groupby("year")["value_c"].mean().sort_index()
+        rows.append({"composite_type": "national", "composite_key": "national",
+                     "cluster25": np.nan, "zone": z, "period": p,
+                     "n_cities": int(g["city"].nunique()), **run_trend_analysis(srs, mode="annual")})
+
+    t = pd.DataFrame(rows).rename(columns={
+        "n": "n_years", "mk_p": "mk_p_value",
+        "sen_slope_per_decade": "sen_slope_c_per_decade",
+        "sen_slope_per_year": "sen_slope_c_per_year",
+        "ljungbox_pvalue": "ljungbox_p_value"})
+    t["mk_method"] = np.where(t["autocorr_corrected"].astype(str).str.lower().isin(["true", "1"]),
+                              "Hamed-Rao variance correction", "original Mann-Kendall")
+    t["zone"] = pd.Categorical(t["zone"], ZONE_ORDER, ordered=True)
+    cols = ["composite_type", "composite_key", "cluster25", "zone", "period", "n_cities",
+            "n_years", "mk_method", "mk_z", "mk_p_value", "mk_trend", "autocorr_corrected",
+            "lag1_autocorr", "ljungbox_p_value", "sen_slope_c_per_year",
+            "sen_slope_c_per_decade", "intercept", "ols_slope", "ols_r_squared", "ols_p_value"]
+    t = t[[c for c in cols if c in t.columns]]
+    t = t.sort_values(["composite_type", "composite_key", "zone", "period"]).reset_index(drop=True)
     t["zone"] = t["zone"].astype(str)
     return t
 
@@ -569,7 +718,7 @@ def build_spot_occurrence(ref, spots):
 
 # ── layer 9: spots ──────────────────────────────────────────────────────────
 DROP_FROM_SPOTS = ["climate_class", "landcover_class", "elevation_class", "geology_class",
-                   "pct_dominant_class", "city_area_km2", "uc_area_km2", "bra_area_km2",
+                   "pct_dominant_class", "pct_assigned_class_cr", "city_area_km2", "uc_area_km2", "bra_area_km2",
                    "sen_slope_C_per_decade", "mk_p_value", "mk_trend",
                    "n_modis_hot_days", "n_persistent_events", "longest_event_days",
                    "h3_cells_json", "h3_cell_count",   # legacy columns, never populated
@@ -636,7 +785,7 @@ def build_contours(ref):
 ALLOWED_PERCEPTION = {"61_temp_increase_10yrs": "perceived_warming_10yr",
                       "60_diurnal_severity_heat": "perceived_diurnal_severity",
                       "58_temp_peak_city": "perceived_peak_period",
-                      "56_recency_with_city": "years_associated_with_city"}
+                      "56_recency_with_city": "recency_of_contact_with_city"}
 
 
 def build_participant_key(ref):
@@ -663,11 +812,11 @@ def build_perception(ref, key):
     df["cluster25"] = df["city"].map(ref.set_index("city")["cluster25"])
     out = df[["participant_code", "city_slug", "city", "cluster25",
               "perceived_warming_10yr", "perceived_diurnal_severity",
-              "perceived_peak_period", "years_associated_with_city"]]
+              "perceived_peak_period", "recency_of_contact_with_city"]]
     return out.sort_values("participant_code").reset_index(drop=True)
 
 
-def build_gps(ref, key):
+def build_gps(ref, key, zones=None):
     codes = key.set_index("pid")["participant_code"]
     frames = []
     for layer, t in (("stakeholder_hotspot_gps", "hot"), ("stakeholder_coldspot_gps", "cold")):
@@ -701,15 +850,49 @@ def build_gps(ref, key):
     out = gpd.GeoDataFrame(
         g[["participant_code", "city_slug", "city", "cluster25", "spot_type", "study_year",
            "geometry"]], geometry="geometry", crs=CRS_WGS84).to_crs(CRS_ANALYSIS)
+
+    # A4: where does the point actually fall? `city` is the study city the participant
+    # ANSWERED for, which need not be the city whose region contains the mark. City regions
+    # are bounding boxes and can overlap, so the participant's own city takes precedence;
+    # that resolves every overlap here (3 points lie in two regions, and in all three one of
+    # them is the participant's own city), leaving the assignment deterministic.
+    out["in_city_region"] = False
+    out["containing_city"] = ""
+    if zones is not None:
+        cr = zones[zones["zone"] == "cr"].to_crs(CRS_ANALYSIS)
+        by_city = {r.city: r.geometry for r in cr.itertuples()}
+        inside, holder = [], []
+        for r in out.itertuples():
+            own = by_city.get(r.city)
+            if own is not None and own.covers(r.geometry):
+                inside.append(True); holder.append(r.city); continue
+            others = sorted(c for c, geom in by_city.items() if geom.covers(r.geometry))
+            inside.append(False); holder.append(others[0] if others else "")
+        out["in_city_region"] = inside
+        out["containing_city"] = holder
+    else:
+        CHECKS.append("stakeholder_spots_gps.in_city_region / containing_city (zones not supplied)")
     return out.sort_values(["participant_code", "spot_type"]).reset_index(drop=True)
 
 
 # ── layers 14-15 ────────────────────────────────────────────────────────────
-def build_hitrate(ref):
-    d = pd.read_csv(R05 / "stakeholder_hitrate_sensitivity.csv")
-    d = d.rename(columns={"matched_city_y": "city"})
-    d["city"] = d["city"].map(clean_city)
+def build_hitrate(ref, spots, gps):
+    """Derive the hit rates from the two layers this package publishes.
+
+    Not read from a notebook CSV. The points are the RELEASED coordinates, rounded to
+    GPS_DECIMALS before they reach this function, so the published hit rates can be
+    reproduced from the dataset alone. Previously the layer was copied from a CSV that
+    NB05 wrote from unrounded points, which made the published value depend on something
+    the dataset does not contain.
+    """
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from compute_hitrate import hit_rate_table, ANALYSIS_CRS
+
+    pts = gps.to_crs(ANALYSIS_CRS) if gps.crs else gps
+    sp = spots.to_crs(ANALYSIS_CRS) if spots.crs else spots
+    d = hit_rate_table(pts, sp)
     d["city_slug"] = d["city"].map(slugify)
+    d["cluster25"] = d["city"].map(ref.set_index("city")["cluster25"])
     d["study_year"] = STUDY_YEAR
     out = d[["city_slug", "city", "cluster25", "period", "spot_type", "study_year",
              "buffer_m", "n_hit", "n_total", "hit_rate"]]
@@ -764,6 +947,14 @@ def build_dataset_info(layers, n_cities, n_clusters, study_years, scenario_id, s
         ("git_commit", git_commit()),
         ("dataset_doi", DATASET_DOI),
     ]
+    # Package-level totals, so a reader can check a download is complete without opening
+    # every layer. n_fields counts dictionary rows, i.e. columns summed across layers.
+    _live = {n: d for n, d in layers.items() if d is not None}
+    rows += [("n_layers", str(len(_live))),
+             ("n_records_total", str(sum(len(d) for d in _live.values()))),
+             ("n_fields_total", str(sum(len(d.columns) for d in _live.values()))),
+             ("n_geometry_layers", str(sum(1 for d in _live.values()
+                                          if getattr(d, "geometry", None) is not None)))]
     rows += [("scenario_ids_in_package", "see the scenario_config layer")]
     rows += [(f"rows_{n}", str(len(d))) for n, d in layers.items() if d is not None]
     return pd.DataFrame(rows, columns=["key", "value"])
@@ -785,14 +976,18 @@ DESCR = {
     "landcover_class": ("Predominant land-cover class of the PLT cluster.", "", "derived", "PLT typology", "NB01 city_cluster25_lookup.csv"),
     "elevation_class": ("Elevation belt of the PLT cluster.", "", "derived", "PLT typology", "NB01 city_cluster25_lookup.csv"),
     "geology_class": ("Geological substrate of the PLT cluster.", "", "derived", "PLT typology", "NB01 city_cluster25_lookup.csv"),
-    "pct_dominant_class": ("Percentage of the urban core occupied by the assigned Cluster25 class.", "%", "derived", "zonal composition", "NB01 cluster25_uc_distribution.csv"),
+    "pct_dominant_class": ("Share of the URBAN CORE occupied by the cluster assigned to this city. The cluster itself is assigned on the CITY REGION, by largest intersection area, so this is a cross-tabulation of two zones and can be small: Abeokuta is 8.5%, where its assigned C9 is not among the top three clusters of its urban core. See pct_assigned_class_cr for the share in the zone the assignment was made on.", "%", "derived", "zonal composition", "NB01 cluster25_uc_distribution.csv"),
+    "pct_assigned_class_cr": ("Share of the CITY REGION occupied by the cluster assigned to this city. This is the zone the assignment is made on, so it is the figure that justifies the assignment.", "%", "derived", "zonal composition", "NB01 cluster25_cr_distribution.csv"),
+    "composite_type": ("Whether the composite is a Cluster25 group or the national set of all study cities.", "", "derived", "composite trend", "derived from the annual_series layer"),
+    "composite_key": ("Identifier of the composite: C<n> for a Cluster25 group, or `national`.", "", "derived", "composite trend", "derived from the annual_series layer"),
+    "n_cities": ("Cities averaged into this composite for the given zone and period.", "count", "derived", "composite trend", "derived from the annual_series layer"),
     "n_years": ("Number of years in the trend test.", "years", "MODIS", "Mann-Kendall", "NB03"),
     "mk_method": ("Mann-Kendall variant applied.", "", "MODIS", "original Mann-Kendall or Hamed-Rao variance correction", "NB03"),
     "mk_z": ("Mann-Kendall Z statistic.", "", "MODIS", "Mann-Kendall", "NB03"),
     "mk_p_value": ("Mann-Kendall two-sided p-value.", "", "MODIS", "Mann-Kendall", "NB03"),
     "mk_trend": ("Trend label: increasing, decreasing or no trend.", "", "MODIS", "Mann-Kendall", "NB03"),
     "autocorr_corrected": ("True when the Hamed-Rao correction was applied.", "", "MODIS", "Ljung-Box then Hamed-Rao", "NB03"),
-    "lag1_autocorr": ("Lag-1 autocorrelation of the annual series.", "", "MODIS", "autocorrelation", "NB03"),
+    "lag1_autocorr": ("Lag-1 Pearson correlation of the series with itself shifted by one year. The Ljung-Box test reported alongside uses the sample autocorrelation function, whose lag-1 value is slightly smaller, so the two do not agree exactly.", "", "MODIS", "autocorrelation", "NB03"),
     "ljungbox_p_value": ("Ljung-Box test p-value for serial correlation.", "", "MODIS", "Ljung-Box", "NB03"),
     "sen_slope_c_per_year": ("Theil-Sen slope per year.", "C/yr", "MODIS", "Theil-Sen", "NB03"),
     "sen_slope_c_per_decade": ("Theil-Sen slope per decade.", "C/decade", "MODIS", "Theil-Sen", "NB03"),
@@ -800,7 +995,7 @@ DESCR = {
     "ols_slope": ("Ordinary least squares slope per year.", "C/yr", "MODIS", "OLS", "NB03"),
     "ols_r_squared": ("OLS coefficient of determination.", "", "MODIS", "OLS", "NB03"),
     "ols_p_value": ("OLS slope p-value.", "", "MODIS", "OLS", "NB03"),
-    "value_c": ("Zone value: annual or monthly median LST for zones uc, bra and cr; the urban-core minus BRA difference for zone suhii.", "C", "MODIS", "zonal statistics", "NB03"),
+    "value_c": ("Monthly value for this city, zone and period: the spatial median across the zone of the per-pixel monthly median. For the annual series this is the annual value.", "C", "MODIS", "zonal statistics", "NB03"),
     "event_id": ("Event key: city_slug, period and start date.", "", "derived", "keying", "NB04 event audit"),
     "start_date": ("First day of the persistent heat event.", "date", "ERA5-Land", "P90 threshold, >= 2 consecutive days", "NB04 event audit"),
     "end_date": ("Last day of the persistent heat event.", "date", "ERA5-Land", "P90 threshold, >= 2 consecutive days", "NB04 event audit"),
@@ -811,11 +1006,11 @@ DESCR = {
     "era5_p90_threshold_c": ("City and period specific 90th percentile of the ERA5-Land daily LST series.", "C", "ERA5-Land", "P90 threshold", "NB04 event audit"),
     "n_spots": ("Number of delineated spots.", "count", "SEVIRI", "Gi* |Z| >= 1.96 then KDE delineation", "NB05"),
     "n_tier1": ("Tier-1 spots delineated by KDE (>= 10 validated pixels).", "count", "SEVIRI", "KDE delineation", "NB05 section 6"),
-    "n_tier2": ("Tier-2 spots represented by a 1 km buffer (1-9 pixels).", "count", "SEVIRI", "tier-2 buffering", "NB05 section 6"),
+    "n_tier2": ("Tier-2 spots, those with 1 to 9 validated pixels, which are too few for a KDE surface. Each is represented by a 500 m buffer around every one of its pixels, simplified at a 50 m tolerance, which makes a near-octagon of about 0.71 km2 per isolated pixel.", "count", "SEVIRI", "tier-2 buffering", "NB05 section 6"),
     "n_bh_significant": ("Spots surviving the BH-FDR control.", "count", "SEVIRI", "BH-FDR q = 0.05", "NB05"),
     "n_gistar_pixels": ("Pixels passing the Gi* significance test.", "count", "SEVIRI", "Gi* |Z| >= 1.96, Queen contiguity", "NB05 spot_comprehensive_summary.csv"),
     "n_bh_fdr_pixels": ("Pixels surviving BH-FDR control.", "count", "SEVIRI", "BH-FDR q = 0.05", "NB05 spot_comprehensive_summary.csv"),
-    "bh_significant": ("True when the spot survives BH-FDR control.", "", "SEVIRI", "BH-FDR q = 0.05", "NB05"),
+    "bh_significant": ("Whether the GROUP this spot belongs to (city x period x spot type) survived Benjamini-Hochberg FDR control, repeated on every spot of that group.", "", "SEVIRI", "BH-FDR q = 0.05", "NB05"),
     "population_persons": ("Resident population within the L50 footprint, GHS-POP summed on its native 100 m grid with fractional overlap. Express as a share of population_cr_persons in city_profile; see that field for why the city region is the right denominator.", "persons", "GHS-POP", "zonal sum at 100 m", "GHS-POP P2023A epoch 2025"),
     "pop_l75_persons": ("Resident population within the L75 zone, GHS-POP summed on its native 100 m grid with fractional overlap.", "persons", "GHS-POP", "zonal sum at 100 m", "GHS-POP P2023A epoch 2025"),
     "pop_l90_persons": ("Resident population within the L90 dense core, GHS-POP summed on its native 100 m grid with fractional overlap.", "persons", "GHS-POP", "zonal sum at 100 m", "GHS-POP P2023A epoch 2025"),
@@ -824,11 +1019,13 @@ DESCR = {
     "perceived_warming_10yr": ("Perceived temperature increase over the last ten years.", "", "stakeholder", "questionnaire item 61", "NB02"),
     "perceived_diurnal_severity": ("Period in which heat is felt most severely.", "", "stakeholder", "questionnaire item 60", "NB02"),
     "perceived_peak_period": ("Months perceived as the city's temperature peak.", "", "stakeholder", "questionnaire item 58", "NB02"),
-    "years_associated_with_city": ("How long the participant has been associated with the city.", "", "stakeholder", "questionnaire item 56", "NB02"),
+    "in_city_region": ("True when the marked point falls inside the city region of the city the participant answered for. False when it falls elsewhere, which is not an error: participants were asked about a city, not about where they were standing.", "", "derived", "point-in-polygon", "city_zones (cr) in this package"),
+    "containing_city": ("The study city whose city region contains the point, or empty when no study city does. Equals `city` when in_city_region is true. City regions are bounding boxes and can overlap; the participant's own city takes precedence, which resolves every overlap in this release.", "", "derived", "point-in-polygon", "city_zones (cr) in this package"),
+    "recency_of_contact_with_city": ("How recently the participant was in touch with the city. Blank where the participant left the item unanswered; stored as given, with no imputation.", "", "stakeholder", "questionnaire item 56", "NB02"),
     "buffer_m": ("Buffer radius applied around stakeholder-marked points.", "m", "derived", "buffer sensitivity", "NB05"),
-    "n_hit": ("Stakeholder points falling inside a delineated spot at this buffer.", "count", "derived", "buffer sensitivity", "NB05"),
-    "n_total": ("Stakeholder points tested at this buffer.", "count", "derived", "buffer sensitivity", "NB05"),
-    "hit_rate": ("n_hit divided by n_total.", "fraction", "derived", "buffer sensitivity", "NB05"),
+    "n_hit": ("Rows of the point-to-footprint join that fall inside a spot at this buffer, for the 105-participant cohort. A point inside several footprints contributes several rows.", "count", "derived", "buffer sensitivity", "scripts/compute_hitrate.py"),
+    "n_total": ("Rows of the point-to-footprint join at this buffer, for the 105-participant cohort (94 points, 55 hot / 39 cold). A point inside no footprint contributes one row, so n_total is a row count and grows with buffer distance.", "count", "derived", "buffer sensitivity", "scripts/compute_hitrate.py"),
+    "hit_rate": ("n_hit divided by n_total, on the cohort basis. Computed from the released point coordinates in stakeholder_spots_gps, which are rounded to three decimal degrees, so these values are reproducible from this dataset alone.", "fraction", "derived", "buffer sensitivity", "scripts/compute_hitrate.py"),
     "n_participants": ("Workshop attendees recorded for the city.", "count", "stakeholder", "attendance", "NB02"),
 }
 DESCR.update({
@@ -854,8 +1051,8 @@ DESCR.update({
     "hottest_month": ("Calendar month with the highest zonal LST in that year.", "month", "MODIS", "zonal statistics", "NB03"),
     "coolest_month": ("Calendar month with the lowest zonal LST in that year.", "month", "MODIS", "zonal statistics", "NB03"),
     "n_images": ("MODIS scenes contributing to the month.", "count", "MODIS", "QA screening", "NB03"),
-    "n_obs": ("Valid pixel observations in the month.", "count", "MODIS", "QA screening", "NB03"),
-    "n_strict": ("Observations in the month passing the strict QA gate.", "count", "MODIS", "QA screening", "NB03"),
+    "n_obs": ("Images contributing to this month, counted as images with at least one valid pixel in the CITY REGION. It is not a count of pixel observations, and it is not zone-specific, so a zone can carry a value where n_obs is 0: six zone-months do, in Gboko, Ogbomosho and Warri.", "count", "MODIS", "QA screening", "NB03"),
+    "n_strict": ("Images whose pixels passed the strict quality tier, counted the same way as n_obs: images with at least one valid pixel in the city region, not pixel observations.", "count", "MODIS", "QA screening", "NB03"),
     # climatology (derived here)
     "mean_value_c": ("Mean of the monthly zone values across all study years for that calendar month.", "C", "MODIS", "calendar-month mean over the monthly series", "derived by this script from monthly_series"),
     "std_value_c": ("Standard deviation across years for that calendar month.", "C", "MODIS", "calendar-month mean over the monthly series", "derived by this script from monthly_series"),
@@ -893,12 +1090,12 @@ DESCR.update({
     "source": ("Where the parameter value was read from.", "", "derived", "scenario capture", "this script"),
     "study_years": ("Study years present in the event-scale layers.", "", "derived", "packaging", "this script"),
     "contour_id": ("Contour key, spot_id and contour level.", "", "derived", "keying", "NB05"),
-    "spot_zone": ("Zone the spot falls in: urban_core, bra or both.", "", "derived", "zone intersection", "NB05"),
-    "tier": ("Delineation tier: 1 for KDE-delineated spots (>= 10 pixels), 2 for buffered isolated pixels.", "", "SEVIRI", "tier assignment", "NB05 section 6"),
-    "n_pixels": ("Validated Gi* pixels in the spot.", "count", "SEVIRI", "Gi* |Z| >= 1.96, Queen contiguity", "NB05"),
+    "spot_zone": ("Zone containing the spot's L50 centroid: urban_core, bra, or both, where both means the centroid falls in neither of the two.", "", "derived", "zone intersection", "NB05"),
+    "tier": ("Delineation tier: 1 for KDE-delineated spots (10 or more validated pixels), 2 for spots of 1 to 9 pixels, each pixel represented by a 500 m buffer simplified at a 50 m tolerance, about 0.71 km2 per isolated pixel.", "", "SEVIRI", "tier assignment", "NB05 section 6"),
+    "n_pixels": ("Validated pixels for the GROUP this spot belongs to (city x period x spot type), repeated on every spot of that group. It is not the pixel count of this spot alone.", "count", "SEVIRI", "Gi* |Z| >= 1.96, Queen contiguity", "NB05"),
     "n_pixels_l75": ("Pixels inside the L75 zone.", "count", "SEVIRI", "Gaussian KDE", "NB05"),
     "n_pixels_l90": ("Pixels inside the L90 dense core.", "count", "SEVIRI", "Gaussian KDE", "NB05"),
-    "n_pixels_level": ("Pixels inside this contour level.", "count", "SEVIRI", "Gaussian KDE", "NB05"),
+    "n_pixels_level": ("Validated pixels within this contour level. At L50 this is the group total for the city, period and spot type, as in spots.n_pixels.", "count", "SEVIRI", "Gaussian KDE", "NB05"),
     "area_l50_km2": ("Area of the L50 outer extent.", "km2", "SEVIRI", "Gaussian KDE, Scott's bandwidth", "NB05"),
     "area_l75_km2": ("Area of the L75 inner zone.", "km2", "SEVIRI", "Gaussian KDE, Scott's bandwidth", "NB05"),
     "area_l90_km2": ("Area of the L90 dense core.", "km2", "SEVIRI", "Gaussian KDE, Scott's bandwidth", "NB05"),
@@ -907,8 +1104,8 @@ DESCR.update({
     "l75_completeness": ("Whether an L75 contour could be delineated for every spot in the group.", "", "SEVIRI", "Gaussian KDE", "NB05"),
     "l90_completeness": ("Whether an L90 contour could be delineated for every spot in the group.", "", "SEVIRI", "Gaussian KDE", "NB05"),
     "dense_core_pct": ("L90 dense core as a share of the L50 footprint.", "%", "SEVIRI", "Gaussian KDE", "NB05"),
-    "is_merged_t2": ("True when tier-2 pixels were absorbed into this tier-1 polygon.", "", "SEVIRI", "tier-2 absorption within 2 km", "NB05 section 6d"),
-    "n_absorbed_t2": ("Number of tier-2 spots absorbed into this polygon.", "count", "SEVIRI", "tier-2 absorption within 2 km", "NB05 section 6d"),
+    "is_merged_t2": ("True when tier-2 pixels were absorbed into this tier-1 polygon. No spot in this release triggered it.", "", "SEVIRI", "tier-2 absorption within 2 km", "NB05 section 6d"),
+    "n_absorbed_t2": ("Number of tier-2 spots absorbed into this polygon. Zero for every spot in this release.", "count", "SEVIRI", "tier-2 absorption within 2 km", "NB05 section 6d"),
     "core_mean_lst_c": ("Mean LST inside the L90 dense core.", "C", "SEVIRI", "zonal statistics", "NB05"),
     "core_max_lst_c": ("Maximum LST inside the L90 dense core.", "C", "SEVIRI", "zonal statistics", "NB05"),
     "mean_lst_c": ("Mean LST within the spot footprint.", "C", "SEVIRI", "zonal statistics", "NB05"),
@@ -917,7 +1114,7 @@ DESCR.update({
     "min_lst_c": ("Minimum LST within the spot footprint.", "C", "SEVIRI", "zonal statistics", "NB05"),
     "pop_l50_persons": ("Resident population within the L50 outer extent, GHS-POP summed on its native 100 m grid with fractional overlap. Express as a share of population_cr_persons in city_profile.", "persons", "GHS-POP", "zonal sum at 100 m", "GHS-POP P2023A epoch 2025"),
     "nb04_val_tier": ("Quality tier of the NB04 event window underlying the SEVIRI composite.", "", "ERA5-Land", "event selection", "NB04 via NB05"),
-    "persistent_dn": ("True when the city shows a persistent day and night anomaly.", "", "SEVIRI", "day-night persistence check", "NB05"),
+    "persistent_dn": ("True when the city has at least one hot spot by day and at least one by night.", "", "SEVIRI", "day-night persistence check", "NB05"),
     # events
     "selection_reason": ("Why this event was chosen for SEVIRI compositing.", "", "ERA5-Land", "event selection", "NB04 event audit"),
     "seviri_scene_available": ("True when a clipped SEVIRI composite exists for the selected window.", "", "MSG-SEVIRI", "scene inventory", "NB04 seviri folder"),
@@ -974,6 +1171,22 @@ _PATTERNS = [
     (_re.compile(r"^(day|night)_modis_era5land_mae_c$"),
      ("Mean absolute error between MODIS and ERA5-Land {0} LST.", "C", "MODIS; ERA5-Land",
       "paired comparison", "NB04 city_heat_event_summary.csv")),
+    (_re.compile(r"^(day|night)_seviri_(uc|bra|cr)_mean_c$"),
+     ("MSG-SEVIRI {0} composite mean land-surface temperature over the {1} zone, across the "
+      "selected persistent heat event. Copied from the event composite without recomputation.",
+      "C", "MSG-SEVIRI", "event compositing", "NB04 seviri/City_SEVIRI_3zone_SUHII.csv")),
+    (_re.compile(r"^(day|night)_seviri_suhii_c$"),
+     ("Event-scale surface urban heat island intensity for the {0} period: the MSG-SEVIRI "
+      "urban-core composite minus the background reference area composite. Equals "
+      "spots.suhii_event_c for every spot of this city and period.",
+      "C", "MSG-SEVIRI", "event compositing", "NB04 seviri/City_SEVIRI_3zone_SUHII.csv")),
+    (_re.compile(r"^(day|night)_era5land_event_mean_c$"),
+     ("Mean of the ERA5-Land daily urban-core median temperatures across the days of the "
+      "selected {0} event. This is the quantity the matching "
+      "{0}_seviri_minus_era5land_bias_c is measured against, so that bias is reproducible "
+      "from this dataset: bias = {0}_seviri_uc_mean_c minus this field.",
+      "C", "ERA5-Land", "event-window mean",
+      "NB04 raw_extractions daily ERA5-Land series over the selected event window")),
     (_re.compile(r"^(day|night)_seviri_era5land_n$"),
      ("Number of event days in the selected {0} window over which the MSG-SEVIRI composite was "
       "compared with ERA5-Land daily values.", "count", "ERA5-Land",
@@ -1013,6 +1226,39 @@ LAYER_DESCR = {
         "the record, not a surveyed or gazetteer city location; it sits a median 1.1 km from the "
         "UN WUP city coordinate (39.3 km at most, where an absorbed city was remapped).", "",
         "derived", "urban-core centroid", "NB01 urban-core polygon"),
+    ("city_exposure_by_contour", "area_l50_km2"): (
+        "Total L50 outer extent area for this city, period and spot type: the sum over every spot of that type in the city, not the area of a single polygon. Contours of one city, period and type never overlap in this release, so the sum does not double count. Zero where no spot of that type was delineated.", "km2",
+        "SEVIRI", "sum of per-spot KDE contour areas", "NB05 halfdonut_city_summary.csv"),
+    ("city_exposure_by_contour", "area_l75_km2"): (
+        "Total L75 inner zone area for this city, period and spot type: the sum over every spot of that type in the city, not the area of a single polygon. Contours of one city, period and type never overlap in this release, so the sum does not double count. Zero where no spot of that type was delineated.", "km2",
+        "SEVIRI", "sum of per-spot KDE contour areas", "NB05 halfdonut_city_summary.csv"),
+    ("city_exposure_by_contour", "area_l90_km2"): (
+        "Total L90 dense core area for this city, period and spot type: the sum over every spot of that type in the city, not the area of a single polygon. Contours of one city, period and type never overlap in this release, so the sum does not double count. Zero where no spot of that type was delineated.", "km2",
+        "SEVIRI", "sum of per-spot KDE contour areas", "NB05 halfdonut_city_summary.csv"),
+    ("city_exposure_by_contour", "pop_l50_persons"): (
+        "Resident population of the L50 outer extent summed over every spot of this type in the city, not the population of a single polygon. It is the sum of the per-spot values, which do not overlap, so no resident is counted twice. Express as a share of city_profile.population_cr_persons.", "persons",
+        "GHS-POP", "sum of per-spot zonal sums at 100 m", "GHS-POP P2023A epoch 2025"),
+    ("city_exposure_by_contour", "pop_l75_persons"): (
+        "Resident population of the L75 inner zone summed over every spot of this type in the city, not the population of a single polygon. It is the sum of the per-spot values, which do not overlap, so no resident is counted twice. Express as a share of city_profile.population_cr_persons.", "persons",
+        "GHS-POP", "sum of per-spot zonal sums at 100 m", "GHS-POP P2023A epoch 2025"),
+    ("city_exposure_by_contour", "pop_l90_persons"): (
+        "Resident population of the L90 dense core summed over every spot of this type in the city, not the population of a single polygon. It is the sum of the per-spot values, which do not overlap, so no resident is counted twice. Express as a share of city_profile.population_cr_persons.", "persons",
+        "GHS-POP", "sum of per-spot zonal sums at 100 m", "GHS-POP P2023A epoch 2025"),
+    ("stakeholder_spots_gps", "spot_type"): (
+        "Whether the participant marked this location as a hot or a cold place. It is the participant's own label, not a Gi* classification, so it is not expected to coincide with the spots layer; hitrate_sensitivity measures how often the two agree.", "",
+        "stakeholder", "participatory mapping", "NB02 workshop mapping exercise"),
+    ("stakeholder_spots_gps", "city"): (
+        "The study city the participant answered for, which is the city they registered under. It is not necessarily the city containing the point; see in_city_region and containing_city.", "",
+        "stakeholder", "registration record", "NB02"),
+    ("stakeholder_perception", "city"): (
+        "The study city the participant answered for, which is the city they registered under.", "",
+        "stakeholder", "registration record", "NB02"),
+    ("stakeholder_spots_gps", "study_year"): (
+        "Year of the workshop series in which the point was marked. Every participant is recorded under 2024, the year of the series; the final workshop itself took place on 22 January 2025.", "year",
+        "stakeholder", "workshop series", "NB02"),
+    ("stakeholder_perception", "perceived_peak_period"): (
+        "Months the participant perceives as the city's temperature peak. Blank where the item was left unanswered, stored exactly as given, with no imputation and no substituted category.", "",
+        "stakeholder", "questionnaire item 58", "NB02"),
 }
 
 
@@ -1029,6 +1275,9 @@ def describe(field: str, layer: str | None = None):
 
 
 NULL_MEANING = {
+    "perceived_peak_period": "The participant left the item blank. Stored as given, with no imputation.",
+    "recency_of_contact_with_city": "The participant left the item blank. Stored as given, with no imputation.",
+    "containing_city": "The point falls in no study city's city region.",
     "absorbed_cities": "No city was absorbed into this one.",
     "area_l75_km2": "L75 not defined for tier-2 spots.",
     "area_l90_km2": "L90 not defined for tier-2 spots.",
@@ -1124,6 +1373,7 @@ LAYER_ONE_LINER = {
     "city_profile": "One record per city, year-independent: PLT classes, zone areas, population, participants.",
     "city_year_summary": "One record per city and study year: ERA5-Land persistence, selected events, sensor comparison, spot counts.",
     "trend_statistics": "Long-term LST trend tests per city, zone and period.",
+    "composite_trend_statistics": "Cluster and national composites of the annual series: unweighted means of member cities, same trend protocol as trend_statistics.",
     "annual_series": "Annual zone values, 2006-2025.",
     "monthly_series": "Monthly zone values, 2006-2025.",
     "monthly_climatology": "Calendar-month means across the study period.",
@@ -1133,7 +1383,7 @@ LAYER_ONE_LINER = {
     "spot_contours": "One polygon per KDE contour level (L50, L75, L90), hot and cold spots alike.",
     "stakeholder_spots_gps": "Stakeholder-marked hot and cold spot locations, pseudonymised and coarsened to ~110 m.",
     "stakeholder_perception": "Perception responses, one row per participant, pseudonymised.",
-    "hitrate_sensitivity": "Stakeholder-satellite agreement across buffer distances.",
+    "hitrate_sensitivity": "Stakeholder-satellite agreement across buffer distances, computed from the released (3-decimal-degree) point coordinates.",
     "city_exposure_by_contour": "Population exposure by contour level per city, period and spot type.",
     "dataset_info": "Dataset metadata as key/value pairs.",
     "scenario_config": "The configuration behind each scenario_id: city-selection rule, thresholds and method parameters.",
@@ -1148,36 +1398,45 @@ def write_readme(layers, out_dir: Path, gpkg: Path):
     rows = "\n".join(
         f"| `{n}` | {len(d):,} | {LAYER_ONE_LINER.get(n, '')} |"
         for n, d in layers.items() if d is not None)
-    files = "\n".join(
-        f"| `{p.relative_to(out_dir).as_posix()}` | {size(p)} |"
-        for p in sorted(out_dir.rglob("*"))
-        if p.is_file())
+    # A fixed manifest with a Contents column, not a glob over the folder. Globbing listed
+    # only what existed when the README was written, so a fresh build omitted four of the
+    # seven files. Sizes are deliberately not shown: no entry can then refer to itself or go
+    # stale. Zenodo and the Data in Brief article carry the sizes.
+    _manifest = [
+        (DATASET_STEM + ".gpkg", "All " + str(sum(1 for d in layers.values() if d is not None))
+                                 + " data layers (" + CRS_ANALYSIS + ")"),
+        ("data_dictionary.csv", "Field-level data dictionary (machine-readable)"),
+        ("data_dictionary.md", "The same dictionary, for reading"),
+        ("CHANGELOG.md", "Changes by version"),
+        ("LICENSE.txt", "CC BY 4.0 licence"),
+        ("README.md", "This file"),
+        ("checksums_md5.txt", "MD5 checksums of all other files, written last"),
+    ]
+    files = ("\n").join("| `" + _nm + "` | " + _what + " |"
+                                for _nm, _what in _manifest)
 
     n_part = len(layers["stakeholder_perception"])
-    # Disclose the mismatch only while it is real: the source hit-rate analysis filtered the
-    # stakeholder points on city of ATTENDANCE, so its denominators can exceed the cohort's
-    # point count. If that analysis is re-run under the cohort rule the numbers agree and this
-    # paragraph disappears by itself.
-    gps, hr = layers["stakeholder_spots_gps"], layers["hitrate_sensitivity"]
-    cohort_caveat = ""
-    if hr is not None and gps is not None:
-        # one buffer AND one period: every city is listed once per period, so summing across
-        # both would double every count
-        one = hr[(hr["buffer_m"] == hr["buffer_m"].min())
-                 & (hr["period"] == sorted(hr["period"].unique())[0])]
-        denom = {k: int(v) for k, v in one.groupby("spot_type")["n_total"].sum().items()}
-        counted = {k: int(v) for k, v in gps["spot_type"].value_counts().items()}
-        if denom != counted:
-            order = ["hot", "cold"]
-            d = ", ".join(f"{denom[k]} {k}" for k in order if k in denom)
-            c = ", ".join(f"{counted[k]} {k}" for k in order if k in counted)
-            cohort_caveat = (
-                f"\n**One exception, stated plainly.** `hitrate_sensitivity` is reproduced exactly as "
-                f"computed in the study, which selected stakeholder points by city of "
-                f"attendance rather than by registration. Its denominators are therefore {d} points, "
-                f"against the {c} points in `stakeholder_spots_gps`. The difference is the excluded "
-                f"respondent's points. Recompute the hit rates from `stakeholder_spots_gps` and "
-                f"`spots` if you need figures on the cohort denominator.\n")
+
+    # Geometry-bearing layers are counted, not stated, so the split cannot go stale when a
+    # layer is added. GeoDataFrame is the test: an attribute-only layer is a plain frame.
+    _geom_layers = [n for n, d in layers.items()
+                    if d is not None and getattr(d, "geometry", None) is not None]
+    _n_live = sum(1 for d in layers.values() if d is not None)
+    _n_geom = len(_geom_layers)
+    _n_attr = _n_live - _n_geom
+    _w = {5: "Five", 12: "twelve", 13: "thirteen", 14: "fourteen", 6: "Six"}
+    _n_geom = _w.get(_n_geom, _n_geom)
+    _n_attr = _w.get(_n_attr, _n_attr)
+
+    # The abbreviation list is read from the Data in Brief source of truth rather than
+    # restated here, so the two can never disagree. Missing file fails the build.
+    _ab_src = ROOT / "docs" / "scs_rebuild" / "abbreviations_dib.csv"
+    if not _ab_src.exists():
+        raise FileNotFoundError(f"abbreviation list not found: {_ab_src}")
+    _ab = pd.read_csv(_ab_src)
+    _abbrev = ("\n").join("| " + str(r.abbreviation) + " | " + str(r.meaning) + " |"
+                          for r in _ab.itertuples())
+
     txt = f"""# {DATASET_TITLE}
 
 Version {VERSION}. Built {date.today().isoformat()}.
@@ -1186,9 +1445,6 @@ This version covers the 56 Nigerian cities that remain after spatial deduplicati
 UN World Urbanization Prospects 2024 candidates with a population of at least 300,000. The
 land-surface temperature record runs 2006-2025; persistent heat events, surface hot and cold
 spots, population exposure and stakeholder evidence are for 2024.
-
-Authors: P. S. U. Eneche (https://orcid.org/0000-0002-0504-9677), Y. Zeng (https://orcid.org/0000-0002-2166-5314), F. Atun (https://orcid.org/0000-0002-6222-8049), K. Pfeffer (https://orcid.org/0000-0002-6080-1323).
-Contact: P. S. U. Eneche.
 
 ## 1. What this dataset contains
 
@@ -1202,7 +1458,7 @@ with GDAL/OGR, geopandas, QGIS, R (sf) or any GeoPackage-aware tool.
 
 ## 2. Files
 
-| file | size |
+| File | Contents |
 |---|---|
 {files}
 
@@ -1213,6 +1469,7 @@ with GDAL/OGR, geopandas, QGIS, R (sf) or any GeoPackage-aware tool.
 - `spot_uid` (study year + spot id) is the key that joins `spots` and `spot_contours`, and stays unique if the protocol is re-run for another year. `spot_id` is the identifier used within a single year and is not unique across years.
 - `city_slug` joins `city_profile` (year-independent) to `city_year_summary` and every event-scale layer; add `study_year` when more than one year is present.
 - `participant_code` joins the two stakeholder layers.
+- `composite_trend_statistics` is keyed by `composite_type`, `composite_key`, `zone` and `period`, not by `city_slug`: each row is a group of cities, so it joins to `city_profile` through `cluster25` (`composite_key`), not city by city.
 
 ```python
 import geopandas as gpd
@@ -1225,9 +1482,9 @@ joined = spots.merge(trends.query("zone == 'suhii'"), on=["city_slug", "period"]
 ## 4. Coordinate reference system and coverage
 
 - Every layer is in {CRS_ANALYSIS} (Africa Albers Equal Area Conic), the analysis CRS; all areas
-  and distances were computed in it. Five layers carry geometry (`city_zones`, `city_profile`,
-  `spots`, `spot_contours`, `stakeholder_spots_gps`); the other twelve are attribute-only tables
-  stored in the same file.
+  and distances were computed in it. {_n_geom} layers carry geometry (`city_zones`,
+  `city_profile`, `spots`, `spot_contours`, `stakeholder_spots_gps`); the other {_n_attr}
+  are attribute-only tables stored in the same file.
 - Spatial coverage: Nigeria, about 4-14 N and 2-15 E.
 - Temporal coverage: MODIS Aqua MYD11A1 {TREND_FIRST}-{TREND_LAST}; ERA5-Land {STUDY_YEAR}; MSG-SEVIRI composites over the selected {STUDY_YEAR} heat events.
 
@@ -1240,8 +1497,7 @@ joined = spots.merge(trends.query("zone == 'suhii'"), on=["city_slug", "period"]
 | MSG LST with Directional Effects, MLST_DIR [LSA-004] (EUMETSAT LSA SAF) | event-scale composites for spot detection |
 | GHS-SMOD R2023A (European Commission JRC) | settlement model for the three-zone delineation |
 | GHS-POP R2023A, epoch 2025 (European Commission JRC) | resident population; summed on the native 100 m grid per polygon, with fractional overlap |
-| Global Surface Water v1.4 (European Commission JRC) | permanent-water masking |
-| OpenStreetMap water features, accessed 22 June 2026 | masking of the MSG-SEVIRI composites; (c) OpenStreetMap contributors, ODbL |
+| Global Surface Water v1.4 (European Commission JRC) | permanent-water masking in the three-zone delineation, and the MSG-SEVIRI water mask (water bodies >= 3 km2) |
 | World Urbanization Prospects, 2025 revision (UN DESA) | city population and city selection |
 | Physiographic landscape typology (Eneche et al., 4TU.ResearchData, 2025) | landscape character class per city |
 
@@ -1272,16 +1528,7 @@ recorded as attending a workshop but holding no registration entry is excluded: 
 cannot be verified independently, as no per-person attendance register exists. One respondent falls
 in that category and is excluded from every layer, along with the spots they marked. The rule is
 deliberate and conservative — it omits an unverifiable record rather than admitting one.
-{cohort_caveat}
-## 9. Anonymisation
-
-Participants are identified only by a pseudonymous code, `P001` to `P{n_part:03d}`, assigned by sorting on city then original identifier. The mapping back to the original identifiers is held privately by the authors and is not part of this dataset. No free-text response is included. Stakeholder point coordinates are coarsened to three decimal degrees (about 110 m) before
-publication, so that a marked location cannot be resolved to an individual building or
-dwelling. The coarsening displaces points by 43 m on average (79 m at most) and changes no
-hit-or-miss outcome at the smallest published buffer radius of 500 m, so the stakeholder
-corroboration results are unaffected.
-
-## 10. Licence and citation
+## 9. Licence and citation
 
 Licence: **CC BY 4.0**.
 
@@ -1291,9 +1538,15 @@ Related publications and the code record are listed on the Zenodo record page.
 
 The full licence text accompanies this dataset in `LICENSE.txt`.
 
+## 10. Abbreviations
+
+| abbreviation | meaning |
+|---|---|
+{_abbrev}
+
 ## 11. Map disclaimer
 
-Map lines delineate study areas and do not necessarily depict accepted national boundaries.
+Map lines delineate study areas and do not necessarily depict accepted national boundaries. The boundaries are only for academic and research purposes.
 """
     (out_dir / "README.md").write_text(txt, encoding="utf-8")
 
@@ -1330,10 +1583,13 @@ national boundaries.
     (out_dir / "LICENSE.txt").write_text(text, encoding="utf-8")
 
 
-def write_changelog(out_dir: Path, n_layers: int = 17, n_cities: int = 56):
-    """First public release: describe what the deposit contains, not how it was built.
+def write_changelog(out_dir: Path, n_layers: int, n_cities: int, n_comp: int):
+    """Public changelog: what a holder of the previous version needs to know.
 
-    The internal correction history lives in the build report, which is not published.
+    The v1.0.0 section describes the release; the v1.0.1 section describes what changed
+    since it. Internal correction history stays in the build report, which is not
+    published. n_layers and n_cities describe the CURRENT build, so the v1.0.0 section
+    states its own counts literally rather than reusing them.
     """
     (out_dir / "CHANGELOG.md").write_text(f"""# Changelog
 
@@ -1342,11 +1598,86 @@ software that produced it.
 
 ## v{VERSION} - {date.today().isoformat()}
 
+A corrective release. Nothing was re-observed and no geometry changed: every polygon,
+contour and coordinate is byte-identical to v1.0.0. One published set of values changed,
+stated first below.
+
+### Changed values
+
+- **`hitrate_sensitivity` now rests on the participant cohort.** In v1.0.0 this layer
+  selected stakeholder points by the city of workshop ATTENDANCE, so it was computed on 57
+  hot and 40 cold points, while `stakeholder_spots_gps` carried 55 and 39 under the
+  registration rule documented in the README. The two no longer disagree: the layer is now
+  derived from the released `spots` and `stakeholder_spots_gps` layers, using the published
+  coordinates as they are stored, so the hit rates can be recomputed from this dataset
+  alone. At a 500 m buffer: hot day 4/55 and hot night 3/55 (were 4/57 and 3/57), cold day
+  4/39 (was 5/40), cold night 0/39 (was 0/40). Every changed count traces to the three
+  points marked by the one respondent the cohort rule excludes. The counting rule itself is
+  unchanged. This is the only published value that moves between v1.0.0 and v1.0.1.
+
+### Added
+
+- **`composite_trend_statistics`** ({n_comp} rows) - Cluster25 and national composites of the
+  annual series, by zone and period. Each row is the unweighted mean of its member cities
+  per year, then the same Mann-Kendall and Sen protocol used for `trend_statistics`.
+  Previously a reader had to build these from the city-level records; publishing them fixes
+  the aggregation and the trend test to one definition.
+- **Event-scale sensor fields in `city_year_summary`** - per-city ERA5-Land event means for
+  the selected event window, and the MSG-SEVIRI three-zone event composites, so the
+  SEVIRI-against-ERA5-Land comparison can be reproduced from the package.
+- **`stakeholder_spots_gps.in_city_region` and `.containing_city`** - whether a marked point
+  falls inside the city region of the city the participant answered for, and which study
+  city's region does contain it. Points outside are not errors: participants were asked
+  about a city, not about where they were standing.
+- **`city_profile.pct_assigned_class_cr`** - the share of the CITY REGION held by the
+  cluster assigned to the city. The assignment is made on the city region, so this is the
+  figure that justifies it; the existing `pct_dominant_class` measures the urban core and
+  can be much smaller.
+- **Abbreviations** - the README now carries the full abbreviation list.
+
+### Fixed
+
+- **`heat_event_catalogue` completed.** The catalogue was assembled by reading one event
+  audit file per city under the city's display name, but those files are written with
+  spaces replaced by underscores. The three cities whose names contain a space - Ado Ekiti,
+  Benin City and Port Harcourt - were silently skipped, so 37 of their events were absent
+  even though `city_year_summary` counted them. 770 to 807 rows, 53 to 56 cities.
+- **`city_year_summary.validation_tier` no longer null for a city with no spots.** Ikare
+  produced no spots, so it had no row in the source roll-up. It now takes the weaker of its
+  two selected-event tiers (GOOD).
+- **`recency_of_contact_with_city`** replaces a field that was published as
+  `years_associated_with_city`. The questionnaire item records how recently the participant
+  was in touch with the city, not a duration in years.
+- **Water masking is attributed correctly.** v1.0.0 listed OpenStreetMap water features as
+  a source. No OpenStreetMap data is used anywhere: the MSG-SEVIRI water mask is built from
+  JRC Global Surface Water bodies of at least 3 km2, the same source already credited for
+  the zone delineation. The OpenStreetMap row and its attribution are removed.
+
+### Documentation
+
+- Tier-2 spot geometry is described correctly: a 500 m buffer around each of the spot's
+  pixels, simplified at a 50 m tolerance, about 0.71 km2 per isolated pixel. v1.0.0 called
+  it a 1 km buffer.
+- `n_obs` and `n_strict` are documented as counts of IMAGES with at least one valid pixel in
+  the city region, not counts of pixel observations, which is why six zone-months carry a
+  value where `n_obs` is 0.
+- `spots.n_pixels`, `bh_significant` and `spot_contours.n_pixels_level` at L50 are
+  documented as values for the whole city-period-type group, repeated on each spot, not
+  per-spot values.
+- `city_exposure_by_contour` areas and populations are documented as sums over all of the
+  city's spots of that type and period; the contours do not overlap, so nothing is counted
+  twice.
+- `stakeholder_spots_gps.spot_type` is documented as the participant's own hot/cold label,
+  not a Gi* classification, and `study_year` as the year of the workshop series.
+- Blank questionnaire answers are documented as stored exactly as given, with no imputation.
+
+## v1.0.0 - {V100_DATE}
+
 First public release.
 
 ### Contents
 
-One GeoPackage of {n_layers} layers covering {n_cities} Nigerian cities, grouped as:
+One GeoPackage of 17 layers covering 56 Nigerian cities, grouped as:
 
 - **Zonation** - urban core, background reference area and city region for every city, plus a
   year-independent city profile carrying the physiographic typology, zone areas and populations.
@@ -1390,13 +1721,16 @@ DECISIONS = [
      "Note that the earlier rationale given for this exclusion — that the city match came from "
      "`55_other_cities` — was wrong: 59 of the 105 included participants are matched through that "
      "same column, so it was never the disqualifier. The exclusion stands on verifiability alone."),
-    ("Hit rates keep the source denominators",
-     "NB05 §9 filters stakeholder points on attendance, so `hitrate_sensitivity` rests on 57 hot "
-     "and 40 cold points while `stakeholder_spots_gps` carries 55 and 39 under the cohort rule. "
-     "The hit rates are reproduced unchanged rather than recomputed, because recomputing them "
-     "would alter published analysis values and manuscript Figure 18. The mismatch is disclosed "
-     "in README §7. Applying the cohort rule in NB05 would give, at 500 m: hot day 4/55 and hot "
-     "night 3/55 (from 4/57 and 3/57), cold day 4/39 (from 5/40), cold night 0/39 (from 0/40)."),
+    ("Hit rates moved to the cohort basis (v1.0.1)",
+     "v1.0.0 selected stakeholder points by city of ATTENDANCE, so `hitrate_sensitivity` rested "
+     "on 57 hot and 40 cold points while `stakeholder_spots_gps` carried 55 and 39 under the "
+     "cohort rule, and the two disagreed. The layer is now DERIVED during the build by "
+     "scripts/compute_hitrate.py from the two released layers, `spots` and "
+     "`stakeholder_spots_gps`, using the released coordinates rounded to three decimal degrees, "
+     "so the published hit rates are reproducible from the dataset alone. At 500 m: hot day "
+     "4/55 and hot night 3/55 (from 4/57 and 3/57), cold day 4/39 (from 5/40), cold night 0/39 "
+     "(from 0/40). Every changed value traces to one respondent's three Abuja points. The "
+     "counting rule is unchanged, and the README disclosure of the old mismatch is removed."),
     ("GPS coordinates coarsened to 3 decimal degrees",
      "About 110 m. Measured displacement is 43 m on average and 79 m at most, and it flips no "
      "hit-or-miss outcome at any published buffer radius (500 m, 1 km, 2 km), so the corroboration "
@@ -1512,7 +1846,11 @@ def write_checksums(out_dir: Path):
         # first build, which would otherwise make the listing non-deterministic
         if p.is_file() and rel.name != "checksums_md5.txt":
             lines.append(f"{md5(p)}  {rel.as_posix()}")
-    (out_dir / "checksums_md5.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # LF endings, explicitly. Path.write_text translates to CRLF on Windows, and md5sum -c
+    # then reads every filename with a trailing carriage return and fails to open it, so the
+    # manifest a depositor would verify with was unusable on any platform.
+    (out_dir / "checksums_md5.txt").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     return len(lines)
 
 
@@ -1538,12 +1876,14 @@ def main():
     zones = build_city_zones(ref)
     spots = build_spots(ref)
     key = build_participant_key(ref)
+    _gps = build_gps(ref, key, zones)   # released, rounded coordinates; feeds the hit rates
 
     layers = {
         "city_zones": zones,
         "city_profile": build_city_profile(ref, zones),
         "city_year_summary": build_city_year_summary(ref, spots),
         "trend_statistics": build_trend_statistics(ref),
+        "composite_trend_statistics": None,   # needs annual_series; filled below
         "annual_series": build_annual_series(ref),
         "monthly_series": None,
         "monthly_climatology": None,
@@ -1551,12 +1891,13 @@ def main():
         "spot_occurrence": build_spot_occurrence(ref, spots),
         "spots": spots,
         "spot_contours": build_contours(ref),
-        "stakeholder_spots_gps": build_gps(ref, key),
+        "stakeholder_spots_gps": _gps,
         "stakeholder_perception": build_perception(ref, key),
-        "hitrate_sensitivity": build_hitrate(ref),
+        "hitrate_sensitivity": build_hitrate(ref, spots, _gps),
         "city_exposure_by_contour": build_halfdonut(ref),
     }
     layers["monthly_series"], layers["monthly_climatology"] = build_monthly(ref)
+    layers["composite_trend_statistics"] = build_composite_trends(layers["annual_series"])
 
     # stamp the scenario on every data layer, then accumulate rather than overwrite
     for _n, _d in layers.items():
@@ -1599,6 +1940,7 @@ def main():
         "city_profile": "NB01 `city_cluster25_lookup.csv`, `zone_area_summary_with_pop.csv`, `cluster25_uc_distribution.csv`; NB04 `city_heat_event_summary.csv`; NB05 `master_city_composite.csv`; NB02 `Cities_Stakeholder_Points_2024.geojson`; spot counts from the `spots` layer",
         "city_year_summary": "NB04 `city_heat_event_summary.csv` (ERA5-Land persistence, selected events, MODIS<->ERA5-Land comparison); NB05 `master_city_composite.csv`; spot counts from the `spots` layer",
         "trend_statistics": "NB03 `all_cities_temporal_annual.csv` (uc/bra/cr) + `all_cities_delta_annual.csv` (suhii)",
+        "composite_trend_statistics": "derived in-build from the `annual_series` layer by src/temporal_analysis.run_trend_analysis",
         "annual_series": "NB03 `all_cities_temporal_annual.csv` + `all_cities_delta_annual.csv`",
         "monthly_series": "NB03 `all_cities_temporal_monthly.csv` + `all_cities_delta_monthly.csv`",
         "monthly_climatology": "derived from `monthly_series` (calendar-month mean)",
@@ -1608,7 +1950,7 @@ def main():
         "spot_contours": "NB05 `master_thermal_spots.gpkg::hotspot_contours` (hot and cold)",
         "stakeholder_spots_gps": "NB05 `master_thermal_spots.gpkg::stakeholder_{hot,cold}spot_gps`, keys only",
         "stakeholder_perception": "NB02 `Stakeholder_Perception_Data_2024.csv` + `workshop_attendees_clean.csv`",
-        "hitrate_sensitivity": "NB05 `stakeholder_hitrate_sensitivity.csv`",
+        "hitrate_sensitivity": "derived in-build by scripts/compute_hitrate.py from the published `spots` and `stakeholder_spots_gps` layers",
         "city_exposure_by_contour": "NB05 `halfdonut_city_summary.csv`",
         "dataset_info": "generated by this script",
         "scenario_config": "config.py, src/daily_analysis_utils.py and NB05 constants, captured at build time",
@@ -1619,18 +1961,21 @@ def main():
         "`pct_dominant_class` is taken from NB01 cluster25_uc_distribution.csv (percent of the "
         "urban core in the assigned Cluster25). The like-named field in master_thermal_spots holds "
         "a different, much smaller quantity and was not carried over.",
-        "`heat_event_catalogue` covers the 53 cities that recorded at least one ERA5-Land "
-        "persistent event. The three cities with none are not given placeholder event rows; "
-        "their zero state is carried in city_summary.era5_*_n_persistent_events.",
+        "`heat_event_catalogue` covers every city that recorded at least one ERA5-Land "
+        "persistent event, which in this release is all 56. A city with none would not be "
+        "given placeholder event rows; its zero state is carried in "
+        "city_year_summary.era5_*_n_persistent_events.",
         "Vector sources are stored in EPSG:4326; they are reprojected to " + CRS_ANALYSIS +
         " for the GeoPackage. Recorded area_km2 values are the originals computed in the "
         "analysis CRS and were not recomputed.",
     ])
-    write_readme(layers, out_dir, gpkg)
     write_changelog(out_dir,
                     n_layers=sum(1 for d in layers.values() if d is not None),
-                    n_cities=len(layers['city_profile']))
+                    n_cities=len(layers['city_profile']),
+                    n_comp=len(layers['composite_trend_statistics']))
     write_licence(out_dir)
+    # README last of the documents, so its layer table sees the final layer set.
+    write_readme(layers, out_dir, gpkg)
     n = write_checksums(out_dir)
     log(f"  checksums: {n} files")
     write_build_report(layers, dd, out_dir, SOURCES)

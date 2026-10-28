@@ -891,12 +891,12 @@ def reproject_to_analysis_crs(input_path, output_dir, city_name, period_type, ao
             _src_dir = os.path.dirname(os.path.abspath(__file__))
             if _src_dir not in _sys.path:
                 _sys.path.insert(0, _src_dir)
-            from data_io import load_osm_water_mask
+            from data_io import load_water_mask
             print(f"        Applying water masking (102022) for {city_name}...")
             with rasterio.open(output_path, 'r+') as f:
                 data = f.read(1)
                 from pathlib import Path as _Path
-                water_mask = load_osm_water_mask(
+                water_mask = load_water_mask(
                     city_name, data.shape, f.transform, str(f.crs),
                     aoi_dir=_Path(aoi_dir) if aoi_dir else None
                 )

@@ -117,6 +117,39 @@ def main():
           not _wrong and not _moved,
           f"C13/C9/C16 {'match' if not _wrong else _wrong}; unexpectedly changed: {_moved or 'none'}")
 
+    # ── hit rates reproduce from the published layers ───────────────────────
+    # The point of the cohort fix is that anyone can recompute the hit rates from the
+    # dataset alone. Recompute from the FINISHED package and require an exact match.
+    import sys as _sys
+    if str(ROOT / "scripts") not in _sys.path:
+        _sys.path.insert(0, str(ROOT / "scripts"))
+    from compute_hitrate import hit_rate_table as _hrt, ANALYSIS_CRS as _ACRS
+    _pub = d["hitrate_sensitivity"]
+    _pts = L("stakeholder_spots_gps", geom=True).to_crs(_ACRS)
+    _sp = L("spots", geom=True).to_crs(_ACRS)
+    _re_ = _hrt(_pts, _sp)
+    _k = ["city", "spot_type", "period", "buffer_m"]
+    _m = (_pub[_k + ["n_hit", "n_total"]].sort_values(_k).reset_index(drop=True)
+          .merge(_re_[_k + ["n_hit", "n_total"]].sort_values(_k).reset_index(drop=True),
+                 on=_k, how="outer", suffixes=("_pub", "_re")))
+    _bad = _m[(_m.n_hit_pub != _m.n_hit_re) | (_m.n_total_pub != _m.n_total_re)]
+    check("hit rates recompute exactly from the published spots and GPS layers",
+          len(_m) == len(_pub) and _bad.empty,
+          f"{len(_m)} rows compared, {len(_bad)} differing"
+          + ("" if _bad.empty else f"; first: {_bad.head(3).to_dict('records')}"))
+
+    # the four published 500 m values, and the rounding-sensitive Port Harcourt row
+    _t500 = _pub[_pub.buffer_m == 500].groupby(["spot_type", "period"])[["n_hit", "n_total"]].sum()
+    _want = {("hot", "day"): (4, 55), ("hot", "night"): (3, 55),
+             ("cold", "day"): (4, 39), ("cold", "night"): (0, 39)}
+    _got = {k: (int(v.n_hit), int(v.n_total)) for k, v in _t500.iterrows()}
+    check("500 m hit rates match the cohort targets", _got == _want, f"{_got}")
+    _ph = _pub[(_pub.city == "Port Harcourt") & (_pub.spot_type == "hot")
+               & (_pub.period == "day") & (_pub.buffer_m == 8500)]
+    check("Port Harcourt hot/day at 8500 m is on the rounded basis (3 hits)",
+          len(_ph) == 1 and int(_ph.n_hit.iloc[0]) == 3,
+          f"n_hit={None if _ph.empty else int(_ph.n_hit.iloc[0])} (unrounded would give 2)")
+
     # ── heat event catalogue completeness ───────────────────────────────────
     # The catalogue is built by reading one audit JSON per city. Matching those files on the
     # display name silently dropped the three cities whose names contain a space, so the
@@ -403,6 +436,33 @@ def main():
           f"{len(_present)} entries" + ("" if _present == _expect else
           f"; unexpected {sorted(_present - _expect)}; missing {sorted(_expect - _present)}"))
 
+
+    # A10: the manifest must verify with the tool a depositor would actually use. Digests
+    # are recomputed here too, so the check cannot pass just because md5sum is missing.
+    _man = (PKG / "checksums_md5.txt").read_bytes()
+    _crlf = _man.count(b"\r\n")
+    _recomp = []
+    for _line in _man.decode("utf-8").strip().splitlines():
+        _dig, _name = _line.split("  ", 1)
+        _f = PKG / _name.strip()
+        _h = hashlib.md5()
+        with _f.open("rb") as _fh:
+            for _c in iter(lambda: _fh.read(1 << 20), b""):
+                _h.update(_c)
+        if _h.hexdigest() != _dig:
+            _recomp.append(_name.strip())
+    _md5sum = shutil.which("md5sum")
+    _ext = None
+    if _md5sum:
+        _r = subprocess.run([_md5sum, "-c", "checksums_md5.txt"], cwd=PKG,
+                            capture_output=True, text=True)
+        _ext = _r.returncode
+    _nman = len(_man.decode("utf-8").strip().splitlines())
+    check("checksums_md5.txt verifies, and has no CRLF that would break md5sum -c",
+          not _recomp and _crlf == 0 and _ext in (0, None),
+          f"recomputed {_nman} digests, {len(_recomp)} mismatched; "
+          f"CRLF lines: {_crlf}; "
+          + ("md5sum -c unavailable" if _ext is None else f"md5sum -c exit {_ext}"))
     # provenance rows and retired parameters
     _info = d["dataset_info"].set_index("key")["value"]
     _retired = {"era5_min_pixels", "bra_tolerance", "bra_max_dist_m", "bra_min_ring_m"}

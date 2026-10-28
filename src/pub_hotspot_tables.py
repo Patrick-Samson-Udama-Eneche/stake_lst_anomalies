@@ -148,7 +148,13 @@ def _bkm(m):
 
 
 def build_supp7(results_05: Path):
-    hs = pd.read_csv(results_05 / 'stakeholder_hitrate_sensitivity.csv')
+    # Read the published layer, not a notebook CSV. The hit rates are on the
+    # 105-participant cohort (94 points, 55 hot / 39 cold) and are computed from the
+    # released, 3-decimal-degree coordinates, so this table matches the dataset exactly.
+    import geopandas as _gpd
+    _pkg = (results_05 / 'surface_thermal_anomaly_stakeholder_composite'
+            / 'surface_thermal_anomaly_stakeholder_composite.gpkg')
+    hs = _gpd.read_file(_pkg, layer='hitrate_sensitivity')
     buffers = sorted(hs['buffer_m'].unique())
 
     def spot_rows(sub, entity, is_group=False):

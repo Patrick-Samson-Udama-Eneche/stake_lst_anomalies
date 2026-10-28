@@ -103,7 +103,7 @@ See [docs/SECURITY_SETUP.md](docs/SECURITY_SETUP.md) for detailed instructions.
 **Option A — Interactive (Jupyter Lab):**
 ```powershell
 jupyter lab
-# Run notebooks in order: 01 → 02 → 03 → 04 → 05 → 06 → publication_outputs
+# Run notebooks in order: 01 → 02 → 03 → 04 → 05 → 06 → 07_publication_outputs
 ```
 
 **Option B — Automated (Master Runner Script):**
@@ -129,7 +129,7 @@ When you run `python run_all.py` without `--notebooks`, it asks which outputs to
 
 | Choice | `--scope` value | What runs |
 |--------|-----------------|-----------|
-| **1. Manuscript outputs only** | `manuscript` | `Notebook/publication_outputs.ipynb` — assembles all manuscript figures, tables and appendices **from cached `Results/`** (no GEE/OSM, minutes) |
+| **1. Manuscript outputs only** | `manuscript` | `Notebook/07_publication_outputs.ipynb` — assembles all manuscript figures, tables and appendices **from cached `Results/`** (no GEE/OSM, minutes) |
 | **2. All project outputs** | `all` | The full analysis pipeline (01–06), then the manuscript assembly, then the published dataset |
 | **3. Analytic outputs only** | `analytic` | The analysis notebooks 01–06 (no manuscript assembly) |
 | **4. Published dataset only** | `dataset` | `scripts/build_master_summary.py` — assembles the composite dataset **from cached `Results/`**, then runs its QA suite (no credentials, ~1 minute) |
@@ -183,7 +183,7 @@ stages.
                 │             │
                 └──► 06_hotspot_modelling
                               │
-                              └──► publication_outputs (manuscript assembly)
+                              └──► 07_publication_outputs (manuscript assembly)
 ```
 
 | # | Notebook | Purpose | External APIs | Inputs |
@@ -194,12 +194,12 @@ stages.
 | 04 | `04_temporal_analysis_daily.ipynb` | Daily LST analysis: MODIS + ERA5 hot events, SEVIRI persistent heat rasters | GEE, EUMETSAT | Notebook 01 AOI outputs |
 | 05 | `05_hotspot_analysis.ipynb` | UHI hotspot detection (Gi\*), KDE delineation, landscape enrichment, population exposure, stakeholder validation | GEE (GHSL) | Notebooks 03 + 04 outputs, landscape/survey data |
 | 06 | `06_hotspot_modelling.ipynb` | Landscape-oriented modelling: extent (OLS) and intensity (OLS) with hierarchical block entry, city-clustered SEs, and Wild Cluster Bootstrap inference (B = 999) | — | Notebook 05 hotspot outputs, landscape data |
-| pub | `publication_outputs.ipynb` | **Manuscript assembly** — re-renders every manuscript figure, supplementary figure, table and appendix from cached `Results/`, in manuscript order. No GEE/OSM. | — | Cached `Results/` from 01–06 |
+| pub | `07_publication_outputs.ipynb` | **Manuscript assembly** — re-renders every manuscript figure, supplementary figure, table and appendix from cached `Results/`, in manuscript order. No GEE/OSM. | — | Cached `Results/` from 01–06 |
 
 | data | `scripts/build_master_summary.py` | **Published dataset assembly** — builds the composite GeoPackage and its data dictionary from cached `Results/`, then runs the QA suite. No GEE/OSM. | — | Cached `Results/` from 01–05 |
 
 > The analysis notebooks 01–06 are run by `run_all.py`; the manuscript-assembly notebook
-> `publication_outputs.ipynb` and the dataset build are run last (or on their own via
+> `07_publication_outputs.ipynb` and the dataset build are run last (or on their own via
 > `--scope manuscript` / `--scope dataset`). Both read only cached `Results/` and need no
 > credentials. Registry entries may point at a notebook (`file`) or a Python script (`script`).
 
@@ -290,7 +290,7 @@ stake_lst_modelling/
 │   ├── 04_temporal_analysis_daily.ipynb
 │   ├── 05_hotspot_analysis.ipynb
 │   ├── 06_hotspot_modelling.ipynb
-│   └── publication_outputs.ipynb         # Assembles manuscript artwork from cached Results/
+│   └── 07_publication_outputs.ipynb         # Assembles manuscript artwork from cached Results/
 │
 ├── scripts/                   # Re-runnable pipeline scripts (ship with the repository)
 │   ├── build_master_summary.py   # Assembles the published composite dataset from cached Results/
@@ -379,7 +379,7 @@ The `CITIES` list is populated dynamically by scanning Notebook 04 SEVIRI output
 - **Coefficient forest plots** — Day|Night horizontal panel with significance colouring (OLS and bootstrap)
 - **Model metadata** (JSON) — reproducibility records per analysis/period
 
-### Manuscript Outputs (`Notebook/publication_outputs.ipynb`)
+### Manuscript Outputs (`Notebook/07_publication_outputs.ipynb`)
 
 The manuscript-assembly notebook gathers every figure, supplementary figure, table and appendix
 **in the order they appear in the manuscript**, re-rendering them from cached `Results/`. Outputs
@@ -445,7 +445,7 @@ end-to-end or at the manuscript-assembly stage alone.
   the Zenodo data archive), rebuild every figure/table/appendix in minutes, no credentials needed:
   ```powershell
   python run_all.py --scope manuscript
-  # or open Notebook/publication_outputs.ipynb and Run All
+  # or open Notebook/07_publication_outputs.ipynb and Run All
   ```
 
 - **Published dataset only** — rebuild the composite dataset and run its QA suite from cached
@@ -455,7 +455,7 @@ end-to-end or at the manuscript-assembly stage alone.
   ```
 
 - **Step-by-step (incremental) reproduction** — open the notebooks in order (01 → 06, then
-  `Notebook/publication_outputs.ipynb`) in Jupyter and run them cell by cell.
+  `Notebook/07_publication_outputs.ipynb`) in Jupyter and run them cell by cell.
 
 ### The published dataset
 

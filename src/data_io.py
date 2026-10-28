@@ -1163,15 +1163,15 @@ def create_seviri_temperature_summary(cities_data, base_dir=None, study_year=202
     return df
 
 
-def load_osm_water_mask(city_name: str, lst_shape: tuple, lst_transform, lst_crs: str,
+def load_water_mask(city_name: str, lst_shape: tuple, lst_transform, lst_crs: str,
                         aoi_dir: Path = None, area_threshold_km2: float = 3.0) -> np.ndarray:
     """
     Load JRC Global Surface Water polygons for a city and rasterize to match LST grid.
     
     Filters water bodies by area threshold to mask only significant water features.
     
-    Note: Uses JRC water bodies extracted via Google Earth Engine (not OSM).
-    Function name kept for backward compatibility.
+    The polygons are JRC Global Surface Water bodies extracted via Google Earth Engine.
+    No OpenStreetMap data is used anywhere in this function.
     
     Parameters
     ----------
@@ -1196,7 +1196,7 @@ def load_osm_water_mask(city_name: str, lst_shape: tuple, lst_transform, lst_crs
     
     Examples
     --------
-    >>> water_mask = load_osm_water_mask('Lagos', (500, 500), transform, msg_crs)
+    >>> water_mask = load_water_mask('Lagos', (500, 500), transform, msg_crs)
     >>> lst_masked = np.where(water_mask, np.nan, median_lst)
     """
     if not RASTERIO_AVAILABLE:
@@ -2391,87 +2391,6 @@ def load_survey_data(survey_path=None, cities=None):
     return survey_gdf
 
 
-def compute_spatial_intersection(hotspot_gdf, survey_gdf, buffer_km=0.5):
-    """
-    Compute spatial intersection between hotspot polygons and survey points.
-    
-    Parameters
-    ----------
-    hotspot_gdf : gpd.GeoDataFrame
-        Hotspot polygons
-    survey_gdf : gpd.GeoDataFrame
-        Survey points with spot type (each row = one identified spot by a stakeholder)
-        Note: Same stakeholder (pid) can identify multiple spots (hotspot1, hotspot2, etc.)
-    buffer_km : float
-        Buffer distance in kilometers
-        
-    Returns
-    -------
-    list of dict
-        Intersection statistics for each city/method/period combination
-        Includes counts of spots AND unique stakeholders
-    """
-    import geopandas as gpd
-    
-    # Ensure both are in same CRS (use projected CRS for buffering)
-    hotspot_proj = hotspot_gdf.to_crs('EPSG:3857')  # Web Mercator (meters)
-    survey_proj = survey_gdf.to_crs('EPSG:3857')
-    
-    buffer_m = buffer_km * 1000  # Convert km to meters
-    
-    results = []
-    
-    # Group by city, method, period
-    for (city, method, period), group in hotspot_proj.groupby(['city', 'method', 'period']):
-        # Buffer hotspot polygons
-        hotspots_buffered = group.copy()
-        hotspots_buffered['geometry'] = hotspots_buffered.buffer(buffer_m)
-        
-        # Get survey points for this city
-        city_survey = survey_proj[survey_proj['city'] == city]
-        
-        if len(city_survey) == 0:
-            continue
-        
-        # Spatial join to find points inside buffered hotspots
-        points_in_hotspots = gpd.sjoin(
-            city_survey, 
-            hotspots_buffered[['geometry']], 
-            how='inner', 
-            predicate='within'
-        )
-        
-        # Count survey points
-        total_survey_points = len(city_survey)
-        points_inside = len(points_in_hotspots)
-        points_outside = total_survey_points - points_inside
-        
-        # Count identified hotspot locations (ground truth)
-        hotspot_points_total = len(city_survey[city_survey['spot_type'] == 'Hotspot'])
-        hotspot_points_inside = len(points_in_hotspots[points_in_hotspots['spot_type'] == 'Hotspot'])
-        hotspot_points_outside = hotspot_points_total - hotspot_points_inside
-        
-        # Count unique stakeholders
-        unique_stakeholders_total = city_survey['pid'].nunique()
-        unique_stakeholders_inside = points_in_hotspots['pid'].nunique() if len(points_in_hotspots) > 0 else 0
-        
-        results.append({
-            'city': city,
-            'method': method,
-            'period': period,
-            'survey_points_total': total_survey_points,
-            'survey_points_inside': points_inside,
-            'survey_points_outside': points_outside,
-            'hotspot_points_total': hotspot_points_total,
-            'hotspot_points_inside': hotspot_points_inside,
-            'hotspot_points_outside': hotspot_points_outside,
-            'unique_stakeholders_total': unique_stakeholders_total,
-            'unique_stakeholders_inside': unique_stakeholders_inside
-        })
-    
-    return results
-
-
 def calculate_validation_metrics(intersection_results):
     """
     Calculate validation metrics (TP, FP, FN, Precision, Recall, F1) from intersection results.
@@ -2479,7 +2398,8 @@ def calculate_validation_metrics(intersection_results):
     Parameters
     ----------
     intersection_results : list of dict
-        Results from compute_spatial_intersection()
+        One dict per configuration, each carrying hotspot_points_inside, hotspot_points_outside,
+        survey_points_inside and survey_points_outside.
         
     Returns
     -------

@@ -6,7 +6,7 @@ Executes all project notebooks in the correct dependency order:
     01 → 02 → 03 → 04 → 05 → 06 → pub
 
 All notebooks live in Notebook/. Notebook 01 merges the former 01a (OSM/JRC + water
-extraction); `pub` (publication_outputs.ipynb) assembles the manuscript artwork from cache.
+extraction); `pub` (07_publication_outputs.ipynb) assembles the manuscript artwork from cache.
 
 Usage:
 ------
@@ -45,7 +45,7 @@ Notes:
   - Notebook 02 is independent and can run in parallel with 03.
   - Notebook 05 requires outputs from Notebook 04 (SEVIRI rasters).
   - Notebook 06 requires outputs from Notebook 05 (hotspot polygons).
-  - pub (publication_outputs) requires cached Results/ from 01-06 (no credentials).
+  - pub (07_publication_outputs) requires cached Results/ from 01-06 (no credentials).
 """
 
 import argparse
@@ -141,7 +141,7 @@ NOTEBOOK_REGISTRY = [
     },
     {
         "id": "pub",
-        "file": "publication_outputs.ipynb",
+        "file": "07_publication_outputs.ipynb",
         "name": "Publication Outputs",
         "description": "Assemble manuscript figures, tables and appendices from cached Results/ (no GEE/OSM)",
         "requires_gee": False,
@@ -175,7 +175,7 @@ for _nb in NOTEBOOK_REGISTRY:
 # Output-scope → which categories to run
 SCOPE_CATEGORIES = {
     "analytic":   {"analytic"},                          # only the analysis notebooks (01–06)
-    "manuscript": {"manuscript"},                        # only publication_outputs (from cache)
+    "manuscript": {"manuscript"},                        # only 07_publication_outputs (from cache)
     "dataset":    {"dataset"},                           # only the published dataset build
     "all":        {"analytic", "manuscript", "dataset"}, # pipeline, artwork, then dataset
 }
