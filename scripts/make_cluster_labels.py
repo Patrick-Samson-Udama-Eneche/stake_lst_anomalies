@@ -38,7 +38,17 @@ GEOLOGY_SHORT = {
     "Undifferentiated basement complex": "basement",
     "Sedimentary formation": "sedimentary",
     "Metamorphic formation": "metamorphic",
-    "Sedimentary & basement formation": "mixed (sedimentary" + EN_DASH + "basement)",
+    "Sedimentary & basement formation": "mixed",
+}
+# Climate for the long label: the lookup stores these lower-case, but Sudan, Guinea and
+# Sahel are place names.
+CLIMATE_LONG = {
+    "Tropical wet": "Tropical wet",
+    "Tropical wet and dry": "Tropical wet and dry",
+    "Tropical guinea savanna": "Tropical Guinea savanna",
+    "Tropical sudan savanna": "Tropical Sudan savanna",
+    "Tropical sahel savanna": "Tropical Sahel savanna",
+    "Tropical montane": "Tropical montane",
 }
 GEOLOGY_LONG = {
     "Undifferentiated basement complex": "undifferentiated basement complex",
@@ -66,7 +76,8 @@ def main() -> int:
     rows = []
     for cl, g in d.groupby("Cluster25"):
         r = g.iloc[0]
-        for name, table in (("Climate_Class", CLIMATE_SHORT), ("Geology_Class", GEOLOGY_SHORT),
+        for name, table in (("Climate_Class", CLIMATE_SHORT), ("Climate_Class", CLIMATE_LONG),
+                            ("Geology_Class", GEOLOGY_SHORT), ("Geology_Class", GEOLOGY_LONG),
                             ("Elevation_Class", ELEVATION_SHORT)):
             if r[name] not in table:
                 print("unmapped %s: %r (cluster C%d)" % (name, r[name], cl))
@@ -76,7 +87,7 @@ def main() -> int:
                           GEOLOGY_SHORT[r.Geology_Class],
                           ELEVATION_SHORT[r.Elevation_Class]))
         long = "%s, %s, %s elevation (%s)" % (
-            r.Climate_Class,
+            CLIMATE_LONG[r.Climate_Class],
             GEOLOGY_LONG[r.Geology_Class],
             ELEVATION_SHORT[r.Elevation_Class],
             ELEVATION_RANGE[r.Elevation_Class],
