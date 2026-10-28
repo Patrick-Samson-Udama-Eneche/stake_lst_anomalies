@@ -179,8 +179,8 @@ def build_supp7(results_05: Path):
     for cl in sorted(hs['cluster25'].unique()):
         csub = hs[hs['cluster25'] == cl]
         rows += spot_rows(csub, f'C{cl}', is_group=True)
-        for city in sorted(csub['matched_city_y'].unique()):
-            rows += spot_rows(csub[csub['matched_city_y'] == city], city)
+        for city in sorted(csub['city'].unique()):
+            rows += spot_rows(csub[csub['city'] == city], city)
     return pd.DataFrame(rows), [_bkm(m) for m in buffers]
 
 
