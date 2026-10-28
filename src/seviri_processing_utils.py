@@ -41,6 +41,57 @@ import warnings
 warnings.filterwarnings('ignore')
 
 
+def _resolve_city_aoi(city_name: str, aoi_dir: str, temp_dir: str = None) -> str | None:
+    """
+    Return a path to the city-region GeoJSON for SEVIRI clipping/reprojection.
+
+    Priority:
+    1. {aoi_dir}/{city_slug}/{city_slug}_city_region_102022_v5.geojson  ← preferred (ANALYSIS_CRS)
+    2. {aoi_dir}/{city_slug}/{city_slug}_city_region_4326_v5.geojson
+    3. GEE Asset fallback — downloads the CityRegion geometry to a temp file.
+
+    Returns the file path, or None if both fail.
+    """
+    city_slug = city_name.replace(' ', '_')
+    # Prefer the ESRI:102022 (analysis CRS) version — avoids degree-to-metre approximation
+    for suffix in ('_city_region_102022_v5.geojson', '_city_region_4326_v5.geojson'):
+        p = os.path.join(aoi_dir, city_slug, f'{city_slug}{suffix}')
+        if os.path.exists(p):
+            return p
+
+    # GEE Asset fallback
+    try:
+        import ee, config, json as _json, tempfile
+        try:
+            ee.Number(1).getInfo()
+        except Exception:
+            config.initialize_gee()
+
+        project_id      = config.GEE_CONFIG['project_id']
+        collection_base = config.GEE_CONFIG.get('collection_name', 'AOI_Nigeria_Cities')
+        asset_id        = f"projects/{project_id}/assets/{collection_base}/{city_slug}"
+
+        fc = ee.FeatureCollection(asset_id).filter(ee.Filter.eq('zone', 'CityRegion'))
+        geojson = fc.getInfo()
+
+        if not geojson or not geojson.get('features'):
+            print(f"        GEE asset has no CityRegion feature for {city_name}")
+            return None
+
+        # Save to a temp file so existing rasterio/geopandas callers work unchanged
+        out_dir = temp_dir if temp_dir else os.path.join(os.path.dirname(aoi_dir), 'tmp')
+        os.makedirs(out_dir, exist_ok=True)
+        tmp_path = os.path.join(out_dir, f'{city_slug}_city_region_gee.geojson')
+        with open(tmp_path, 'w') as _f:
+            _json.dump(geojson, _f)
+        print(f"        AOI loaded from GEE asset → {tmp_path}")
+        return tmp_path
+
+    except Exception as _exc:
+        print(f"        GEE AOI fallback failed for {city_name}: {_exc}")
+        return None
+
+
 # ====================================================================
 # CRS HELPER FUNCTIONS
 # ====================================================================
@@ -103,26 +154,29 @@ def create_msg_crs():
 
 def get_temporal_resolution_strategy(duration_days):
     """
-    Determine temporal resolution based on event duration
-    
-    PROTOCOL: Always use 15-minute resolution regardless of event duration.
-    More timestamps per day → better cloud gap elimination via nanmedian.
-    
+    Determine temporal resolution based on event duration.
+
+    Protocol:
+    ---------
+    ≤ 4 days  →  15-min  (13 timestamps/day × 3-h window — max cloud sampling)
+    5–7 days  →  30-min  (7 timestamps/day — balance coverage vs download volume)
+    > 7 days  →  1-hr    (4 timestamps/day — long events; median still robust)
+
     Parameters:
     -----------
     duration_days : int
-        Duration of the event in days (unused — kept for API compatibility)
-    
+        Duration of the selected event in days.
+
     Returns:
     --------
-    tuple : (strategy, interval_minutes)
-        Always returns ("15min", 15)
+    tuple : (strategy_str, interval_minutes)
     """
-    # Always 15-minute resolution: 13 timestamps/day within
-    # the 3-hour window (12:00-15:00 day, 00:00-03:00 night).
-    # Longer events produce more images → more robust median composites
-    # and fewer cloud-contaminated gaps in the final LST map.
-    return "15min", 15
+    if duration_days <= 4:
+        return "15min", 15
+    elif duration_days <= 7:
+        return "30min", 30
+    else:
+        return "1hr", 60
 
 
 def load_city_event_periods(city_name, output_dir, study_year):
@@ -142,36 +196,82 @@ def load_city_event_periods(city_name, output_dir, study_year):
     --------
     dict : Event periods for day and night
     """
-    results_file = os.path.join(output_dir, '04_trend_analysis_daily',
-                               f'decision_tree_selections_{study_year}.json')
-    
+    # Try both subfolder naming conventions (old: 04_trend, new: 04_temporal)
+    _nb04_subfolders = ['04_trend_analysis_daily', '04_temporal_analysis_daily']
+    results_file = next(
+        (os.path.join(output_dir, sub, f'decision_tree_selections_{study_year}.json')
+         for sub in _nb04_subfolders
+         if os.path.exists(os.path.join(output_dir, sub, f'decision_tree_selections_{study_year}.json'))),
+        os.path.join(output_dir, '04_trend_analysis_daily', f'decision_tree_selections_{study_year}.json')
+    )
+
     if not os.path.exists(results_file):
-        raise FileNotFoundError(f"Decision tree results not found: {results_file}")
-    
-    with open(results_file, 'r') as f:
-        all_results = json.load(f)
-    
-    city_result = None
-    for result in all_results:
-        if result['city'].lower() == city_name.lower():
-            city_result = result
-            break
-    
-    if not city_result:
-        raise ValueError(f"No decision tree results found for {city_name}")
+        # Fallback: try per-city event audit JSON written by the NB04 pipeline.
+        # Try slug name (standard) then canonical name (legacy, spaces in filename).
+        _city_slug = city_name.replace(' ', '_')
+        _audit_candidates = [
+            os.path.join(output_dir, sub, 'events', f'{name}_event_audit.json')
+            for sub in _nb04_subfolders
+            for name in (_city_slug, city_name)
+        ]
+        audit_file = next((p for p in _audit_candidates if os.path.exists(p)), None)
+        if audit_file is None:
+            raise FileNotFoundError(
+                f"Decision tree results not found: {results_file}\n"
+                f"Fallback audit also not found for '{city_name}' in any known subfolder."
+            )
+        with open(audit_file, 'r') as _f:
+            _audit = json.load(_f)
+        # Convert our audit format to the expected format
+        city_result = {
+            'city': city_name,
+            'selected_events': {
+                'day':   (_audit.get('day')   or {}).get('selected_event'),
+                'night': (_audit.get('night') or {}).get('selected_event'),
+            },
+        }
+        # Wrap flat event dicts into period_used subdict if needed
+        for _period in ('day', 'night'):
+            _sel = city_result['selected_events'][_period]
+            if _sel and 'period_used' not in _sel:
+                city_result['selected_events'][_period] = {
+                    'period_used': {
+                        'start_date': _sel.get('start_date'),
+                        'end_date':   _sel.get('end_date'),
+                        'duration':   _sel.get('duration', 0),
+                    },
+                    'source': 'era5_persistent',
+                    'tier':   _sel.get('tier', 'FAIR'),
+                }
+    else:
+        with open(results_file, 'r') as f:
+            all_results = json.load(f)
+        city_result = None
+        for result in all_results:
+            if result['city'].lower() == city_name.lower():
+                city_result = result
+                break
+        if not city_result:
+            raise ValueError(f"No decision tree results found for {city_name}")
     
     events = {}
     for period_type in ['day', 'night']:
-        if city_result['selected_events'][period_type]:
-            event = city_result['selected_events'][period_type]
-            period_info = event['period_used']
-            
+        _raw = city_result['selected_events'][period_type]
+        if _raw:
+            # Support both period_used-wrapped and flat selected_event formats
+            if 'period_used' in _raw:
+                period_info = _raw['period_used']
+                _source = _raw.get('source', 'era5_persistent')
+            else:
+                period_info = _raw
+                _source = _raw.get('source', 'era5_persistent')
+            _qflag = (city_result.get('decision_log') or {}).get(period_type, {}).get('quality_flag', 'FAIR')
             events[period_type] = {
                 'start_date': pd.to_datetime(period_info['start_date']).date(),
                 'end_date': pd.to_datetime(period_info['end_date']).date(),
-                'duration': period_info['duration'],
-                'source': event['source'],
-                'quality_flag': city_result['decision_log'][period_type]['quality_flag']
+                'duration': period_info.get('duration', 0),
+                'source': _source,
+                'quality_flag': _qflag,
             }
     
     if not events:
@@ -270,6 +370,24 @@ def generate_timestamp_list(start_date, end_date, period_type, strategy):
                         if not (hour == 3 and minute > 0):
                             timestamps.append(timestamp)
         
+        elif strategy == "30min":
+            if period_type == 'day':
+                for hour in range(12, 16):
+                    for minute in [0, 30]:
+                        if not (hour == 15 and minute > 0):
+                            timestamps.append(
+                                datetime.combine(current_date, datetime.min.time())
+                                + timedelta(hours=hour, minutes=minute)
+                            )
+            else:
+                for hour in range(0, 4):
+                    for minute in [0, 30]:
+                        if not (hour == 3 and minute > 0):
+                            timestamps.append(
+                                datetime.combine(current_date, datetime.min.time())
+                                + timedelta(hours=hour, minutes=minute)
+                            )
+
         elif strategy == "1hr":
             if period_type == 'day':
                 # DAY: 12:00 to 15:00 (inclusive)
@@ -584,46 +702,11 @@ def compute_median_lst_native_msg(lst_inputs, output_path, transform=None, city_
             print(f"        Coverage after interpolation:  {coverage_after:.1f}% ({valid_after:,}/{total_pixels:,} pixels)")
             print(f"        Filled {filled_count:,} gap pixels ({100*filled_count/gap_before:.1f}% of gaps)")
         
-        # Apply water masking if city name is provided
-        if city_name is not None:
-            try:
-                from data_io import load_osm_water_mask
-                
-                # Create temporary transform for water mask loading
-                try:
-                    msg_crs = create_msg_crs()
-                except:
-                    msg_crs = "+proj=geos +lon_0=0 +h=35785831 +x_0=0 +y_0=0 +ellps=WGS84 +units=m +no_defs"
-                
-                if transform is None:
-                    # MSG SEVIRI full disk extent
-                    west_bound = -5568742.4
-                    east_bound = 5568742.4
-                    south_bound = -5568742.4
-                    north_bound = 5568742.4
-                    pixel_size_x = (east_bound - west_bound) / width
-                    pixel_size_y = (north_bound - south_bound) / height
-                    temp_transform = from_bounds(west_bound, south_bound, east_bound, north_bound, width, height)
-                else:
-                    temp_transform = transform
-                
-                print(f"        Applying water body masking for {city_name}...")
-                water_mask = load_osm_water_mask(city_name, median_lst.shape, temp_transform, msg_crs)
-                
-                if np.any(water_mask):
-                    # Mask water pixels
-                    median_lst = np.where(water_mask, np.nan, median_lst)
-                    
-                    # Update coverage statistics
-                    valid_after_masking = np.sum(~np.isnan(median_lst))
-                    coverage_after_masking = 100 * valid_after_masking / total_pixels
-                    masked_count = valid_after - valid_after_masking
-                    print(f"        Coverage after water masking:  {coverage_after_masking:.1f}% ({valid_after_masking:,}/{total_pixels:,} pixels)")
-                    
-            except ImportError as e:
-                print(f"        Warning: Could not load water masking function: {e}")
-            except Exception as e:
-                print(f"        Warning: Water masking failed: {e}")
+        # NOTE: water masking is intentionally NOT applied here.
+        # The native MSG step covers the full disk at 3 km geostationary projection;
+        # rasterizing WGS84 water polygons onto that grid is geometrically incorrect.
+        # Water masking is applied correctly in reproject_to_analysis_crs() after the
+        # MSG→WGS84 reprojection, when the grid is city-area-specific at 1 km resolution.
 
         
         try:
@@ -687,177 +770,155 @@ def compute_median_lst_native_msg(lst_inputs, output_path, transform=None, city_
         return None
 
 
-def reproject_to_wgs84_1km(input_path, output_dir, city_name, period_type, aoi_path, date_str):
+def reproject_to_analysis_crs(input_path, output_dir, city_name, period_type, aoi_path, date_str,
+                              target_res_m: int = 1000, aoi_dir=None):
     """
-    Reproject MSG native to match AOI CRS and resample to 1km
-    
+    Reproject MSG native GeoTIFF to ESRI:102022 (Africa Albers Equal Area Conic) at 1 km.
+
+    ESRI:102022 is the project ANALYSIS_CRS (config.py §2.3): equal-area, metric units,
+    appropriate for all spatial operations across Nigeria.  The final SEVIRI raster
+    must be in this CRS so that zonal statistics (UC / BRA / CR), area calculations,
+    and hotspot analysis are geometrically correct.
+
     Parameters:
     -----------
     input_path : str
-        Input GeoTIFF in MSG projection
+        Native MSG GeoTIFF (geostationary projection).
     output_dir : str
-        Output directory
+        Output directory for the reprojected file.
     city_name : str
-        City name
+        City name (used for water masking and filename).
     period_type : str
-        'day' or 'night'
+        'day' or 'night'.
     aoi_path : str
-        Path to AOI GeoJSON
+        Path to city-region GeoJSON (preferably _102022_v5 version).
     date_str : str
-        Date string for filename
-    
+        Event date string for filename (e.g. '20240615_20240620').
+    target_res_m : int
+        Target pixel size in metres (default 1000 m = 1 km).
+
     Returns:
     --------
-    str or None : Path to reprojected GeoTIFF or None if failed
+    str or None : Path to reprojected GeoTIFF, or None if failed.
     """
+    ANALYSIS_CRS = "ESRI:102022"
+    BUFFER_M     = 50_000   # 50 km margin around city region
+
     try:
-        print(f"    Reprojecting to match AOI CRS @ 1km...")
-        
+        print(f"    Reprojecting MSG → {ANALYSIS_CRS} @ {target_res_m} m ...")
+
         aoi_gdf = gpd.read_file(aoi_path)
-        target_crs = aoi_gdf.crs
-        
-        aoi_bounds = aoi_gdf.total_bounds
-        buffer_deg = 50000 / 111320  # 50km buffer
-        
-        target_bounds = (
-            aoi_bounds[0] - buffer_deg,
-            aoi_bounds[1] - buffer_deg,
-            aoi_bounds[2] + buffer_deg,
-            aoi_bounds[3] + buffer_deg
-        )
-        
-        print(f"        AOI CRS: {target_crs}")
-        
+        # Ensure AOI is in the analysis CRS for metric bounding box
+        aoi_102022 = aoi_gdf.to_crs(ANALYSIS_CRS) if str(aoi_gdf.crs) != ANALYSIS_CRS else aoi_gdf
+        xmin, ymin, xmax, ymax = aoi_102022.total_bounds
+
+        # Add 50 km buffer in metric units
+        xmin -= BUFFER_M;  ymin -= BUFFER_M
+        xmax += BUFFER_M;  ymax += BUFFER_M
+
+        width  = max(1, int(round((xmax - xmin) / target_res_m)))
+        height = max(1, int(round((ymax - ymin) / target_res_m)))
+
+        dst_transform = from_bounds(xmin, ymin, xmax, ymax, width, height)
+        dst_crs = CRS.from_user_input(ANALYSIS_CRS)
+
+        print(f"        AOI extent ({ANALYSIS_CRS}): "
+              f"{xmin/1e3:.1f}–{xmax/1e3:.1f} km E, {ymin/1e3:.1f}–{ymax/1e3:.1f} km N")
+        print(f"        Output grid: {width} × {height} px @ {target_res_m} m")
+
+        dst_data = np.full((height, width), np.nan, dtype=np.float32)
+
         with rasterio.open(input_path) as src:
-            target_res_deg = 1000 / 111320
-            
-            width = int((target_bounds[2] - target_bounds[0]) / target_res_deg)
-            height = int((target_bounds[3] - target_bounds[1]) / target_res_deg)
-            
-            dst_transform = from_bounds(
-                target_bounds[0], target_bounds[1], 
-                target_bounds[2], target_bounds[3],
-                width, height
-            )
-            
-            dst_data = np.empty((height, width), dtype=np.float32)
-            dst_data.fill(np.nan)
-            
             reproject(
                 source=rasterio.band(src, 1),
                 destination=dst_data,
                 src_transform=src.transform,
                 src_crs=src.crs,
                 dst_transform=dst_transform,
-                dst_crs=target_crs,
+                dst_crs=dst_crs,
                 resampling=Resampling.bilinear,
                 src_nodata=np.nan,
                 dst_nodata=np.nan,
-                num_threads=2
+                num_threads=2,
             )
-            
-            valid_pixels = np.sum(~np.isnan(dst_data))
-            
-            if valid_pixels == 0:
-                print(f"        WARNING: No valid data after reprojection!")
-                return None
-            
-            # ── Post-reprojection gap filling ──────────────────────────────
-            # The MSG→WGS84 reprojection creates geometric NaN at grid
-            # boundaries (~10-17 % of pixels).  Short-event cloud gaps may
-            # also survive.  Fill with nearest-neighbour interpolation up to
-            # 20 km (20 pixels at 1 km resolution).
-            total_pixels = dst_data.size
-            pre_fill_valid = int(valid_pixels)
-            pre_fill_pct  = 100 * pre_fill_valid / total_pixels
-            
-            dst_data = spatial_interpolate_gaps(dst_data, max_distance=20,
-                                                method='nearest')
-            
-            post_fill_valid = int(np.sum(~np.isnan(dst_data)))
-            post_fill_pct   = 100 * post_fill_valid / total_pixels
-            filled_count    = post_fill_valid - pre_fill_valid
-            
-            print(f"        Post-reprojection gap fill: "
-                  f"{pre_fill_pct:.1f}% → {post_fill_pct:.1f}% "
-                  f"(+{filled_count:,} pixels)")
-            # ───────────────────────────────────────────────────────────────
-            
-            output_filename = f"{city_name}_SEVIRI_{period_type}_{date_str}_median_WGS84_1km.tif"
-            output_path = os.path.join(output_dir, output_filename)
-            
-            profile = {
-                'driver': 'GTiff',
-                'dtype': 'float32',
-                'nodata': np.nan,
-                'width': width,
-                'height': height,
-                'count': 1,
-                'crs': target_crs,
-                'transform': dst_transform,
-                'compress': 'deflate',
-                'tiled': True,
-                'blockxsize': 256,
-                'blockysize': 256
-            }
-            
-            with rasterio.open(output_path, 'w', **profile) as dst:
-                dst.write(dst_data, 1)
-                dst.update_tags(
-                    PRODUCT='SEVIRI_LST_Median_Reprojected',
-                    UNITS='Degrees_Celsius',
-                    SPATIAL_RESOLUTION='1km',
-                    ORIGINAL_RESOLUTION='3km_MSG',
-                    TARGET_CRS=str(target_crs),
-                    RESAMPLING='bilinear',
-                    GAP_FILL='nearest_20km',
-                    AOI_FILE=os.path.basename(aoi_path)
+
+        valid_pixels = int(np.sum(~np.isnan(dst_data)))
+        if valid_pixels == 0:
+            print("        WARNING: No valid data after reprojection!")
+            return None
+
+        # Post-reprojection gap fill — MSG→Albers introduces geometric NaN
+        # at the full-disk boundary (~10-17 % of pixels in city window).
+        # Fill with nearest-neighbour up to 20 pixels (= 20 km at 1 km res).
+        total_pixels = dst_data.size
+        pre_pct = 100 * valid_pixels / total_pixels
+        dst_data = spatial_interpolate_gaps(dst_data, max_distance=20, method='nearest')
+        post_valid = int(np.sum(~np.isnan(dst_data)))
+        post_pct   = 100 * post_valid / total_pixels
+        print(f"        Gap fill: {pre_pct:.1f}% → {post_pct:.1f}%  "
+              f"(+{post_valid - valid_pixels:,} px)")
+
+        output_filename = (f"{city_name}_SEVIRI_{period_type}_{date_str}"
+                           f"_median_102022_1km.tif")
+        output_path = os.path.join(output_dir, output_filename)
+
+        profile = {
+            'driver': 'GTiff', 'dtype': 'float32', 'nodata': np.nan,
+            'width': width, 'height': height, 'count': 1,
+            'crs': dst_crs, 'transform': dst_transform,
+            'compress': 'deflate', 'tiled': True,
+            'blockxsize': 256, 'blockysize': 256,
+        }
+        with rasterio.open(output_path, 'w', **profile) as dst:
+            dst.write(dst_data, 1)
+            dst.update_tags(
+                PRODUCT='SEVIRI_LST_Median_Reprojected',
+                UNITS='Degrees_Celsius',
+                SPATIAL_RESOLUTION=f'{target_res_m}m',
+                ORIGINAL_RESOLUTION='3km_MSG',
+                TARGET_CRS=ANALYSIS_CRS,
+                RESAMPLING='bilinear',
+                GAP_FILL='nearest_20km',
+                AOI_FILE=os.path.basename(aoi_path),
+            )
+
+        print(f"        Reprojection complete: {post_valid:,} valid pixels")
+
+        # Apply water masking in 102022 — reprojection can interpolate across
+        # water pixels so we must re-mask AFTER reprojection.
+        try:
+            import sys as _sys
+            _src_dir = os.path.dirname(os.path.abspath(__file__))
+            if _src_dir not in _sys.path:
+                _sys.path.insert(0, _src_dir)
+            from data_io import load_osm_water_mask
+            print(f"        Applying water masking (102022) for {city_name}...")
+            with rasterio.open(output_path, 'r+') as f:
+                data = f.read(1)
+                from pathlib import Path as _Path
+                water_mask = load_osm_water_mask(
+                    city_name, data.shape, f.transform, str(f.crs),
+                    aoi_dir=_Path(aoi_dir) if aoi_dir else None
                 )
-            
-            print(f"        Reprojection complete: {post_fill_valid:,} valid pixels")
-            
-            # RE-APPLY water masking after reprojection (critical fix)
-            # Reprojection can interpolate across water pixels, so re-mask them
-            if city_name is not None:
-                try:
-                    from data_io import load_osm_water_mask
-                    
-                    print(f"        Re-applying water body masking after reprojection...")
-                    
-                    # Load the reprojected file
-                    with rasterio.open(output_path, 'r+') as src:
-                        data = src.read(1)
-                        
-                        # Create water mask in WGS84 projection
-                        water_mask = load_osm_water_mask(
-                            city_name, data.shape, src.transform, src.crs
-                        )
-                        
-                        if np.any(water_mask):
-                            # Mask water pixels
-                            data_masked = np.where(water_mask, np.nan, data)
-                            
-                            # Write back
-                            src.write(data_masked, 1)
-                            
-                            # Update statistics
-                            valid_before = np.sum(~np.isnan(data))
-                            valid_after = np.sum(~np.isnan(data_masked))
-                            masked_count = valid_before - valid_after
-                            
-                            print(f"        Re-masked {masked_count:,} water pixels")
-                            print(f"        Final valid pixels: {valid_after:,}")
-                            
-                except Exception as e:
-                    print(f"        Warning: Post-reprojection water masking failed: {e}")
-            
-            return output_path
-            
+                if np.any(water_mask):
+                    masked = np.where(water_mask, np.nan, data)
+                    f.write(masked, 1)
+                    print(f"        Masked {int(np.sum(water_mask)):,} water pixels → "
+                          f"{int(np.sum(~np.isnan(masked))):,} valid remain")
+        except Exception as _we:
+            print(f"        Warning: water masking failed: {_we}")
+
+        return output_path
+
     except Exception as e:
         print(f"        Error in reprojection: {e}")
         import traceback
         traceback.print_exc()
         return None
+
+
+# Backward-compat alias (old name used in skip-logic checks)
+reproject_to_wgs84_1km = reproject_to_analysis_crs
 
 
 def clip_seviri_to_city_aoi(seviri_geotiff_path, city_name, output_dir, date_str, period_type, aoi_dir):
@@ -886,11 +947,9 @@ def clip_seviri_to_city_aoi(seviri_geotiff_path, city_name, output_dir, date_str
     try:
         print(f"    Clipping to {city_name} AOI...")
         
-        city_aoi_path = os.path.join(aoi_dir, f'City_{city_name}', 'Features',
-                                     f'{city_name}_AOI_Boundary.geojson')
-        
-        if not os.path.exists(city_aoi_path):
-            print(f"        AOI file not found")
+        city_aoi_path = _resolve_city_aoi(city_name, aoi_dir)
+        if city_aoi_path is None:
+            print(f"        AOI file not found for {city_name}")
             return None
         
         aoi_gdf = gpd.read_file(city_aoi_path)
@@ -909,7 +968,7 @@ def clip_seviri_to_city_aoi(seviri_geotiff_path, city_name, output_dir, date_str
                 'transform': clipped_transform
             })
             
-            clipped_filename = f"{city_name}_SEVIRI_{period_type}_{date_str}_median_WGS84_1km_clipped.tif"
+            clipped_filename = f"{city_name}_SEVIRI_{period_type}_{date_str}_median_102022_1km_clipped.tif"
             clipped_path = os.path.join(output_dir, clipped_filename)
             
             with rasterio.open(clipped_path, 'w', **clipped_profile) as dst:
@@ -967,27 +1026,26 @@ def process_single_event(city_name, period_type, timestamps, lst_collection,
         date_str = f"{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}"
         
         native_filename = f"{city_name}_SEVIRI_{period_type}_{date_str}_median_MSG3km.tif"
-        reprojected_filename = f"{city_name}_SEVIRI_{period_type}_{date_str}_median_WGS84_1km.tif"
-        clipped_filename = f"{city_name}_SEVIRI_{period_type}_{date_str}_median_WGS84_1km_clipped.tif"
+        reprojected_filename = f"{city_name}_SEVIRI_{period_type}_{date_str}_median_102022_1km.tif"
+        clipped_filename = f"{city_name}_SEVIRI_{period_type}_{date_str}_median_102022_1km_clipped.tif"
         
         native_path = os.path.join(output_dir, native_filename)
         reprojected_path_expected = os.path.join(output_dir, reprojected_filename)
         clipped_path_expected = os.path.join(output_dir, clipped_filename)
         
-        # SKIP LOGIC: Check if final file exists
+        # SKIP LOGIC: clipped file is the final deliverable — if it exists, nothing to do
         if os.path.exists(clipped_path_expected):
-            print(f"        SKIP: Clipped file already exists")
-            metadata_path = native_path.replace('.tif', '_metadata.json')
+            print(f"        SKIP: {clipped_filename} already exists")
+            metadata_path = clipped_path_expected.replace('.tif', '_metadata.json')
+            metadata = {}
             if os.path.exists(metadata_path):
                 with open(metadata_path, 'r') as f:
                     metadata = json.load(f)
-                return {
-                    'status': 'skipped',
-                    'native_path': native_path,
-                    'reprojected_path': reprojected_path_expected,
-                    'clipped_path': clipped_path_expected,
-                    'metadata': metadata
-                }
+            return {
+                'status': 'skipped',
+                'clipped_path': clipped_path_expected,
+                'metadata': metadata
+            }
         
         print(f"        Processing {len(timestamps)} timestamps...")
         
@@ -1022,44 +1080,47 @@ def process_single_event(city_name, period_type, timestamps, lst_collection,
                     lst_data, file_transform = lst_result
                     if ref_shape is None:
                         ref_shape = lst_data.shape
-                    # Persist to a temp .npy file and free the array
+                    # Persist to a temp .npy file and free the array immediately
                     npy_path = zip_file.replace('.zip', '.npy')
                     np.save(npy_path, lst_data.astype(np.float32))
                     lst_npy_paths.append(npy_path)
                     del lst_data
-            
+                # Delete the downloaded zip — no longer needed after extraction
+                try:
+                    os.remove(zip_file)
+                except OSError:
+                    pass
+
             print(f"        Valid LST arrays: {len(lst_npy_paths)}")
-            
+
             if not lst_npy_paths:
                 return None
-            
+
             # Create transform
             height, width = ref_shape
             correct_transform = from_bounds(
                 -5568742.4, -5568742.4, 5568742.4, 5568742.4,
                 width, height
             )
-            
+
             result_path = compute_median_lst_native_msg(
                 lst_npy_paths, native_path, correct_transform, city_name
             )
-            
-            # Clean up temp .npy files
+
+            # Clean up temp .npy files — median is now in native_path
             for p in lst_npy_paths:
                 try:
                     os.remove(p)
                 except OSError:
                     pass
-            
+
             if not result_path:
                 return None
-        
-        # Get AOI path
-        aoi_path = os.path.join(aoi_dir, f'City_{city_name}', 'Features',
-                               f'{city_name}_AOI_Boundary.geojson')
-        
-        if not os.path.exists(aoi_path):
-            print(f"        WARNING: AOI not found")
+
+        # Resolve AOI path (local Results/ first, then GEE asset fallback)
+        aoi_path = _resolve_city_aoi(city_name, aoi_dir, temp_dir)
+        if aoi_path is None:
+            print(f"        WARNING: AOI not found for {city_name} — cannot reproject/clip")
             return {'status': 'partial', 'native_path': result_path}
         
         # SKIP LOGIC: Check if reprojected file exists
@@ -1067,17 +1128,28 @@ def process_single_event(city_name, period_type, timestamps, lst_collection,
             print(f"        SKIP: Using existing reprojected file")
             reprojected_path = reprojected_path_expected
         else:
-            reprojected_path = reproject_to_wgs84_1km(result_path, output_dir, 
-                                                      city_name, period_type, 
-                                                      aoi_path, date_str)
+            reprojected_path = reproject_to_analysis_crs(result_path, output_dir,
+                                                      city_name, period_type,
+                                                      aoi_path, date_str,
+                                                      aoi_dir=aoi_dir)
             if not reprojected_path:
                 return None
         
-        # Clip to AOI
-        clipped_path = clip_seviri_to_city_aoi(reprojected_path, city_name, 
+        # Clip to AOI — this is the final deliverable
+        clipped_path = clip_seviri_to_city_aoi(reprojected_path, city_name,
                                                output_dir, date_str, period_type, aoi_dir)
-        
-        # Metadata
+
+        # Delete intermediates once the clipped file exists (old protocol: keep only final)
+        if clipped_path and os.path.exists(clipped_path):
+            for _tmp in [result_path, reprojected_path]:
+                if _tmp and _tmp != clipped_path and os.path.exists(_tmp):
+                    try:
+                        os.remove(_tmp)
+                        print(f"        Deleted intermediate: {os.path.basename(_tmp)}")
+                    except OSError:
+                        pass
+
+        # Metadata — record what was produced
         metadata = {
             'city': city_name,
             'period_type': period_type,
@@ -1085,21 +1157,19 @@ def process_single_event(city_name, period_type, timestamps, lst_collection,
             'event_end_date': str(end_date),
             'event_duration_days': event_info['duration'],
             'processing_date': datetime.now().isoformat(),
-            'native_file': native_filename,
-            'reprojected_file': reprojected_filename,
-            'clipped_file': clipped_filename
+            'clipped_file': clipped_filename,
+            'intermediates_deleted': True,
         }
-        
-        metadata_path = native_path.replace('.tif', '_metadata.json')
+
+        metadata_path = clipped_path.replace('.tif', '_metadata.json') if clipped_path \
+            else os.path.join(output_dir, clipped_filename.replace('.tif', '_metadata.json'))
         with open(metadata_path, 'w') as f:
             json.dump(metadata, f, indent=2, default=str)
-        
+
         return {
             'status': 'success',
-            'native_path': result_path,
-            'reprojected_path': reprojected_path,
             'clipped_path': clipped_path,
-            'metadata': metadata
+            'metadata': metadata,
         }
         
     except Exception as e:
@@ -1148,8 +1218,16 @@ def process_city_seviri_events(city_name, eumetsat_creds, output_dir, study_year
         if not datastore:
             raise RuntimeError("Failed to connect to EUMETSAT")
         
-        city_output_dir = os.path.join(output_dir, '04_trend_analysis_daily', 
-                                      'SEVIRI_LST', f'City_{city_name}')
+        # Try new Results/ structure first, fall back to old data/outputs/ structure
+        _nb04_subfolders = ['04_temporal_analysis_daily', '04_trend_analysis_daily']
+        _nb04_sub = next(
+            (s for s in _nb04_subfolders if os.path.isdir(os.path.join(output_dir, s))),
+            '04_temporal_analysis_daily'
+        )
+        # Output folder uses canonical city name (spaces preserved) — consistent with
+        # how city names appear in DataFrames, CSVs and audit JSONs.
+        # AOI reading still uses city_slug internally via _resolve_city_aoi().
+        city_output_dir = os.path.join(output_dir, _nb04_sub, 'seviri', city_name)
         os.makedirs(city_output_dir, exist_ok=True)
         
         results = {}
@@ -1188,40 +1266,56 @@ def process_city_seviri_events(city_name, eumetsat_creds, output_dir, study_year
         return None
 
 
-def process_all_cities_seviri(eumetsat_creds, output_dir, study_year, temp_dir, 
-                              aoi_dir, city_list=None, n_workers=2):
+def process_all_cities_seviri(eumetsat_creds, output_dir, study_year, temp_dir,
+                              aoi_dir, city_list=None, n_workers=2,
+                              test_mode=False, test_cities=None):
     """
-    Process SEVIRI LST for all cities with DASK parallelization
-    
+    Process SEVIRI LST for all cities with DASK parallelization.
+
     Parameters:
     -----------
     eumetsat_creds : dict
         EUMETSAT credentials
     output_dir : str
-        Base output directory
+        Base output directory (parent of 04_temporal_analysis_daily/)
     study_year : int
         Study year
     temp_dir : str
-        Temporary directory
+        Temporary directory (cleared per city after processing)
     aoi_dir : str
-        Base AOI directory
+        Base AOI directory (Results/01_aoi_delineation/)
     city_list : list, optional
-        List of cities to process (default: auto-detect from decision tree)
+        Cities to process. If None, auto-detected from decision tree JSON.
     n_workers : int, default=2
-        Number of DASK workers
-    
+        Number of DASK workers.
+    test_mode : bool, default=False
+        If True, run only `test_cities` (or the first city in city_list when
+        test_cities is also None). Use this to verify the end-to-end pipeline
+        before committing to a full run.
+    test_cities : list or None
+        Explicit city subset for test mode. Ignored when test_mode=False.
+
     Returns:
     --------
-    dict : Complete processing summary for all cities
+    dict : {city_name: city_results_dict}
     """
     print("\n" + "=" * 60)
-    print("MULTI-CITY SEVIRI LST PROCESSING")
+    if test_mode:
+        print("SEVIRI LST PROCESSING — TEST MODE")
+    else:
+        print("MULTI-CITY SEVIRI LST PROCESSING")
     print("=" * 60)
     
     if city_list is None:
-        results_file = os.path.join(output_dir, '04_trend_analysis_daily',
-                                   f'decision_tree_selections_{study_year}.json')
-        
+        _dt_subfolders = ['04_temporal_analysis_daily', '04_trend_analysis_daily']
+        results_file = next(
+            (os.path.join(output_dir, s, f'decision_tree_selections_{study_year}.json')
+             for s in _dt_subfolders
+             if os.path.exists(os.path.join(output_dir, s, f'decision_tree_selections_{study_year}.json'))),
+            os.path.join(output_dir, '04_temporal_analysis_daily',
+                         f'decision_tree_selections_{study_year}.json')
+        )
+
         if not os.path.exists(results_file):
             print(f"ERROR: Decision tree results not found")
             return None
@@ -1231,7 +1325,16 @@ def process_all_cities_seviri(eumetsat_creds, output_dir, study_year, temp_dir,
         
         city_list = [r['city'] for r in all_results]
         print(f"Auto-detected {len(city_list)} cities")
-    
+
+    # ── Test-mode: restrict to a small subset ─────────────────────────────────
+    if test_mode:
+        if test_cities:
+            city_list = [c for c in test_cities if c in city_list] or test_cities[:1]
+        else:
+            city_list = city_list[:1]   # default: first city only
+        print(f"TEST MODE — processing {len(city_list)} city/ies: {city_list}")
+    # ──────────────────────────────────────────────────────────────────────────
+
     print(f"Cities: {', '.join(city_list)}")
     
     # Initialize DASK
@@ -1322,8 +1425,14 @@ def process_all_cities_seviri(eumetsat_creds, output_dir, study_year, temp_dir,
         for city in failed_cities:
             print(f"  - {city}")
     
-    # Save summary
-    seviri_output_dir = os.path.join(output_dir, '04_trend_analysis_daily', 'SEVIRI_LST')
+    # Save summary — resolve subfolder the same way process_city_seviri_events() does
+    _sum_subfolders = ['04_temporal_analysis_daily', '04_trend_analysis_daily']
+    _sum_nb04 = next(
+        (s for s in _sum_subfolders if os.path.isdir(os.path.join(output_dir, s))),
+        '04_temporal_analysis_daily'
+    )
+    seviri_output_dir = os.path.join(output_dir, _sum_nb04, 'seviri')
+    os.makedirs(seviri_output_dir, exist_ok=True)
     summary_path = os.path.join(seviri_output_dir, f'processing_summary_{study_year}.json')
     summary = {
         'processing_date': datetime.now().isoformat(),

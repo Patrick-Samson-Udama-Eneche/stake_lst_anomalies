@@ -1,4 +1,4 @@
-﻿"""
+"""
 Visualization Utilities
 =======================
 
@@ -482,7 +482,8 @@ def create_composite_population_trend(all_cities_results: Dict[str, Any],
                                       figsize: Tuple[float, float] = (10, 6),
                                       dpi: int = 300,
                                       mode: str = 'aoi',
-                                      target_cities: Optional[List[str]] = None) -> Tuple[plt.Figure, Dict[str, Any]]:
+                                      target_cities: Optional[List[str]] = None,
+                                      all_cities_df: Optional[Any] = None) -> Tuple[plt.Figure, Dict[str, Any]]:
     """
     Create composite population trend plot for all selected cities.
 
@@ -505,6 +506,9 @@ def create_composite_population_trend(all_cities_results: Dict[str, Any],
               'individual' for target city population only.
         target_cities: Optional list of city names to include in
               mode='individual'. If None, all unique cities are included.
+        all_cities_df: Optional DataFrame with ALL cities data. If provided in
+              mode='individual', cities not in all_cities_results will be pulled
+              from this DataFrame, ensuring complete population coverage.
 
     Returns:
         Tuple of (matplotlib Figure, summary statistics dict).
@@ -529,6 +533,21 @@ def create_composite_population_trend(all_cities_results: Dict[str, Any],
                 for y in year_cols_all:
                     record[y] = row[y]
                 aoi_pop_records.append(record)
+        
+        # ─ If all_cities_df provided, supplement missing cities for complete coverage ─
+        # This ensures absorbed cities are included in population trend
+        if all_cities_df is not None:
+            year_cols_df = sorted([c for c in all_cities_df.columns if c.isdigit()])
+            for _, city_row in all_cities_df.iterrows():
+                city_name = city_row.get('Urban Agglomeration', '')
+                if city_name and city_name not in seen_cities:
+                    if target_set and city_name not in target_set:
+                        continue
+                    seen_cities.add(city_name)
+                    record = {'AOI': city_name}
+                    for y in year_cols_df:
+                        record[y] = city_row[y]
+                    aoi_pop_records.append(record)
     else:
         # Default: sum all cities within each AOI
         for city_name, aoi_results in all_cities_results.items():
@@ -1558,287 +1577,295 @@ def plot_target_diagram(
     dataset1_name='MODIS',
     dataset2_name='ERA5-Land',
     output_dir=None,
-    figsize=None,
+    figsize=(8.27, 5.85),
     dpi=300,
-    show_labels=True
+    show_labels=True,
+    cluster_lookup=None,
 ):
     """
-    Create a Target Diagram showing validation metrics for multiple cities.
-    
-    A Target Diagram is a standardized plot used in atmospheric science to visualize
-    model performance metrics (bias, RMSE, correlation) in a single coordinate system.
-    
-    Mathematical Formulation:
-    -------------------------
-    X-axis: Unbiased RMSE = √(RMSE² - Bias²)
-        - Represents random error component
-        - Distance from y-axis
-        
-    Y-axis: Bias = Mean(Dataset1 - Dataset2)
-        - Represents systematic error
-        - Positive = Dataset1 > Dataset2
-        - Negative = Dataset1 < Dataset2
-        
-    Distance from origin = Total RMSE
-        - Points near center = Better agreement
-        - RMSE circles show performance contours
-    
+    Create a Target Diagram (Jolliff et al. 2009) combining Day (triangle) and
+    Night (circle) on one half-A4 panel, with points coloured by Cluster25 class.
+
+    Background
+    ----------
+    The **Target Diagram** was introduced by Jolliff et al. (2009) as a compact
+    way to display three complementary validation metrics — bias, unbiased RMSE,
+    and total RMSE — in a single Cartesian plot.  Taylor (2001) earlier proposed
+    a similar diagram in polar coordinates (Taylor Diagram); the Target Diagram
+    uses Cartesian coordinates, making the bias sign (ERA5 > MODIS or ERA5 <
+    MODIS) immediately visible.
+
+    Mathematical formulation
+    ------------------------
+    Given N paired observations (x_i = reference, y_i = model):
+
+        Bias  =  mean(y) − mean(x)                    [y-axis; °C]
+        RMSE  =  √[ mean( (y_i − x_i)² ) ]            [radius; °C]
+        uRMSE =  √( RMSE² − Bias² )                   [x-axis; °C]
+
+    The sign of uRMSE is set to match the sign of the Pearson correlation between
+    model and reference anomalies (Jolliff et al. 2009, eq. 3):
+
+        sign(uRMSE) = sign( r )
+
+    Points near the origin perform best (low bias AND low random error).
+    Concentric dashed circles are iso-RMSE contours.
+
+    References
+    ----------
+    Jolliff, J. K., Kindle, J. C., Shulman, I., Penta, B., Friedrichs, M. A. M.,
+        Helber, R., & Arnone, R. A. (2009). Summary diagrams for coupled
+        hydrodynamic-ecosystem model skill assessment. *Journal of Marine Systems*,
+        76(1–2), 64–82. https://doi.org/10.1016/j.jmarsys.2008.05.014
+
+    Taylor, K. E. (2001). Summarizing model performance in a single diagram.
+        *Journal of Geophysical Research: Atmospheres*, 106(D7), 7183–7192.
+        https://doi.org/10.1029/2000JD900719
+
     Parameters
     ----------
     comparison_results : list of dict
-        List of dictionaries containing comparison metrics for each city:
-        - 'city': str, city name
-        - 'day_bias': float, daytime bias
-        - 'day_rmse': float, daytime RMSE
-        - 'day_correlation': float, daytime Pearson r
-        - 'night_bias': float, nighttime bias
-        - 'night_rmse': float, nighttime RMSE
-        - 'night_correlation': float, nighttime Pearson r
+        One dict per city with keys:
+        'city', 'day_bias', 'day_rmse', 'day_correlation',
+                'night_bias', 'night_rmse', 'night_correlation'
     dataset1_name : str
-        Name of reference dataset (e.g., 'MODIS')
+        Reference dataset label (default 'MODIS')
     dataset2_name : str
-        Name of comparison dataset (e.g., 'ERA5-Land')
+        Comparison dataset label (default 'ERA5-Land')
     output_dir : str or Path, optional
-        Directory to save figure
-    figsize : tuple, optional
-        Figure size (width, height) in inches
-        If None, automatically calculated based on number of cities:
-        - 5 cities: (8.27, 5.85) = half A4 landscape
-        - Scales up for larger datasets
+        Directory to save SVG + PDF outputs
+    figsize : tuple
+        (width, height) in inches — default (8.27, 6.0) = half A4 landscape
     dpi : int
-        Figure resolution (300 recommended for publication)
+        Figure resolution (default 300)
     show_labels : bool
-        Whether to show city name labels on points
-        Automatically disabled if > 20 cities to avoid clutter
-        
+        Annotate each point with city name using callout arrows (default True)
+    cluster_lookup : dict, optional
+        city_name -> Cluster25 integer, used to assign point colours
+
     Returns
     -------
     fig : matplotlib.figure.Figure
-        The created figure
-        
-    dict : Summary statistics
-        Contains best/worst performers and overall statistics
-        
-    Notes
-    -----
-    - Orange markers = Daytime
-    - Grey markers = Nighttime
-    - Red target at origin = Perfect agreement
-    - Concentric circles = RMSE contours
-    - Equal aspect ratio ensures proper circle geometry
-    - Uses adjustText to prevent label overlaps
-    
-    Example
-    -------
-    >>> comparison_results = [
-    ...     {'city': 'Abuja', 'day_bias': -4.64, 'day_rmse': 5.74, ...},
-    ...     {'city': 'Lagos', 'day_bias': -3.72, 'day_rmse': 4.92, ...}
-    ... ]
-    >>> fig, stats = plot_target_diagram(comparison_results)
+    summary : dict
+        Day / night best/worst city and mean metrics
     """
     import numpy as np
     from pathlib import Path
-    from adjustText import adjust_text
-    
-    n_cities = len(comparison_results)
-    
-    # Extract metrics
-    cities = []
-    biases_day = []
-    rmses_day = []
-    correlations_day = []
-    biases_night = []
-    rmses_night = []
-    correlations_night = []
-    
-    for result in comparison_results:
-        cities.append(result['city'])
-        biases_day.append(result['day_bias'])
-        rmses_day.append(result['day_rmse'])
-        correlations_day.append(result['day_correlation'])
-        biases_night.append(result['night_bias'])
-        rmses_night.append(result['night_rmse'])
-        correlations_night.append(result['night_correlation'])
-    
-    # Calculate unbiased RMSE (random error component)
-    # RMSE' = sqrt(RMSE² - Bias²)
-    unbiased_rmse_day = np.sqrt(np.array(rmses_day)**2 - np.array(biases_day)**2)
-    unbiased_rmse_night = np.sqrt(np.array(rmses_night)**2 - np.array(biases_night)**2)
-    
-    # Dynamic figure sizing
-    if figsize is None:
-        # Half A4 landscape (8.27" x 5.85") for 5-10 cities
-        # Scale up gradually for more cities
-        if n_cities <= 10:
-            figsize = (8.27, 5.85)
-        elif n_cities <= 20:
-            figsize = (10, 7)
-        elif n_cities <= 50:
-            figsize = (12, 9)
-        else:
-            figsize = (14, 11)
-    
-    # Automatic label control for large datasets
-    if show_labels and n_cities > 20:
-        show_labels = False
-        print(f"  City labels disabled (n={n_cities} > 20). Use legend instead.")
-    
-    # Create figure
+    import matplotlib.patches as mpatches
+    import matplotlib.lines   as mlines
+
+    try:
+        from adjustText import adjust_text as _adjust_text
+        _has_adj = True
+    except ImportError:
+        _has_adj = False
+        print("  WARN: adjustText not installed — labels may overlap.")
+
+    try:
+        import sys, os
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from config import CLUSTER25_COLORS as _CL_COL
+    except Exception:
+        _CL_COL = {}
+
+    _FALLBACK_COLOR = '#888888'
+
+    def _city_color(city):
+        if cluster_lookup and city in cluster_lookup:
+            return _CL_COL.get(int(cluster_lookup[city]), _FALLBACK_COLOR)
+        return _FALLBACK_COLOR
+
+    # ── Extract & compute metrics ─────────────────────────────────────────────
+    cities = [r['city'] for r in comparison_results]
+    b_d  = np.array([r['day_bias']              for r in comparison_results], float)
+    R_d  = np.array([r['day_rmse']              for r in comparison_results], float)
+    r_d  = np.array([r.get('day_correlation', 0)   for r in comparison_results], float)
+    b_n  = np.array([r['night_bias']            for r in comparison_results], float)
+    R_n  = np.array([r['night_rmse']            for r in comparison_results], float)
+    r_n  = np.array([r.get('night_correlation', 0) for r in comparison_results], float)
+
+    # uRMSE with Jolliff sign convention
+    uR_d = np.sign(r_d) * np.sqrt(np.clip(R_d**2 - b_d**2, 0, None))
+    uR_n = np.sign(r_n) * np.sqrt(np.clip(R_n**2 - b_n**2, 0, None))
+
+    colors = [_city_color(c) for c in cities]
+
+    # ── Figure ────────────────────────────────────────────────────────────────
     fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
-    
-    # Color scheme
-    day_color = '#FF8C42'    # Orange
-    night_color = '#7D7D7D'  # Grey
-    
-    # Dynamic marker size based on number of cities
-    if n_cities <= 10:
-        marker_size = 120
-        label_fontsize = 8
-    elif n_cities <= 20:
-        marker_size = 80
-        label_fontsize = 7
-    elif n_cities <= 50:
-        marker_size = 50
-        label_fontsize = 6
-    else:
-        marker_size = 30
-        label_fontsize = 5
-    
-    # Plot observations
-    ax.scatter(unbiased_rmse_day, biases_day, 
-               s=marker_size, alpha=0.75, color=day_color, 
-               edgecolors='black', linewidth=1.0,
-               label='Daytime', marker='o', zorder=3)
-    
-    ax.scatter(unbiased_rmse_night, biases_night, 
-               s=marker_size, alpha=0.75, color=night_color, 
-               edgecolors='black', linewidth=1.0,
-               label='Nighttime', marker='o', zorder=3)
-    
-    # Add city labels if enabled
+
+    MS = 29  # marker size (fixed; ~43/1.5)
+
+    # Plot Day (triangle) and Night (circle) per city, same cluster colour
+    for i, (city, col) in enumerate(zip(cities, colors)):
+        ax.scatter(uR_d[i], b_d[i], s=MS, marker='^',
+                   color=col, edgecolors='black', linewidth=0.6,
+                   alpha=0.88, zorder=3)
+        ax.scatter(uR_n[i], b_n[i], s=MS, marker='o',
+                   color=col, edgecolors='black', linewidth=0.6,
+                   alpha=0.88, zorder=3)
+
+    # ── City labels — isolation-only strategy ────────────────────────────────
+    # Build a (2N × 2) coordinate array of every plotted point (day then night).
+    # A point is labelled only when its nearest neighbour exceeds the threshold,
+    # i.e. the point sits in open space where text cannot overlap other markers.
     texts = []
     if show_labels:
-        for i, city in enumerate(cities):
-            # Day labels - black text for legibility
-            text_day = ax.text(unbiased_rmse_day[i], biases_day[i], city,
-                              fontsize=label_fontsize, fontweight='normal',
-                              color='black', alpha=0.85)
-            texts.append(text_day)
-            
-            # Night labels - black text for legibility
-            text_night = ax.text(unbiased_rmse_night[i], biases_night[i], city,
-                                fontsize=label_fontsize, fontweight='normal',
-                                color='black', alpha=0.85)
-            texts.append(text_night)
-    
-    # Add RMSE reference circles - visible with good spacing
-    max_rmse = max(max(rmses_day), max(rmses_night))
-    
-    # Dynamic circle levels - 2°C intervals
-    if max_rmse <= 6:
-        rmse_levels = [2, 4, 6]
-    elif max_rmse <= 10:
-        rmse_levels = [2, 4, 6, 8, 10]
-    else:
-        rmse_levels = list(range(2, int(max_rmse) + 4, 2))
-    
-    for rmse in rmse_levels:
-        circle = plt.Circle((0, 0), rmse, fill=False, 
-                           edgecolor='#555555', linestyle='--', 
-                           linewidth=0.5, alpha=0.6, zorder=1)
-        ax.add_patch(circle)
-        # Label circles - darker and more visible
-        ax.text(rmse * 0.707, rmse * 0.707, f'{rmse}°C', 
-               fontsize=8, color='#333333', alpha=0.8,
-               ha='center', va='center',
-               bbox=dict(boxstyle='round,pad=0.3', facecolor='white', 
-                        edgecolor='none', alpha=0.85))
-    
-    # Crosshairs at origin
-    ax.axhline(y=0, color='black', linewidth=1.2, linestyle='-', alpha=0.6, zorder=2)
-    ax.axvline(x=0, color='black', linewidth=1.2, linestyle='-', alpha=0.6, zorder=2)
-    
-    # Bullseye target (perfect agreement) - sniper target style
-    ax.scatter([0], [0], s=200, color='none', edgecolors='red', 
-              linewidths=2.0, marker='o', zorder=4)
-    ax.scatter([0], [0], s=100, color='none', edgecolors='red', 
-              linewidths=1.5, marker='o', zorder=4)
-    ax.scatter([0], [0], s=30, color='red', marker='o', 
-              linewidths=0, zorder=4, label='Perfect Agreement')
-    
-    # Set axis limits - increase x-axis width for more space
-    max_unbiased_rmse = max(max(unbiased_rmse_day), max(unbiased_rmse_night))
-    max_bias = max(max(abs(np.array(biases_day))), max(abs(np.array(biases_night))))
-    axis_limit = max(max_unbiased_rmse, max_bias) * 1.15
-    
-    # Wider x-axis (1.4x multiplier) for more horizontal space
-    ax.set_xlim(-axis_limit * 0.1, axis_limit * 1.4)
-    ax.set_ylim(-axis_limit, axis_limit)
-    
-    # Labels and title
-    ax.set_xlabel('Unbiased RMSE (°C)', fontsize=10, fontweight='bold')
-    ax.set_ylabel(f'Bias (°C)\n[{dataset1_name} − {dataset2_name}]', 
-                 fontsize=10, fontweight='bold')
-    ax.set_title(f'Target Diagram: {dataset1_name} vs {dataset2_name}', 
-                fontsize=11, fontweight='bold', pad=12)
-    
-    # Grid
-    ax.grid(True, alpha=0.2, linestyle=':', linewidth=0.5, zorder=0)
-    
-    # Legend - position based on data distribution
-    legend_loc = 'upper right' if np.mean(biases_day) < 0 else 'lower right'
-    ax.legend(loc=legend_loc, fontsize=8, framealpha=0.95, 
-             edgecolor='gray', fancybox=False, frameon=True)
-    
-    # Equal aspect ratio
-    ax.set_aspect('equal', adjustable='box')
-    
-    # Apply adjustText to prevent label overlaps
-    if show_labels and texts:
-        adjust_text(texts, ax=ax, 
-                   expand_points=(1.5, 1.5),
-                   arrowprops=dict(arrowstyle='-', color='gray', lw=0.3, alpha=0.5),
-                   force_points=(0.5, 0.5),
-                   force_text=(0.5, 0.5))
-    
+        _n = len(cities)
+        _px = np.concatenate([uR_d, uR_n])          # all x-coords
+        _py = np.concatenate([b_d,  b_n])            # all y-coords
+        _pl = cities + cities                        # city name for each point
+        _pp = ['day'] * _n + ['night'] * _n          # period tag
+
+        # Pairwise Euclidean distances (pure numpy, no scipy dependency)
+        _diff  = np.stack([_px, _py], axis=1)
+        _dmat  = np.sqrt(((_diff[:, None, :] - _diff[None, :, :]) ** 2).sum(axis=2))
+        np.fill_diagonal(_dmat, np.inf)
+        _nn_dist = _dmat.min(axis=1)                 # nearest-neighbour distance
+
+        # Tune: minimum clear space (°C) before we attempt to label
+        _ISO = 0.85
+
+        FS = 6.5
+        for idx in range(len(_px)):
+            if _nn_dist[idx] < _ISO:
+                continue                             # too crowded — skip
+            x, y, city = _px[idx], _py[idx], _pl[idx]
+            # Only label if the point is actually within the current axis window
+            texts.append(
+                ax.text(x, y, city, fontsize=FS, color='#111111',
+                        alpha=0.92, va='center', ha='left', zorder=5,
+                        clip_on=True)
+            )
+
+    # ── RMSE iso-circles ─────────────────────────────────────────────────────
+    max_R = float(np.nanmax(np.concatenate([R_d, R_n])))
+    step  = 2 if max_R <= 12 else 4
+    for r_val in np.arange(step, max_R + step * 1.5, step):
+        circ = plt.Circle((0, 0), r_val, fill=False,
+                           edgecolor='#666666', linestyle='--',
+                           linewidth=0.5, alpha=0.45, zorder=1)
+        ax.add_patch(circ)
+        ax.text(r_val * 0.707, r_val * 0.707, f'{r_val:.0f}\u00b0C',
+                fontsize=6.0, color='#444444', alpha=0.75,
+                ha='center', va='center',
+                bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
+                          edgecolor='none', alpha=0.65))
+
+    # ── Crosshairs ───────────────────────────────────────────────────────────
+    ax.axhline(0, color='black', linewidth=0.7, linestyle='-', alpha=0.45, zorder=2)
+    ax.axvline(0, color='black', linewidth=0.7, linestyle='-', alpha=0.45, zorder=2)
+
+    # ── Bullseye (perfect agreement) ─────────────────────────────────────────
+    ax.scatter([0], [0], s=160, color='none', edgecolors='red',
+               linewidths=1.6, zorder=4)
+    ax.scatter([0], [0], s=45,  color='none', edgecolors='red',
+               linewidths=1.1, zorder=4)
+    ax.scatter([0], [0], s=12,  color='red',  zorder=4)
+
+    # ── Axis limits — equal x/y range so RMSE circles are round and the figure
+    # is always square in data-space regardless of data distribution.
+    # Strategy: fit each axis to its data, then expand the narrower one to match.
+    all_uR = np.concatenate([uR_d, uR_n])
+    all_b  = np.concatenate([b_d,  b_n])
+    _pad = 0.12
+    _xlo = min(float(np.nanmin(all_uR)) - _pad, -0.4)
+    _xhi = max(float(np.nanmax(all_uR)) + _pad,  0.4)
+    _ylo = min(float(np.nanmin(all_b))  - _pad, -0.4)
+    _yhi = max(float(np.nanmax(all_b))  + _pad,  0.4)
+    # Expand the narrower axis to match the wider one so equal-aspect
+    # produces a square data-space (not a tall-and-narrow axes box).
+    _xrng, _yrng = _xhi - _xlo, _yhi - _ylo
+    if _xrng < _yrng:
+        _d = (_yrng - _xrng) / 2
+        _xlo -= _d;  _xhi += _d
+    elif _yrng < _xrng:
+        _d = (_xrng - _yrng) / 2
+        _ylo -= _d;  _yhi += _d
+    ax.set_xlim(_xlo, _xhi)
+    ax.set_ylim(_ylo, _yhi)
+    ax.set_aspect('equal', adjustable='box')  # keeps RMSE circles round
+
+    # ── Axes decoration ──────────────────────────────────────────────────────
+    ax.set_xlabel('Unbiased RMSE (\u00b0C)', fontsize=6, fontweight='bold')
+    ax.set_ylabel(
+        f'Bias (\u00b0C)\n[{dataset1_name} \u2212 {dataset2_name}]',
+        fontsize=6, fontweight='bold',
+    )
+    ax.set_title(
+        f'Target Diagram: {dataset1_name} vs {dataset2_name}\n'
+        f'Day (\u25b2) and Night (\u25cf), coloured by Cluster25 class',
+        fontsize=6.5, fontweight='bold', pad=6,
+    )
+    ax.tick_params(axis='both', labelsize=5.5)
+    ax.grid(True, alpha=0.18, linestyle=':', linewidth=0.5, zorder=0)
+
+    # ── Legend ────────────────────────────────────────────────────────────────
+    # Section 1: marker style
+    h_day   = mlines.Line2D([], [], marker='^', linestyle='none',
+                             color='dimgrey', markeredgecolor='black',
+                             markersize=5, label='Day (\u25b2)')
+    h_night = mlines.Line2D([], [], marker='o', linestyle='none',
+                             color='dimgrey', markeredgecolor='black',
+                             markersize=5, label='Night (\u25cf)')
+    h_perf  = mlines.Line2D([], [], marker='o', linestyle='none',
+                             color='red', markeredgecolor='red',
+                             markersize=5, label='Perfect agreement')
+    handles = [h_day, h_night, h_perf]
+    labels  = ['Day (\u25b2)', 'Night (\u25cf)', 'Perfect agreement']
+
+    ax.legend(handles=handles, labels=labels,
+              loc='lower right', fontsize=6.5,
+              framealpha=0.93, edgecolor='#aaaaaa',
+              fancybox=False, frameon=True,
+              handlelength=1.4, handleheight=1.2,
+              borderpad=0.6)
+
+    # ── adjustText callouts ───────────────────────────────────────────────────
+    if texts and _has_adj:
+        _adjust_text(
+            texts, ax=ax,
+            expand_points=(1.4, 1.4),
+            expand_text=(1.1, 1.1),
+            force_points=(0.35, 0.35),
+            force_text=(0.35, 0.35),
+            arrowprops=dict(arrowstyle='->', color='grey', lw=0.55),
+        )
+
     plt.tight_layout()
-    
-    # Save if requested
+
+    # ── Save ─────────────────────────────────────────────────────────────────
     if output_dir:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        
-        png_path = output_dir / f'target_diagram_{dataset1_name}_vs_{dataset2_name}.png'
-        pdf_path = output_dir / f'target_diagram_{dataset1_name}_vs_{dataset2_name}.pdf'
-        
-        fig.savefig(png_path, dpi=dpi, bbox_inches='tight', facecolor='white')
-        fig.savefig(pdf_path, format='pdf', bbox_inches='tight', facecolor='white')
-        print(f"    Saved: {png_path.name}")
-        print(f"    Saved: {pdf_path.name}")
-    
-    # Generate summary statistics
+        stem = f'target_diagram_{dataset1_name}_vs_{dataset2_name}'
+        for ext in ('svg', 'pdf'):
+            p = output_dir / f'{stem}.{ext}'
+            fig.savefig(str(p), format=ext, bbox_inches='tight', facecolor='white')
+            print(f'    Saved: {p.name}')
+
+    # ── Summary dict ─────────────────────────────────────────────────────────
     summary = {
-        'n_cities': n_cities,
+        'n_cities': len(cities),
         'day': {
-            'best_city': cities[np.argmin(rmses_day)],
-            'best_rmse': np.min(rmses_day),
-            'worst_city': cities[np.argmax(rmses_day)],
-            'worst_rmse': np.max(rmses_day),
-            'mean_bias': np.mean(biases_day),
-            'mean_rmse': np.mean(rmses_day),
-            'mean_correlation': np.mean(correlations_day)
+            'best_city':        cities[int(np.nanargmin(R_d))],
+            'best_rmse':        float(np.nanmin(R_d)),
+            'worst_city':       cities[int(np.nanargmax(R_d))],
+            'worst_rmse':       float(np.nanmax(R_d)),
+            'mean_bias':        float(np.nanmean(b_d)),
+            'mean_rmse':        float(np.nanmean(R_d)),
+            'mean_correlation': float(np.nanmean(r_d)),
         },
         'night': {
-            'best_city': cities[np.argmin(rmses_night)],
-            'best_rmse': np.min(rmses_night),
-            'worst_city': cities[np.argmax(rmses_night)],
-            'worst_rmse': np.max(rmses_night),
-            'mean_bias': np.mean(biases_night),
-            'mean_rmse': np.mean(rmses_night),
-            'mean_correlation': np.mean(correlations_night)
-        }
+            'best_city':        cities[int(np.nanargmin(R_n))],
+            'best_rmse':        float(np.nanmin(R_n)),
+            'worst_city':       cities[int(np.nanargmax(R_n))],
+            'worst_rmse':       float(np.nanmax(R_n)),
+            'mean_bias':        float(np.nanmean(b_n)),
+            'mean_rmse':        float(np.nanmean(R_n)),
+            'mean_correlation': float(np.nanmean(r_n)),
+        },
     }
-    
+
     return fig, summary
 
 
@@ -3922,8 +3949,11 @@ def add_north_arrow(ax, location: str = 'upper right', size: float = 0.08):
 def create_geospatial_features_map(
     city_name: str,
     aoi_gdf: gpd.GeoDataFrame,
+    cr_gdf: gpd.GeoDataFrame = None,
     main_polygon_gdf: gpd.GeoDataFrame = None,
     adjacent_polygons_gdf: gpd.GeoDataFrame = None,
+    landscape_gdf: gpd.GeoDataFrame = None,
+    cluster25_colors: dict = None,
     water_gdf: gpd.GeoDataFrame = None,
     roads_gdf: gpd.GeoDataFrame = None,
     places_gdf: gpd.GeoDataFrame = None,
@@ -3931,247 +3961,298 @@ def create_geospatial_features_map(
     label_buffer_km: float = 2.0,
     figsize: tuple = (12, 12),
     save_path: str = None,
-    dpi: int = 300
+    dpi: int = 300,
 ) -> plt.Figure:
     """
-    Create geospatial features map for a city with all urban polygons, 
-    JRC water bodies, OSM roads, and suburb places.
-    
+    Three-zone study area map for a single city (NB01_v4_SMOD).
+
+    Layer order (bottom → top)
+    --------------------------
+    1  City-Region (CR) fill  — very light fill
+    2  Cluster25 polygons     — canonical colours, clipped to CR extent
+    3  BRA fill               — gold / amber
+    4  Water bodies           — steelblue
+    5  UC fill                — darkorange, primary focus zone
+    6  BRA outline            — dashed brown
+    7  UC outline             — solid dark brown
+    8  CR outline             — solid dark grey
+    9  Cluster25 C{N} labels  — deferred above outlines
+    10 Roads                  — thin grey, above all zone elements
+    11 Place dots             — suburb/town markers
+    12 Place labels           — name annotations
+    Legend (zorder 50)        — pinned inside CR bounds, above all
+
+    Legend shows only zones + water + roads + suburbs.
+    Cluster25 regions are labelled on the map ('C{N}') but kept out of the legend.
+
     Parameters
     ----------
     city_name : str
-        Name of the city
-    aoi_gdf : gpd.GeoDataFrame
-        AOI boundary GeoDataFrame (used as map extent/neatline)
-    main_polygon_gdf : gpd.GeoDataFrame, optional
-        Main urban polygon (orange fill)
-    adjacent_polygons_gdf : gpd.GeoDataFrame, optional
-        Adjacent urban polygons (yellow fill)
-    water_gdf : gpd.GeoDataFrame, optional
-        JRC water bodies (blue fill)
-    roads_gdf : gpd.GeoDataFrame, optional
-        OSM roads (thin grey lines for all types)
-    places_gdf : gpd.GeoDataFrame, optional
-        OSM places (filtered to suburbs only, with labels)
-    place_types_filter : list, optional
-        Place types to display. Default: ['suburb']
-    label_buffer_km : float, optional
-        Minimum distance between labels in kilometers. Default: 2.0
-    figsize : tuple
-        Figure size (width, height)
-    save_path : str, optional
-        Path to save figure (will save both PNG and PDF)
-    dpi : int
-        Figure DPI for saving
-    
-    Returns
-    -------
-    plt.Figure
-        Matplotlib figure object
-    
-    Notes
-    -----
-    - Map extent is set by AOI boundary
-    - Legend includes all visible features
-    - Scale bar and north arrow are added automatically
-    - Saves both PNG and PDF formats
+    aoi_gdf   : GeoDataFrame — map extent / neatline (convex hull of CR)
+    cr_gdf    : GeoDataFrame — City-Region polygon (water-free); plotted as light bg
+    main_polygon_gdf      : GeoDataFrame — Urban Core (UC)
+    adjacent_polygons_gdf : GeoDataFrame — Background Reference Area (BRA)
+    landscape_gdf   : GeoDataFrame — Cluster25 landscape polygons ('Cluster25' column)
+    cluster25_colors: dict — {int: hex} canonical colour palette
+    water_gdf, roads_gdf, places_gdf : optional feature layers
+    place_types_filter : list of OSM place types to display
+    label_buffer_km : minimum spacing between place labels (km)
+    figsize, save_path, dpi : standard figure params
     """
+    from matplotlib.patches import Patch
+    from matplotlib.lines   import Line2D
+
     fig, ax = plt.subplots(figsize=figsize)
-    
-    # Ensure all data is in WGS84 for consistent plotting
-    aoi_plot = aoi_gdf.to_crs('EPSG:4326')
-    
-    # Use AOI boundary as the definitive map extent (matches Notebook 01 delineation)
-    aoi_bounds = aoi_plot.total_bounds  # [minx, miny, maxx, maxy]
-    
-    # Add a small buffer (2%) for visual breathing room
-    width = aoi_bounds[2] - aoi_bounds[0]
-    height = aoi_bounds[3] - aoi_bounds[1]
-    pad_x = width * 0.02
-    pad_y = height * 0.02
-    
-    ax.set_xlim(aoi_bounds[0] - pad_x, aoi_bounds[2] + pad_x)
-    ax.set_ylim(aoi_bounds[1] - pad_y, aoi_bounds[3] + pad_y)
-    
+
+    # ── Map extent ────────────────────────────────────────────────────────────
+    aoi_plot  = aoi_gdf.to_crs("EPSG:4326")
+    bounds    = aoi_plot.total_bounds          # [minx, miny, maxx, maxy]
+    w = bounds[2] - bounds[0]
+    h = bounds[3] - bounds[1]
+    ax.set_xlim(bounds[0] - w * 0.02, bounds[2] + w * 0.02)
+    ax.set_ylim(bounds[1] - h * 0.02, bounds[3] + h * 0.02)
+
     legend_handles = []
-    legend_labels = []
-    
-    # 1. Plot roads FIRST (thin grey lines, all road types) - lowest z-order
-    if roads_gdf is not None and not roads_gdf.empty:
-        roads_plot = roads_gdf.to_crs('EPSG:4326')
-        roads_plot.plot(ax=ax, color='grey', linewidth=0.4, alpha=0.5, zorder=1)
-        from matplotlib.lines import Line2D
-        legend_handles.append(Line2D([0], [0], color='grey', linewidth=1.5, alpha=0.7))
-        legend_labels.append(f' Roads ({len(roads_plot):,})')
-    
-    # 2. Plot adjacent polygons (yellow fill with black dashed lines)
+    legend_labels  = []
+
+    # Pre-compute reprojected zone GDFs (reused for both fill and outline passes)
+    cr_plot  = None
+    bra_plot = None
+    uc_plot  = None
+    if cr_gdf is not None and not cr_gdf.empty:
+        cr_plot = cr_gdf.copy()
+        cr_plot["geometry"] = cr_plot.geometry.buffer(0)
+        cr_plot = cr_plot.to_crs("EPSG:4326")
     if adjacent_polygons_gdf is not None and not adjacent_polygons_gdf.empty:
-        adj_plot = adjacent_polygons_gdf.to_crs('EPSG:4326')
-        adj_plot.plot(ax=ax, facecolor='gold', alpha=0.4, edgecolor='black',
-                     linewidth=2, linestyle='--', zorder=5)  # Above water, dashed black lines
-        from matplotlib.patches import Patch
-        legend_handles.append(Patch(facecolor='gold', edgecolor='black', 
-                                   alpha=0.5, linewidth=2, linestyle='--'))
-        legend_labels.append(f'Adjacent urban landscape ({len(adj_plot)})')
-    
-    # 3. Plot main polygon (orange fill with black solid lines)
+        bra_plot = adjacent_polygons_gdf.copy()
+        bra_plot["geometry"] = bra_plot.geometry.buffer(0)
+        bra_plot = bra_plot.to_crs("EPSG:4326")
     if main_polygon_gdf is not None and not main_polygon_gdf.empty:
-        main_plot = main_polygon_gdf.to_crs('EPSG:4326')
-        main_plot.plot(ax=ax, facecolor='darkorange', alpha=0.5, edgecolor='black',
-                      linewidth=2, zorder=6)  # Highest z-order, solid black lines
-        from matplotlib.patches import Patch
-        legend_handles.append(Patch(facecolor='darkorange', edgecolor='black', 
-                                   alpha=0.6, linewidth=2))
-        legend_labels.append('Core urban landscape')
-    
-    # 4. Plot water bodies (steelblue fill with darker edge)
+        uc_plot = main_polygon_gdf.copy()
+        uc_plot["geometry"] = uc_plot.geometry.buffer(0)
+        uc_plot = uc_plot.to_crs("EPSG:4326")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # LAYER PASS 1 — ZONE FILLS (bottom, semi-transparent background)
+    # Geographic features (water, roads) are rendered ABOVE these fills so they
+    # remain clearly visible.  Zone outlines are rendered in Pass 3 (top).
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    # Layer 1: CR fill only (no outline — outline comes in Pass 3)
+    if cr_plot is not None:
+        cr_plot.plot(ax=ax, facecolor="#f0f0eb", edgecolor="none",
+                     alpha=0.30, zorder=1)
+        legend_handles.append(Patch(facecolor="#f0f0eb", edgecolor="#333333",
+                                    linewidth=1.6, alpha=0.85))
+        legend_labels.append("City-Region (CR)")
+
+    # Layer 2: Cluster25 landscape classification (clipped to map extent)
+    _cluster_labels_pending = []   # defer text until Pass 3 so labels sit on top
+    if landscape_gdf is not None and cluster25_colors is not None:
+        try:
+            land = landscape_gdf.to_crs("EPSG:4326").copy()
+            land["geometry"] = land.geometry.buffer(0)
+            clip_geom = aoi_plot.geometry.unary_union
+            land_clip = gpd.clip(land, clip_geom)
+
+            if not land_clip.empty:
+                land_clip["_color"] = land_clip["Cluster25"].map(cluster25_colors)
+                land_clip = land_clip[land_clip["_color"].notna()]
+
+                if not land_clip.empty:
+                    land_clip.plot(ax=ax, color=land_clip["_color"],
+                                   edgecolor="white", linewidth=0.15,
+                                   alpha=0.50, zorder=2)
+
+                    # Collect C{N} label positions — rendered in Pass 3
+                    MIN_LABEL_AREA_DEG2 = 0.003
+                    labeled_clusters = set()
+                    land_clip = land_clip.copy()
+                    land_clip["_area"] = land_clip.geometry.area
+                    for _, row in land_clip.sort_values("_area", ascending=False).iterrows():
+                        cid = int(row["Cluster25"])
+                        if cid in labeled_clusters or row.geometry.area < MIN_LABEL_AREA_DEG2:
+                            continue
+                        centroid = row.geometry.centroid
+                        if not (bounds[0] <= centroid.x <= bounds[2] and
+                                bounds[1] <= centroid.y <= bounds[3]):
+                            continue
+                        _cluster_labels_pending.append((centroid.x, centroid.y, f"C{cid}"))
+                        labeled_clusters.add(cid)
+        except Exception as _e:
+            print(f"  Cluster25 layer skipped: {_e}")
+
+    # Layer 3: BRA fill only (no outline — outline comes in Pass 3)
+    if bra_plot is not None:
+        bra_plot.plot(ax=ax, facecolor="#f5c842", edgecolor="none",
+                      alpha=0.28, zorder=3)
+        legend_handles.append(Patch(facecolor="#f5c842", edgecolor="#7a5c00",
+                                    linewidth=2.0, linestyle="--", alpha=0.75))
+        legend_labels.append("Background Reference Area (BRA)")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # LAYER PASS 2 — GEOGRAPHIC FEATURES (middle: water, roads, UC fill)
+    # Rendered above zone fills so context features are clearly visible.
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    # Layer 4: Water bodies (above BRA fill — water areas show clearly as blue)
     if water_gdf is not None and not water_gdf.empty:
-        water_plot = water_gdf.to_crs('EPSG:4326')
-        water_plot.plot(ax=ax, facecolor='steelblue', alpha=0.7, edgecolor='darkblue',
-                       linewidth=0.8, zorder=4)
-        from matplotlib.patches import Patch
-        legend_handles.append(Patch(facecolor='steelblue', edgecolor='darkblue', 
-                                   alpha=0.7, linewidth=0.8))
-        legend_labels.append(f'Water Bodies ({len(water_plot)})')
-    
-    # 5. Plot places (suburbs only, with labels)  # AOI boundary removed
-    # Removed AOI boundary plotting
-    from matplotlib.lines import Line2D
-    # AOI legend entry removed
-    # AOI legend label removed
-    
-    # 6. Plot places (suburbs only, with labels)
+        water_gdf.to_crs("EPSG:4326").plot(
+            ax=ax, facecolor="#4a9eca", edgecolor="#2b6fa0",
+            linewidth=0.5, alpha=0.80, zorder=4)
+        legend_handles.append(Patch(facecolor="#4a9eca", edgecolor="#2b6fa0",
+                                    linewidth=0.5, alpha=0.80))
+        legend_labels.append(f"Water bodies ({len(water_gdf):,})")
+
+    # Roads deferred to zorder=10 — rendered above zone fills, outlines, and cluster labels
+
+    # Layer 6: UC fill only (above water — roads will overlay this in Pass 3)
+    if uc_plot is not None:
+        uc_plot.plot(ax=ax, facecolor="#e07b00", edgecolor="none",
+                     alpha=0.72, zorder=6)
+        legend_handles.append(Patch(facecolor="#e07b00", edgecolor="#5c3100",
+                                    linewidth=2.0, alpha=0.90))
+        legend_labels.append("Urban Core (UC)")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # LAYER PASS 3 — ZONE OUTLINES + LABELS (top: always crisp, never buried)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    # Layer 7: BRA outline only (dashed, drawn above water/roads)
+    if bra_plot is not None:
+        bra_plot.plot(ax=ax, facecolor="none", edgecolor="#7a5c00",
+                      linewidth=2.0, linestyle="--", alpha=0.92, zorder=7)
+
+    # Layer 8: UC outline only (solid, drawn above BRA outline)
+    if uc_plot is not None:
+        uc_plot.plot(ax=ax, facecolor="none", edgecolor="#5c3100",
+                     linewidth=2.0, linestyle="-", alpha=0.95, zorder=8)
+
+    # Layer 9: CR outline only (solid frame, drawn last among zones)
+    if cr_plot is not None:
+        cr_plot.plot(ax=ax, facecolor="none", edgecolor="#333333",
+                     linewidth=1.8, linestyle="-", alpha=0.88, zorder=9)
+
+    # Layer 10: Cluster25 C{N} text labels (deferred to sit above outlines)
+    for _cx, _cy, _clbl in _cluster_labels_pending:
+        ax.text(_cx, _cy, _clbl,
+                fontsize=6.5, ha="center", va="center",
+                color="#111111", fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.15", facecolor="white",
+                          alpha=0.60, edgecolor="none"),
+                zorder=10)
+
+    # Layer 10.5: Roads — above all zone fills, outlines, and cluster labels
+    if roads_gdf is not None and not roads_gdf.empty:
+        roads_gdf.to_crs("EPSG:4326").plot(
+            ax=ax, color="#888888", linewidth=0.45, alpha=0.75, zorder=10.5)
+        legend_handles.append(Line2D([0], [0], color="#888888", linewidth=1.4, alpha=0.85))
+        legend_labels.append(f"Roads ({len(roads_gdf):,})")
+
+    # Layer 11: Places / suburbs
     if places_gdf is not None and not places_gdf.empty:
-        places_plot = places_gdf.to_crs('EPSG:4326')
-        
-        # Filter to suburbs only by default
+        places_plot = places_gdf.to_crs("EPSG:4326")
         if place_types_filter is None:
-            place_types_filter = ['suburb']
-        
-        if 'place' in places_plot.columns:
-            filtered_places = places_plot[places_plot['place'].isin(place_types_filter)].copy()
-        else:
-            filtered_places = places_plot.copy()
-        
-        if not filtered_places.empty:
-            # Plot place markers
-            filtered_places.plot(ax=ax, color='darkred', markersize=50, alpha=0.9,
-                                marker='o', edgecolor='white', linewidth=1, zorder=7)
-            
-            legend_handles.append(Line2D([0], [0], marker='o', color='w', markerfacecolor='darkred',
-                                        markersize=10, markeredgecolor='white', markeredgewidth=1))
-            legend_labels.append(f'Suburbs ({len(filtered_places)})')
-            
-            # Add labels for places with names using proper spatial buffering
-            name_col = 'name' if 'name' in filtered_places.columns else None
+            place_types_filter = ["suburb", "town"]
+        if "place" in places_plot.columns:
+            places_plot = places_plot[places_plot["place"].isin(place_types_filter)].copy()
+
+        if not places_plot.empty:
+            places_plot.plot(ax=ax, color="darkred", markersize=40, alpha=0.90,
+                             marker="o", edgecolor="white", linewidth=0.8, zorder=11)
+            legend_handles.append(
+                Line2D([0], [0], marker="o", color="w", markerfacecolor="darkred",
+                       markersize=9, markeredgecolor="white", markeredgewidth=0.8))
+            legend_labels.append(f"Suburbs/Towns ({len(places_plot)})")
+
+            name_col = "name" if "name" in places_plot.columns else None
             if name_col:
-                from shapely.geometry import Point
-                from shapely import buffer
-                import geopandas as gpd
-                
-                # Create proper spatial buffers for collision detection
-                placed_buffer_zones = []  # Store actual geometric buffers
-                successful_labels = []
-                skipped_labels = []
-                
-                # For 1 suburb per 2 sq km, calculate buffer radius
-                # Area = π * r² = 2 km²
-                # r = sqrt(2/π)  0.8 km radius for 2 sq km coverage
-                buffer_degrees = (label_buffer_km / 111.0) * 0.8  # Convert km to degrees (~111 km per degree)
-                
-                # Priority-based sorting: prioritize larger place types and longer names
-                place_priority = {'city': 5, 'town': 4, 'suburb': 3, 'village': 2, 'neighbourhood': 1}
-                filtered_places['priority'] = filtered_places.get('place', 'suburb').map(place_priority).fillna(3)
-                filtered_places['name_length'] = filtered_places[name_col].fillna('').str.len()
-                
-                # Sort by priority (desc) then by name length (desc) for better label placement
-                filtered_places = filtered_places.sort_values(['priority', 'name_length'], ascending=[False, False])
-                
-                for idx, row in filtered_places.iterrows():
-                    if pd.notna(row.get(name_col)):
-                        # Get centroid for labeling
-                        if row.geometry.type == 'Point':
-                            point = row.geometry
-                        else:
-                            point = row.geometry.centroid
-                        
-                        # Create buffer zone around potential label position
-                        potential_buffer = point.buffer(buffer_degrees)
-                        
-                        # Check for collision with existing label buffers
-                        collision = False
-                        for existing_buffer in placed_buffer_zones:
-                            if potential_buffer.intersects(existing_buffer):
-                                collision = True
-                                break
-                        
-                        # If no collision, place the label close to the point
-                        if not collision:
-                            ax.annotate(
-                                row[name_col],
-                                xy=(point.x, point.y),
-                                xytext=(3, 3),  # Smaller offset to keep labels close to points
-                                textcoords='offset points',
-                                fontsize=8,  # Slightly larger for better readability
-                                color='black',
-                                fontweight='bold',
-                                bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.8, edgecolor='none'),
-                                zorder=8
-                            )
-                            placed_buffer_zones.append(potential_buffer)
-                            successful_labels.append(row[name_col])
-                        else:
-                            # Skip overlapping labels - cleaner than complex repositioning
-                            skipped_labels.append(row[name_col])
-                
-                # Report results
-                total_named_places = len(filtered_places[filtered_places[name_col].notna()])
-                print(f"  ✓ Placed {len(successful_labels)}/{total_named_places} labels (~1 per 2 km²)")
-                if skipped_labels:
-                    print(f"  ⏭️ Skipped {len(skipped_labels)} overlapping labels")
-    
-    # Add scale bar with standardized 1km length
-    add_scale_bar(ax, length_km=1, location='lower left')
-    
-    # Add north arrow
-    add_north_arrow(ax, location='upper right')
-    
-    # Calculate AOI area for title
-    aoi_area_km2 = aoi_gdf.to_crs('EPSG:32632').area.sum() / 1e6
-    
-    # Formatting
-    ax.set_title(f'{city_name} - Geospatial Features Map\nAOI Area: {aoi_area_km2:.1f} km²',
-                fontsize=14, fontweight='bold', pad=15)
-    ax.set_xlabel('Longitude (°E)', fontsize=11, fontweight='bold')
-    ax.set_ylabel('Latitude (°N)', fontsize=11, fontweight='bold')
-    
-    # Create legend
-    ax.legend(legend_handles, legend_labels, loc='lower right', fontsize=9, 
-             framealpha=0.95, edgecolor='black', fancybox=True,
-             title='Legend', title_fontsize=10)
-    
-    # Grid and aspect
-    ax.grid(True, alpha=0.3, linestyle=':', color='gray', zorder=0)
-    ax.set_aspect('equal')
-    
-    # Tick formatting
-    ax.tick_params(axis='both', which='major', labelsize=9)
-    
+                buf_deg = (label_buffer_km / 111.0) * 0.8
+                placed  = []
+                for _, row in places_plot.sort_values(name_col).iterrows():
+                    if pd.isna(row.get(name_col)):
+                        continue
+                    pt = row.geometry if row.geometry.type == "Point" else row.geometry.centroid
+                    pb = pt.buffer(buf_deg)
+                    if any(pb.intersects(e) for e in placed):
+                        continue
+                    ax.annotate(row[name_col], xy=(pt.x, pt.y),
+                                xytext=(3, 3), textcoords="offset points",
+                                fontsize=7.5, color="black", fontweight="bold",
+                                bbox=dict(boxstyle="round,pad=0.2",
+                                          facecolor="white", alpha=0.80,
+                                          edgecolor="none"),
+                                zorder=12)
+                    placed.append(pb)
+
+    # ── Cartographic elements ─────────────────────────────────────────────────
+    add_scale_bar(ax, length_km=1, location="lower left")
+    add_north_arrow(ax, location="upper right")
+
+    # ── Title ─────────────────────────────────────────────────────────────────
+    # Build area strings for subtitle
+    def _area_km2(gdf):
+        if gdf is None or gdf.empty:
+            return "n/a"
+        try:
+            return f"{gdf.to_crs('ESRI:102022').geometry.buffer(0).area.sum()/1e6:.0f} km²"
+        except Exception:
+            return "n/a"
+
+    uc_area  = _area_km2(main_polygon_gdf)
+    bra_area = _area_km2(adjacent_polygons_gdf)
+    cr_area  = _area_km2(cr_gdf if cr_gdf is not None else aoi_gdf)
+
+    ax.set_title(
+        f"{city_name} — Three-Zone Study Area\n"
+        f"UC: {uc_area}  |  BRA: {bra_area}  |  CR: {cr_area}",
+        fontsize=13, fontweight="bold", pad=12,
+    )
+    ax.set_xlabel("Longitude (°E)", fontsize=10)
+    ax.set_ylabel("Latitude (°N)", fontsize=10)
+
+    # ── Legend ────────────────────────────────────────────────────────────────
+    # Pinned to the lower-right corner of the CR polygon so it never overflows
+    # the CR boundary.  zorder=50 ensures it renders above all axes elements.
+    if legend_handles:
+        if cr_plot is not None:
+            cr_b  = cr_plot.total_bounds   # [minx, miny, maxx, maxy] in degrees
+            _pad  = min(w, h) * 0.015
+            _lx   = cr_b[2] - _pad         # CR right edge minus small inset
+            _ly   = cr_b[1] + _pad         # CR bottom edge plus small inset
+            # Clamp to axes data range so the anchor point stays on-screen
+            _xlim = ax.get_xlim()
+            _ylim = ax.get_ylim()
+            _lx   = max(_xlim[0], min(_lx, _xlim[1]))
+            _ly   = max(_ylim[0], min(_ly, _ylim[1]))
+            leg   = ax.legend(legend_handles, legend_labels,
+                              loc="lower right",
+                              bbox_to_anchor=(_lx, _ly),
+                              bbox_transform=ax.transData,
+                              fontsize=8.5,
+                              framealpha=0.95, edgecolor="#555",
+                              title="Legend", title_fontsize=9.5,
+                              borderpad=0.8, labelspacing=0.55)
+        else:
+            leg = ax.legend(legend_handles, legend_labels,
+                            loc="lower right", fontsize=8.5,
+                            framealpha=0.95, edgecolor="#555",
+                            title="Legend", title_fontsize=9.5,
+                            borderpad=0.8, labelspacing=0.55)
+        leg.set_zorder(50)
+
+    ax.grid(True, alpha=0.2, linestyle=":", color="gray", zorder=0)
+    ax.set_aspect("equal")
+    ax.tick_params(axis="both", which="major", labelsize=8.5)
     plt.tight_layout()
-    
-    # Save figure (PNG and PDF)
+
+    # ── Save ──────────────────────────────────────────────────────────────────
     if save_path:
         save_path = Path(save_path)
-        
-        # Save PNG
-        fig.savefig(save_path, dpi=dpi, bbox_inches='tight', facecolor='white')
-        print(f"   Saved: {save_path.name}")
-        
-        # Save PDF
-        pdf_path = save_path.with_suffix('.pdf')
-        fig.savefig(pdf_path, format='pdf', bbox_inches='tight', facecolor='white')
-        print(f"   Saved: {pdf_path.name}")
-    
+        fig.savefig(save_path,                    dpi=dpi, bbox_inches="tight", facecolor="white")
+        fig.savefig(save_path.with_suffix(".pdf"), format="pdf", bbox_inches="tight", facecolor="white")
+        print(f"   Saved: {save_path.name}  +  {save_path.stem}.pdf")
+
     return fig
 
 
@@ -4768,6 +4849,7 @@ def create_nigeria_cities_landscape_map(
     dpi: int = 300,
     pop_scale: float = 0.6,
     show_plot: bool = True,
+    pop_override: Dict[str, float] = None,
 ) -> plt.Figure:
     """
     Create a Nigeria map displaying:
@@ -4843,6 +4925,11 @@ def create_nigeria_cities_landscape_map(
             pop_val = row[year_col]
             pop_lookup[name] = float(pop_val) * 1_000 if pd.notna(pop_val) else 0
             coord_lookup[name] = (float(row['Longitude']), float(row['Latitude']))
+
+    # Apply rolled-up population override (e.g. absorbed city pop added to parent)
+    if pop_override:
+        for city, pop_val in pop_override.items():
+            pop_lookup[city] = pop_val
 
     # Restrict to cities in aoi_dict
     cities = sorted(aoi_dict.keys())
@@ -5342,9 +5429,10 @@ def create_individual_city_study_area_map(
 # STAKEHOLDER ANALYSIS VISUALIZATIONS (Notebook 02)
 # =============================================================================
 
-def create_stakeholder_map_with_bar_chart(cities_gdf, boundary_gdf, workshop_prof, 
+def create_stakeholder_map_with_bar_chart(cities_gdf, boundary_gdf, workshop_prof,
                                           profession_colors, survey_df, workshop_total,
                                           global_registered=None, global_attendees=None,
+                                          cluster_workshop_prof=None,
                                           figsize=(11.7, 5.85)):
     """
     Create stakeholder distribution map with component bar chart and nested donut.
@@ -5556,59 +5644,97 @@ def create_stakeholder_map_with_bar_chart(cities_gdf, boundary_gdf, workshop_pro
     ax_map.set_aspect('equal')
     
     # =========================================================================
-    # RIGHT PANEL: BAR CHART + DONUT
+    # RIGHT PANEL: BAR CHART
+    # When cluster_workshop_prof is provided → cluster-level bars (§5B)
+    # Otherwise → city-level bars (§5A default)
     # =========================================================================
-    
-    # Prepare data for stacked horizontal bar chart
-    workshop_cities = workshop_prof.groupby('city')['count'].sum().sort_values(ascending=True)
-    workshop_cities = workshop_cities[workshop_cities > 0]
-    
-    professions_in_data = sorted(workshop_prof['profession'].unique())
-    
-    city_list = workshop_cities.index.tolist()
-    data_matrix = pd.DataFrame(0, index=city_list, columns=professions_in_data)
-    
-    for _, row in workshop_prof.iterrows():
-        if row['city'] in city_list:
-            data_matrix.loc[row['city'], row['profession']] = row['count']
-    
-    # Plot stacked horizontal bars
-    left = np.zeros(len(city_list))
-    
-    for prof in professions_in_data:
-        if prof in profession_colors:
-            color = profession_colors[prof]
-            values = data_matrix[prof].values
-            
-            if values.sum() > 0:
-                ax_bar.barh(city_list, values, left=left, 
-                           color=color, edgecolor='white', linewidth=0.5,
-                           label=prof)
-                left += values
-    
-    ax_bar.set_xlabel('Number of Workshop Attendees', fontsize=8)
-    ax_bar.set_title('B', fontsize=10, fontweight='bold', pad=10)
-    ax_bar.tick_params(axis='both', labelsize=6)
-    ax_bar.grid(axis='x', alpha=0.3, linestyle='--', linewidth=0.5)
-    
-    handles, labels = ax_bar.get_legend_handles_labels()
-    ax_bar.legend(handles, labels, loc='lower right',
-                 fontsize=5.5, frameon=True, facecolor='white', edgecolor='black',
-                 title='Profession/Discipline (Mix)', title_fontsize=6,
-                 framealpha=0.95, ncol=1)
-    
-    # Add value labels on bars
-    for i, city in enumerate(city_list):
-        total = workshop_cities[city]
-        ax_bar.text(total + 0.5, i, f'{total}', 
-                   va='center', ha='left', fontsize=5.5, fontweight='bold')
-    
-    # Overall figure title
-    fig.suptitle(f'Stakeholder Distribution & Composition ({config.PROJECT_STUDY_YEAR})',
-                fontsize=11, fontweight='bold', y=0.98)
-    
+
+    if cluster_workshop_prof is not None:
+        # ── Cluster-level stacked bars ────────────────────────────────────────
+        cluster_totals = (cluster_workshop_prof
+                          .groupby('Cluster25')['count'].sum()
+                          .sort_values(ascending=True))
+        cluster_list_b = cluster_totals.index.tolist()
+        professions_b  = sorted(cluster_workshop_prof['profession'].unique())
+
+        dm_b = pd.DataFrame(0, index=cluster_list_b, columns=professions_b)
+        for _, row in cluster_workshop_prof.iterrows():
+            if row['Cluster25'] in dm_b.index:
+                dm_b.loc[row['Cluster25'], row['profession']] = row['count']
+
+        left_b = np.zeros(len(cluster_list_b))
+        for prof in professions_b:
+            vals = dm_b[prof].values
+            if vals.sum() > 0:
+                color = profession_colors.get(prof, '#888888')
+                ax_bar.barh([f'Cluster {c}' for c in cluster_list_b], vals, left=left_b,
+                            color=color, edgecolor='white', linewidth=0.5, label=prof)
+                left_b += vals
+
+        for i, cl in enumerate(cluster_list_b):
+            total = cluster_totals[cl]
+            if total > 0:
+                ax_bar.text(total + 0.2, i, f'{int(total)}',
+                            va='center', ha='left', fontsize=6.5, fontweight='bold')
+
+        ax_bar.set_xlabel('Workshop Attendees', fontsize=8)
+        ax_bar.set_title('B', fontsize=10, fontweight='bold', pad=10)
+        ax_bar.tick_params(axis='both', labelsize=7)
+        ax_bar.grid(axis='x', alpha=0.3, linestyle='--', linewidth=0.5)
+        handles_b, labels_b = ax_bar.get_legend_handles_labels()
+        if handles_b:
+            ax_bar.legend(handles_b, labels_b, loc='lower right', fontsize=5,
+                          title='Profession', title_fontsize=6,
+                          framealpha=0.95, edgecolor='black', ncol=1)
+
+        fig.suptitle(
+            f'Stakeholder Distribution by Cluster ({config.PROJECT_STUDY_YEAR})',
+            fontsize=11, fontweight='bold', y=0.98)
+
+    else:
+        # ── City-level stacked bars (default §5A behaviour) ───────────────────
+        workshop_cities = (workshop_prof.groupby('city')['count'].sum()
+                           .sort_values(ascending=True))
+        workshop_cities = workshop_cities[workshop_cities > 0]
+
+        professions_in_data = sorted(workshop_prof['profession'].unique())
+        city_list = workshop_cities.index.tolist()
+        data_matrix = pd.DataFrame(0, index=city_list, columns=professions_in_data)
+
+        for _, row in workshop_prof.iterrows():
+            if row['city'] in city_list:
+                data_matrix.loc[row['city'], row['profession']] = row['count']
+
+        left = np.zeros(len(city_list))
+        for prof in professions_in_data:
+            if prof in profession_colors:
+                color = profession_colors[prof]
+                values = data_matrix[prof].values
+                if values.sum() > 0:
+                    ax_bar.barh(city_list, values, left=left,
+                               color=color, edgecolor='white', linewidth=0.5, label=prof)
+                    left += values
+
+        ax_bar.set_xlabel('Number of Workshop Attendees', fontsize=8)
+        ax_bar.set_title('B', fontsize=10, fontweight='bold', pad=10)
+        ax_bar.tick_params(axis='both', labelsize=6)
+        ax_bar.grid(axis='x', alpha=0.3, linestyle='--', linewidth=0.5)
+
+        handles, labels = ax_bar.get_legend_handles_labels()
+        ax_bar.legend(handles, labels, loc='lower right',
+                     fontsize=5.5, frameon=True, facecolor='white', edgecolor='black',
+                     title='Profession/Discipline (Mix)', title_fontsize=6,
+                     framealpha=0.95, ncol=1)
+
+        for i, city in enumerate(city_list):
+            total = workshop_cities[city]
+            ax_bar.text(total + 0.5, i, f'{total}',
+                       va='center', ha='left', fontsize=5.5, fontweight='bold')
+
+        fig.suptitle(f'Stakeholder Distribution & Composition ({config.PROJECT_STUDY_YEAR})',
+                    fontsize=11, fontweight='bold', y=0.98)
+
     plt.tight_layout(rect=[0, 0, 1, 0.96])
-    
     return fig
 
 
@@ -5813,7 +5939,473 @@ def create_city_classification_donut(cities_gdf, survey_df, workshop_total,
              framealpha=0.9, bbox_to_anchor=(0.5, -0.08), ncol=2)
     
     plt.tight_layout()
-    
+
+    return fig
+
+
+def create_city_stakeholder_donut(cluster_summary, study_gdf=None,
+                                  cluster25_colors=None,
+                                  total_pids=None, attended_pids=None,
+                                  figsize=(14, 8)):
+    """
+    Single top-semicircle half-donut chart (horizontal cut, upper half active).
+
+    Arc spans 0° (right) counterclockwise through 90° (top) to 180° (left).
+
+    Hierarchy (inner → outer):
+      Ring 1 : 16 Cluster25 classes — clusters with ANY workshop-attended cities
+               appear first (right side of arc), then clusters with none.
+               Arc size = N cities per cluster.  Colour = cluster colour.
+      Ring 2 : Workshop attendance split within each Ring 1 cluster arc.
+               [attended sub-arc (cluster colour)] then
+               [not-attended sub-arc (cluster colour lightened 45%)].
+               Inherits cluster colour → colour continuity Ring 1 → Ring 2.
+      Ring 3 : Individual cities within each Ring 2 sub-arc.
+               Attended cities: arc ∝ total_attendees (or registered_count),
+               normalised to sum = n_attended_cl; colour graded vivid→lighter.
+               Not-attended cities: equal arcs; strongly lightened cluster colour.
+      Labels : Attended cities only — "City (N attendees)" with radial leader
+               lines.  Right-quarter segments labelled to the right; left-quarter
+               segments labelled to the left.  Not-attended cities: no label.
+    Center   : n_cities (from NB01, dynamic) top; survey-attended stakeholders
+               (incl. absorbed cities) bottom — both fully dynamic.
+
+    Parameters
+    ----------
+    cluster_summary : DataFrame
+        ``cluster_stake_df`` from NB02 §4B.  Required columns:
+        ``Cluster``, ``N Cities``, ``Registered``, ``Attended Workshop``.
+    study_gdf : GeoDataFrame, optional
+        Per-city GDF with ``Cluster25``, ``city``, ``total_attendees``
+        (preferred) or ``registered_count`` (fallback).
+    cluster25_colors : dict, optional
+        ``{int: hex_str}`` mapping from ``config.CLUSTER25_COLORS``.
+    total_pids : int, optional
+        Reserved for API compatibility; not displayed.
+    attended_pids : int, optional
+        Unique PIDs with survey status "Yes" (incl. absorbed cities).
+        Falls back to sum of 'Attended Workshop' column when None.
+    figsize : tuple
+        Figure size in inches.  Default (12, 11) suits portrait half-donut.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+    """
+    import matplotlib.colors as mcolors
+    import matplotlib.patches as mpatches
+    from matplotlib.gridspec import GridSpec
+    from matplotlib.patches import Rectangle
+
+    if cluster25_colors is None:
+        cluster25_colors = {}
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+    def _cl_num(lbl):
+        try:
+            return int(str(lbl).lstrip('C'))
+        except ValueError:
+            return 999
+
+    def _cl_color(lbl):
+        return cluster25_colors.get(_cl_num(lbl), '#888888')
+
+    def _lighten(hx, amount):
+        rgb = np.array(mcolors.to_rgb(hx))
+        return mcolors.to_hex(rgb + (1.0 - rgb) * float(np.clip(amount, 0, 1)))
+
+    def _half_ring(ax, data, radius, width):
+        """Top-facing half-donut ring (startangle=0, data spans top 180°)."""
+        sizes  = [d[0] for d in data if d[0] > 0]
+        colors = [d[1] for d in data if d[0] > 0]
+        if not sizes:
+            return
+        total = sum(sizes)
+        ax.pie(sizes + [total], radius=radius, colors=colors + ['white'],
+               labels=None, startangle=0,
+               wedgeprops=dict(width=width, edgecolor='white', linewidth=0.6))
+
+    # ── base cluster table (numerically sorted) ───────────────────────────────
+    cs = (cluster_summary.copy()
+          .assign(_n=lambda df: df['Cluster'].map(_cl_num))
+          .sort_values('_n').drop(columns='_n').reset_index(drop=True))
+
+    n_cities   = int(cs['N Cities'].sum())
+    center_att = (attended_pids if attended_pids is not None
+                  else int(cs['Attended Workshop'].sum()))
+
+    # ── per-cluster attendance breakdown ──────────────────────────────────────
+    # Use total_attendees (workshop presence) if present in study_gdf,
+    # otherwise fall back to registered_count as proxy.
+    _MIN_FRAC = 0.02
+
+    if study_gdf is not None and 'total_attendees' in study_gdf.columns:
+        _att_col = 'total_attendees'
+    else:
+        _att_col = 'registered_count'
+
+    cluster_data = {}   # cl → dict with n_att, n_not, att_sub, not_sub, n_cities
+
+    for _, row in cs.iterrows():
+        cl = row['Cluster']
+        if study_gdf is not None and 'Cluster25' in study_gdf.columns:
+            sub_cl = study_gdf[study_gdf['Cluster25'] == _cl_num(cl)]
+            att_sub = (sub_cl[sub_cl[_att_col] > 0]
+                       .sort_values(_att_col, ascending=False)
+                       .reset_index(drop=True))
+            not_sub = sub_cl[sub_cl[_att_col] == 0].reset_index(drop=True)
+            n_att = len(att_sub)
+            n_not = len(not_sub)
+        else:
+            n_att = int(row.get('Cities w/ Stakeholders', 0))
+            n_not = int(row['N Cities']) - n_att
+            att_sub = None
+            not_sub = None
+
+        cluster_data[cl] = dict(
+            n_att=n_att, n_not=n_not,
+            att_sub=att_sub, not_sub=not_sub,
+            n_cities=int(row['N Cities']),
+        )
+
+    n_att_total = sum(d['n_att'] for d in cluster_data.values())
+    n_not_total = sum(d['n_not'] for d in cluster_data.values())
+
+    # ── sort Ring 1: clusters with ANY attendance first, then without ─────────
+    cs_att   = cs[cs['Cluster'].map(lambda c: cluster_data[c]['n_att'] > 0)]
+    cs_noatt = cs[cs['Cluster'].map(lambda c: cluster_data[c]['n_att'] == 0)]
+    cs_sorted = pd.concat([cs_att, cs_noatt]).reset_index(drop=True)
+
+    # ── Ring 1: cluster arcs ──────────────────────────────────────────────────
+    r1_data = [
+        (cluster_data[row['Cluster']]['n_cities'], _cl_color(row['Cluster']))
+        for _, row in cs_sorted.iterrows()
+    ]
+
+    # ── Ring 2: within each cluster arc → [attended | not-attended] ──────────
+    # attended sub-arc  : cluster colour (full)
+    # not-attended arc  : cluster colour lightened 45%
+    r2_data = []
+    for _, row in cs_sorted.iterrows():
+        cl     = row['Cluster']
+        d      = cluster_data[cl]
+        cl_col = _cl_color(cl)
+        if d['n_att'] > 0:
+            r2_data.append((d['n_att'], cl_col))
+        if d['n_not'] > 0:
+            r2_data.append((d['n_not'], _lighten(cl_col, 0.45)))
+
+    # ── Ring 3 + per-city label metadata ─────────────────────────────────────
+    # city_ring3 tuples: (city_name, att_count, draw_color, draw_size, is_attended)
+    city_ring3 = []
+
+    for _, row in cs_sorted.iterrows():
+        cl     = row['Cluster']
+        d      = cluster_data[cl]
+        cl_col = _cl_color(cl)
+
+        # — attended cities (arc ∝ att_col, normalised to n_att) —
+        if d['n_att'] > 0 and d['att_sub'] is not None:
+            sub   = d['att_sub']
+            n_sub = len(sub)
+            total = float(sub[_att_col].sum())
+            if total > 0:
+                raw = [max(float(sub.at[i, _att_col]) / total,
+                           _MIN_FRAC / n_sub) for i in range(n_sub)]
+            else:
+                raw = [1.0 / n_sub] * n_sub
+            raw_sum   = sum(raw)
+            arc_sizes = [d['n_att'] * r / raw_sum for r in raw]
+            for i, sr in sub.iterrows():
+                cnt     = int(sr[_att_col])
+                lighten = 0.0 if n_sub <= 1 else 0.55 * i / (n_sub - 1)
+                city_ring3.append((sr['city'], cnt,
+                                   _lighten(cl_col, lighten), arc_sizes[i], True))
+
+        # — not-attended cities (equal arcs, lightened) —
+        if d['n_not'] > 0:
+            not_col = _lighten(cl_col, 0.55)
+            if d['not_sub'] is not None:
+                for _, sr in d['not_sub'].iterrows():
+                    city_ring3.append((sr['city'], 0, not_col, 1.0, False))
+            else:
+                for _ in range(d['n_not']):
+                    city_ring3.append((cl, 0, not_col, 1.0, False))
+
+    r3_draw = [(e[3], e[2]) for e in city_ring3]
+
+    # ── label positions + leader-line coordinates (top-half donut) ───────────
+    # Arc angles: mid_a = 0° + cumul×180°  (0° = right, 90° = top, 180° = left).
+    # Right quarter (0°–90°): ha='left',  rot = mid_a        → labels point right.
+    # Left quarter  (90°–180°): ha='right', rot = mid_a−180  → labels point left.
+    # Only attended cities receive a label.
+    # Leader line: thin radial tick from Ring 3 outer edge to label anchor.
+    _R          = 0.80
+    _ring3_edge = _R + 0.14 + 0.015   # just outside Ring 3 outer rim
+    _label_r    = _R + 0.30           # label anchor radius
+    r3_total    = sum(e[0] for e in r3_draw) if r3_draw else 1
+    cumul       = 0.0
+    # (x_tick, y_tick, x_lbl, y_lbl, text, rot, ha)
+    city_labels = []
+
+    for (cname, cnt, _, arc_sz, is_att) in city_ring3:
+        frac    = arc_sz / r3_total
+        mid_a   = 0.0 + (cumul + frac / 2.0) * 180.0
+        mid_rad = np.radians(mid_a)
+
+        if is_att:   # labels only for cities with workshop attendance
+            x_tick = _ring3_edge * np.cos(mid_rad)
+            y_tick = _ring3_edge * np.sin(mid_rad)
+            x_lbl  = _label_r   * np.cos(mid_rad)
+            y_lbl  = _label_r   * np.sin(mid_rad)
+
+            is_right = mid_a <= 90
+            rot = mid_a if is_right else mid_a - 180
+            ha  = 'left' if is_right else 'right'
+            city_labels.append((x_tick, y_tick, x_lbl, y_lbl,
+                                f"{cname} ({cnt})", rot, ha))
+        cumul += frac
+
+    # ── figure layout ─────────────────────────────────────────────────────────
+    fig = plt.figure(figsize=figsize)
+    gs  = GridSpec(1, 2, figure=fig, width_ratios=[0.72, 0.38], wspace=0.04)
+    ax     = fig.add_subplot(gs[0])
+    ax_leg = fig.add_subplot(gs[1])
+    ax_leg.axis('off')
+
+    # ── draw rings ────────────────────────────────────────────────────────────
+    _half_ring(ax, r1_data, 0.46, 0.14)   # Ring 1 — clusters (16)
+    _half_ring(ax, r2_data, 0.62, 0.14)   # Ring 2 — attendance split
+    _half_ring(ax, r3_draw, 0.78, 0.14)   # Ring 3 — cities (56)
+
+    # White center disc
+    ax.add_artist(plt.Circle((0, 0), 0.32, fc='white', linewidth=0, zorder=4))
+
+    # White rectangle masks bottom-half filler wedges cleanly
+    _ext = _label_r + 0.28
+    ax.add_patch(Rectangle((-_ext - 0.05, -_ext - 0.05),
+                            2 * (_ext + 0.05), _ext + 0.06,
+                            facecolor='white', edgecolor='none', zorder=5))
+
+    # ── leader lines + city labels (attended cities only) ─────────────────────
+    # Improved: subtle background + better sizing for readability
+    for (xt, yt, xl, yl, text, rot, ha) in city_labels:
+        ax.plot([xt, xl * 0.987], [yt, yl * 0.987],
+                color='#999999', lw=0.5, zorder=6, solid_capstyle='round', alpha=0.6)
+        # Add subtle label background for better contrast
+        ax.text(xl, yl, text, ha=ha, va='center',
+                fontsize=7.2, rotation=rot, color='#000000', zorder=7,
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', 
+                         edgecolor='none', alpha=0.75, linewidth=0))
+
+    # ── center text (dynamic: NB01 city count + workshop-attended PIDs) ───────
+    # Positioned inside the inner white disc (upper portion visible above flat edge)
+    # Enhanced hierarchy and spacing
+    ax.text(0,  0.19, str(n_cities), ha='center', va='center',
+            fontsize=20, fontweight='bold', color='#222222', zorder=6)
+    ax.text(0,  0.09, 'Target Cities', ha='center', va='center',
+            fontsize=8, color='#666666', zorder=6)
+    ax.text(0, -0.04, str(center_att), ha='center', va='center',
+            fontsize=18, fontweight='bold', color='#222222', zorder=6)
+    ax.text(0, -0.14, 'Workshop Participants', ha='center', va='center',
+            fontsize=8, fontweight='bold', color='#444444', zorder=6)
+
+    # ── axis bounds (top half: full width, y ≥ −0.15) ────────────────────────
+    ax.set_xlim(-_ext, _ext)
+    ax.set_ylim(-0.18, _ext)
+    ax.set_aspect('equal', adjustable='datalim')
+    ax.axis('off')
+
+    # ── legend ────────────────────────────────────────────────────────────────
+    # One entry per cluster (attended clusters first). A filled coloured circle
+    # marks clusters with workshop attendance; an open coloured circle marks those
+    # without. Label format: "CX (N cities | M att.)".
+    from matplotlib.lines import Line2D
+
+    def _circ(color, filled):
+        return Line2D([0], [0], marker='o', linestyle='none', markersize=9,
+                      markerfacecolor=(color if filled else 'none'),
+                      markeredgecolor=color, markeredgewidth=1.4)
+
+    leg_handles, leg_labels = [], []
+    for _, row in cs_sorted.iterrows():
+        cl   = row['Cluster']
+        d    = cluster_data[cl]
+        n_aw = int(row['Attended Workshop'])
+        leg_handles.append(_circ(_cl_color(cl), d['n_att'] > 0))
+        leg_labels.append(f"{cl}  ({d['n_cities']} cities | {n_aw} att.)")
+
+    ax_leg.legend(leg_handles, leg_labels, loc='center left',
+                  fontsize=8.5, title='LEGEND', title_fontsize=11,
+                  frameon=False, handlelength=1.0, handletextpad=0.6,
+                  labelspacing=0.75, borderpad=0.5, bbox_to_anchor=(-0.02, 0.5))
+
+    fig.suptitle(
+        f'City & Stakeholder Classification by Physiographic Cluster (56 Cities, 16 Clusters) — {config.PROJECT_STUDY_YEAR}',
+        fontsize=12, fontweight='bold', y=0.98)
+    plt.tight_layout()
+    return fig
+
+
+# Keep plural alias for backward compatibility
+create_city_stakeholder_donuts = create_city_stakeholder_donut
+
+
+def create_collab_type_chart(
+    city_pivot,
+    cluster_pivot,
+    collab_types,
+    collab_colors,
+    figsize=(15, 10),
+    top_n_cities=None,
+    bar_height=0.68,
+):
+    """
+    Two-panel horizontal stacked bar chart: collaboration type mix of registered
+    stakeholders, shown per city (left) and per cluster (right).
+
+    Each bar represents one city or cluster.  Bar segments are broken into the
+    six collaboration types from ``9_reg_collab_type`` (multi-select: a single
+    respondent may appear in more than one segment).
+
+    Parameters
+    ----------
+    city_pivot : DataFrame
+        Wide-format table.  Index = city name.
+        Columns = collaboration type labels (must match ``collab_types``).
+        Values  = count of unique PIDs mentioning that type in that city.
+        Must also contain a ``'_total'`` column (row-sum of type counts).
+    cluster_pivot : DataFrame
+        Same structure but index = cluster label (e.g. 'C13').
+    collab_types : list[str]
+        Ordered list of collaboration type labels (controls stacking order).
+    collab_colors : dict[str, str]
+        ``{type_label: hex_colour}``.
+    figsize : tuple
+        Figure size in inches.  Default (15, 10).
+    top_n_cities : int or None
+        If set, display only the top N cities by total count.
+        None (default) displays all cities.
+    bar_height : float
+        Fractional height of each horizontal bar (0–1).  Default 0.68.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+    """
+    import matplotlib.patches as mpatches
+    import matplotlib.ticker as mticker
+
+    # ── Sort both pivots: descending total → largest at top of chart ──────────
+    city_s  = city_pivot.sort_values('_total', ascending=True)
+    if top_n_cities is not None:
+        city_s = city_s.tail(int(top_n_cities))
+    clust_s = cluster_pivot.sort_values('_total', ascending=True)
+
+    # ── Figure and axes ───────────────────────────────────────────────────────
+    n_city  = len(city_s)
+    n_clust = len(clust_s)
+
+    fig, axes = plt.subplots(
+        1, 2,
+        figsize=figsize,
+        gridspec_kw={'width_ratios': [max(0.55, n_city / (n_city + n_clust)),
+                                      min(0.45, n_clust / (n_city + n_clust))]},
+    )
+    fig.subplots_adjust(wspace=0.38, bottom=0.14)
+
+    ax_c, ax_k = axes
+
+    # ── Shared drawing helper ─────────────────────────────────────────────────
+    def _stacked_barh(ax, pivot, ylabel_fontsize=8, annot_min=2):
+        ys     = np.arange(len(pivot))
+        lefts  = np.zeros(len(pivot))
+
+        for ctype in collab_types:
+            if ctype not in pivot.columns:
+                continue
+            vals = pivot[ctype].values.astype(float)
+            color = collab_colors.get(ctype, '#888888')
+
+            bars = ax.barh(
+                ys, vals, left=lefts,
+                height=bar_height,
+                color=color,
+                edgecolor='white', linewidth=0.5,
+            )
+
+            # White value label inside segment when wide enough
+            for i, (v, l) in enumerate(zip(vals, lefts)):
+                if v >= annot_min:
+                    ax.text(
+                        l + v / 2, ys[i], str(int(v)),
+                        ha='center', va='center',
+                        fontsize=6.2, color='white', fontweight='bold',
+                        clip_on=True,
+                    )
+            lefts += vals
+
+        # 'n=…' total annotation at the right end of each bar
+        for i, tot in enumerate(pivot['_total']):
+            ax.text(
+                lefts[i] + 0.4, ys[i],
+                f'n={int(tot)}',
+                ha='left', va='center',
+                fontsize=6.8, color='#333333',
+            )
+
+        # Axis styling
+        ax.set_yticks(ys)
+        ax.set_yticklabels(pivot.index, fontsize=ylabel_fontsize)
+        ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True, nbins=6))
+        ax.set_xlabel('No. of registered stakeholders (multi-select mentions)',
+                      fontsize=8)
+        ax.spines[['top', 'right']].set_visible(False)
+        ax.xaxis.grid(True, alpha=0.25, linestyle='--', linewidth=0.5)
+        ax.set_axisbelow(True)
+        # Extend x-axis slightly to the right so 'n=…' labels fit
+        ax.set_xlim(0, lefts.max() * 1.18)
+
+    # ── Draw panels ───────────────────────────────────────────────────────────
+    _stacked_barh(ax_c, city_s,  ylabel_fontsize=7.5)
+    ax_c.set_title(
+        f'Per City  ({n_city} cities with registered stakeholders)',
+        fontsize=9.5, fontweight='bold', pad=7,
+    )
+
+    _stacked_barh(ax_k, clust_s, ylabel_fontsize=8.5)
+    ax_k.set_title(
+        f'Per Cluster  ({n_clust} clusters represented)',
+        fontsize=9.5, fontweight='bold', pad=7,
+    )
+
+    # ── Shared legend (bottom-centre) ─────────────────────────────────────────
+    legend_handles = [
+        mpatches.Patch(facecolor=collab_colors.get(ct, '#888'), edgecolor='#555',
+                       linewidth=0.5, label=ct)
+        for ct in collab_types
+    ]
+    fig.legend(
+        handles=legend_handles,
+        loc='lower center',
+        ncol=3,
+        fontsize=8,
+        frameon=True,
+        facecolor='white',
+        edgecolor='#bbbbbb',
+        bbox_to_anchor=(0.5, 0.01),
+        handlelength=1.4,
+        handleheight=1.0,
+        columnspacing=1.2,
+    )
+
+    fig.suptitle(
+        'Collaboration Type Mix — Registered Stakeholders  '
+        f'(n = 321 unique PIDs; 568 city-registration mentions)\n'
+        'Multi-select: one respondent may appear in more than one category per bar',
+        fontsize=10, fontweight='bold', y=1.01,
+    )
+
     return fig
 
 
@@ -5823,7 +6415,8 @@ def create_perception_chart_with_donuts(
     diurnal_total: pd.Series,
     min_participants: int = 2,
     figsize: tuple = (14, 5.5),
-    legend_scale: float = 1.2
+    legend_scale: float = 1.2,
+    peak_total: pd.Series = None,
 ) -> tuple:
     """
     Create combined bar charts with embedded donut charts for stakeholder perception.
@@ -5858,16 +6451,32 @@ def create_perception_chart_with_donuts(
         'Yes': '#d62728',           # Red - city has warmed
         'No': '#2ca02c',            # Green - city has not warmed
         "I'm not sure": '#7f7f7f',  # Gray - uncertain
-        'No response': '#c7c7c7'    # Light gray - no response
+        "I'd rather not say": '#c7c7c7'    # Light gray - no response
     }
     
     diurnal_colors = {
         'During the day': '#ff7f0e',  # Orange - daytime heat
         'At night': '#1f77b4',        # Blue - nighttime heat
         'Both': '#9467bd',            # Purple - both periods
-        'No response': '#c7c7c7'      # Light gray - no response
+        "I'd rather not say": '#c7c7c7'      # Light gray - no response
     }
-    
+
+    # Peak-season (Q58) — seasonal order, cool→hot palette; grey handling matches
+    # the warming/diurnal "not sure" / "rather not say" convention.
+    peak_colors = {
+        'December – February': '#4e79a7',  # Blue  - cool/harmattan
+        'March – May':         '#d62728',  # Red   - dry-season heat peak
+        'June – August':       '#2ca02c',  # Green - rainy season
+        'September – November': '#ff7f0e', # Orange- transition
+        'I am not sure':            '#7f7f7f',  # Gray  - uncertain
+        "I'd rather not say":       '#c7c7c7',  # Light gray - no response
+    }
+    peak_order = ['December – February', 'March – May',
+                  'June – August', 'September – November',
+                  'I am not sure', "I'd rather not say"]
+
+    _three = peak_total is not None   # 3-panel mode when peak data supplied
+
     # Sort cities by total participants
     city_order = unique_resp['matched_city_y'].value_counts().index.tolist()
     
@@ -5890,23 +6499,38 @@ def create_perception_chart_with_donuts(
     diurnal_filtered = diurnal_by_city.loc[cities_filtered]
     
     # Prepare data
-    warming_order = ['Yes', 'No', "I'm not sure", 'No response']
+    warming_order = ['Yes', 'No', "I'm not sure", "I'd rather not say"]
     warming_cols = [c for c in warming_order if c in warming_filtered.columns]
     warming_data = warming_filtered[warming_cols].fillna(0)
     
-    diurnal_order = ['During the day', 'At night', 'Both', 'No response']
+    diurnal_order = ['During the day', 'At night', 'Both', "I'd rather not say"]
     diurnal_cols = [c for c in diurnal_order if c in diurnal_filtered.columns]
     diurnal_data = diurnal_filtered[diurnal_cols].fillna(0)
-    
+
+    # Peak-season crosstab (Panel C) — only when 3-panel mode is requested
+    if _three and '58_temp_peak_city' in unique_resp.columns:
+        peak_by_city = pd.crosstab(
+            unique_resp['matched_city_y'],
+            unique_resp['58_temp_peak_city']
+        ).reindex(city_order)
+        peak_filtered = peak_by_city.loc[cities_filtered]
+        peak_cols = [c for c in peak_order if c in peak_filtered.columns]
+        peak_data = peak_filtered[peak_cols].fillna(0)
+    else:
+        _three = False   # missing column → fall back to 2-panel
+
     # =========================================================================
     # MAIN FIGURE: Bar charts with embedded donuts
     # =========================================================================
     fig = plt.figure(figsize=figsize)
-    gs = GridSpec(1, 2, figure=fig, width_ratios=[1, 1], wspace=0.08)
-    
+    _ncol = 3 if _three else 2
+    gs = GridSpec(1, _ncol, figure=fig,
+                  width_ratios=[1] * _ncol, wspace=0.08)
+
     # Create subplots for bars
     ax1 = fig.add_subplot(gs[0, 0])
     ax2 = fig.add_subplot(gs[0, 1])
+    ax3 = fig.add_subplot(gs[0, 2]) if _three else None
     
     # --- LEFT PANEL: City Warming Over 10 Years ---
     left = np.zeros(len(warming_data))
@@ -6020,65 +6644,99 @@ def create_perception_chart_with_donuts(
                title_fontsize=9*legend_scale, framealpha=0.95,
                bbox_to_anchor=(0.99, 0.01))
     
+    # --- PANEL C: Peak Season / Month (Q58) ---
+    if _three:
+        left = np.zeros(len(peak_data))
+        for col in peak_cols:
+            if col in peak_data.columns:
+                values = peak_data[col].values
+                ax3.barh(range(len(peak_data)), values, left=left,
+                         color=peak_colors.get(col, '#c7c7c7'), label=col, height=0.7)
+                left += values
+
+        ax3.set_yticks(range(len(peak_data)))
+        ax3.set_yticklabels([])  # shared with left panel
+        ax3.invert_yaxis()
+        ax3.set_xlabel('Number of Participants', fontsize=10)
+        ax3.set_title('C) Peak Heat Season', fontsize=11, fontweight='bold', loc='left')
+        ax3.set_xlim(0, 35)
+
+        for i, city in enumerate(peak_data.index):
+            total = peak_data.loc[city].sum()
+            ax3.text(total + 0.3, i, f'n={int(total)}', va='center', fontsize=8, color='gray')
+
+        peak_vals   = [peak_total.get(cat, 0) for cat in peak_order
+                       if peak_total.get(cat, 0) > 0]
+        peak_labels = [cat for cat in peak_order if peak_total.get(cat, 0) > 0]
+        peak_colors_list = [peak_colors.get(cat, '#c7c7c7') for cat in peak_labels]
+        total_peak = sum(peak_vals)
+
+        ax3_inset = ax3.inset_axes([0.58, 0.33, 0.40, 0.45])
+        _, _, autotexts3i = ax3_inset.pie(
+            peak_vals, labels=None, colors=peak_colors_list,
+            autopct=lambda p: f'{p:.0f}%' if p > 5 else '',
+            pctdistance=0.75, startangle=90,
+            wedgeprops=dict(width=0.45, edgecolor='white', linewidth=0.5)
+        )
+        for autotext in autotexts3i:
+            autotext.set_fontsize(7); autotext.set_color('white'); autotext.set_fontweight('bold')
+        ax3_inset.text(0, 0.05, f'{total_peak}', ha='center', va='center',
+                       fontsize=12, fontweight='bold', color='black')
+        ax3_inset.text(0, -0.18, 'Participants', ha='center', va='center',
+                       fontsize=6, fontweight='normal', color='#666666')
+        ax3_inset.set_title('Overall', fontsize=8, fontweight='bold', pad=2)
+
+        ax3.legend(loc='lower right', fontsize=8 * legend_scale, title='Response',
+                   title_fontsize=9 * legend_scale, framealpha=0.95,
+                   bbox_to_anchor=(0.99, 0.01))
+
     # Main title
-    fig.suptitle('Stakeholder Perception by City: Warming & Diurnal Heating',
-                 fontsize=13, fontweight='bold', y=0.98)
-    
+    _suptitle = ('Stakeholder Perception by City: Warming, Diurnal Heating & Peak Season'
+                 if _three else
+                 'Stakeholder Perception by City: Warming & Diurnal Heating')
+    fig.suptitle(_suptitle, fontsize=13, fontweight='bold', y=0.98)
+
     plt.tight_layout(rect=[0, 0, 1, 0.94])
     
     # =========================================================================
     # SEPARATE DONUTS FIGURE (for standalone use)
     # =========================================================================
-    fig2, (ax3, ax4) = plt.subplots(1, 2, figsize=(12, 5))
-    
-    # Left donut: Warming
-    wedges3, _, autotexts3 = ax3.pie(
-        warming_vals, labels=None, colors=warming_colors_list,
-        autopct=lambda p: f'{p:.1f}%' if p > 3 else '',
-        pctdistance=0.75, startangle=90,
-        wedgeprops=dict(width=0.5, edgecolor='white')
-    )
-    for autotext in autotexts3:
-        autotext.set_fontsize(10)
-        autotext.set_color('white')
-        autotext.set_fontweight('bold')
-    
-    # Center text: Number bigger/bolder, "Participants" smaller and gray
-    ax3.text(0, 0.06, f'{total_warming}', ha='center', va='center', 
-             fontsize=18, fontweight='bold', color='black')
-    ax3.text(0, -0.15, 'Participants', ha='center', va='center', 
-             fontsize=9, fontweight='normal', color='#666666')
-    ax3.set_title('A) Overall Warming Perception\n(Has city warmed in 10 years)', 
-                  fontsize=11, fontweight='bold')
-    # Legend with response title
-    ax3.legend(wedges3, warming_labels, 
-               loc='center left', bbox_to_anchor=(1.0, 0.5), fontsize=9*legend_scale,
-               title='Response', title_fontsize=10*legend_scale)
-    
-    # Right donut: Diurnal
-    wedges4, _, autotexts4 = ax4.pie(
-        diurnal_vals, labels=None, colors=diurnal_colors_list,
-        autopct=lambda p: f'{p:.1f}%' if p > 3 else '',
-        pctdistance=0.75, startangle=90,
-        wedgeprops=dict(width=0.5, edgecolor='white')
-    )
-    for autotext in autotexts4:
-        autotext.set_fontsize(10)
-        autotext.set_color('white')
-        autotext.set_fontweight('bold')
-    
-    # Center text: Number bigger/bolder, "Participants" smaller and gray
-    ax4.text(0, 0.06, f'{total_diurnal}', ha='center', va='center', 
-             fontsize=18, fontweight='bold', color='black')
-    ax4.text(0, -0.15, 'Participants', ha='center', va='center', 
-             fontsize=9, fontweight='normal', color='#666666')
-    ax4.set_title('B) Overall Diurnal Heating Pattern\n(When is heat most severe)', 
-                  fontsize=11, fontweight='bold')
-    # Legend with response title
-    ax4.legend(wedges4, diurnal_labels,
-               loc='center left', bbox_to_anchor=(1.0, 0.5), fontsize=9*legend_scale,
-               title='Response', title_fontsize=10*legend_scale)
-    
+    # Assemble one donut spec per response question (2 or 3 depending on mode)
+    _donut_specs = [
+        (warming_vals, warming_colors_list, warming_labels, total_warming,
+         'A) Overall Warming Perception\n(Has city warmed in 10 years)'),
+        (diurnal_vals, diurnal_colors_list, diurnal_labels, total_diurnal,
+         'B) Overall Diurnal Heating Pattern\n(When is heat most severe)'),
+    ]
+    if _three:
+        _donut_specs.append(
+            (peak_vals, peak_colors_list, peak_labels, total_peak,
+             'C) Overall Peak Heat Season\n(Hottest time of year)')
+        )
+
+    _nd = len(_donut_specs)
+    fig2, _axd = plt.subplots(1, _nd, figsize=(6 * _nd, 5))
+    if _nd == 1:
+        _axd = [_axd]
+
+    for _axi, (_vals, _cols, _lbls, _tot, _title) in zip(_axd, _donut_specs):
+        _wedges, _, _autot = _axi.pie(
+            _vals, labels=None, colors=_cols,
+            autopct=lambda p: f'{p:.1f}%' if p > 3 else '',
+            pctdistance=0.75, startangle=90,
+            wedgeprops=dict(width=0.5, edgecolor='white')
+        )
+        for _at in _autot:
+            _at.set_fontsize(10); _at.set_color('white'); _at.set_fontweight('bold')
+        _axi.text(0, 0.06, f'{_tot}', ha='center', va='center',
+                  fontsize=18, fontweight='bold', color='black')
+        _axi.text(0, -0.15, 'Participants', ha='center', va='center',
+                  fontsize=9, fontweight='normal', color='#666666')
+        _axi.set_title(_title, fontsize=11, fontweight='bold')
+        _axi.legend(_wedges, _lbls, loc='center left', bbox_to_anchor=(1.0, 0.5),
+                    fontsize=9 * legend_scale, title='Response',
+                    title_fontsize=10 * legend_scale)
+
     fig2.suptitle('Stakeholder Perception: Overall Summaries\n(Workshop Participants, Unique Responses)',
                   fontsize=13, fontweight='bold', y=1.02)
     plt.tight_layout()
@@ -6086,8 +6744,683 @@ def create_perception_chart_with_donuts(
     print(" Perception charts created successfully!")
     print(f"   - Main chart with embedded donuts")
     print(f"   - Separate standalone donut chart")
-    
+
     return fig, fig2
+
+
+# =============================================================================
+# CLUSTER-LEVEL STAKEHOLDER FUNCTIONS
+# (aggregate city-level results to climate-cluster level)
+# =============================================================================
+
+def create_cluster_stakeholder_map(
+    cluster_summary,
+    cluster_workshop_prof,
+    boundary_gdf,
+    cities_gdf,
+    cluster25_colors=None,
+    profession_colors=None,
+    show_map_panel=True,
+    figsize=(11.7, 5.85)
+):
+    """
+    Cluster-level stakeholder distribution: optional Nigeria map (cities coloured by
+    cluster) + stacked horizontal bar chart of workshop attendees by profession per cluster.
+
+    Parameters
+    ----------
+    cluster_summary : DataFrame
+        Columns: Cluster25, n_cities, cities_with_reg, cities_with_att,
+                 registered_count, attended_count
+    cluster_workshop_prof : DataFrame
+        Columns: Cluster25, profession, count
+    boundary_gdf : GeoDataFrame
+        Nigeria national boundary polygon
+    cities_gdf : GeoDataFrame
+        Target city points; must have 'Cluster25' column for colour coding
+    cluster25_colors : dict, optional
+        {cluster_id: hex_color}; falls back to tab10 if None
+    profession_colors : dict, optional
+        {profession_name: hex_color}; falls back to tab20 if None.
+        Pass the same dict used in §5A for consistent colours across figures.
+    show_map_panel : bool, optional
+        When True (default), shows the Nigeria cluster map in the left panel.
+        When False, shows only the bar chart (single-panel figure).
+    figsize : tuple
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+    """
+    import matplotlib.patches as mpatches
+    from matplotlib.lines import Line2D as _SLn
+
+    all_clusters = sorted(cluster_summary['Cluster25'].unique())
+    if cluster25_colors is None:
+        cmap = plt.get_cmap('tab10')
+        cluster25_colors = {c: cmap(i / max(len(all_clusters) - 1, 1))
+                            for i, c in enumerate(all_clusters)}
+
+    fig = plt.figure(figsize=figsize)
+    if show_map_panel:
+        gs = GridSpec(1, 2, figure=fig, width_ratios=[0.55, 0.45], wspace=0.28)
+        ax_map = fig.add_subplot(gs[0])
+        ax_bar = fig.add_subplot(gs[1])
+    else:
+        ax_bar = fig.add_subplot(1, 1, 1)
+        ax_map = None
+
+    # =========================================================================
+    # MAP PANEL (optional)
+    # =========================================================================
+    if show_map_panel and ax_map is not None:
+        boundary_gdf.plot(ax=ax_map, facecolor='#f5f5f5', edgecolor='#555555',
+                          linewidth=0.8)
+
+        if 'Cluster25' in cities_gdf.columns:
+            for cluster, grp in cities_gdf.groupby('Cluster25'):
+                color = cluster25_colors.get(cluster, '#aaaaaa')
+                ax_map.scatter(grp.geometry.x, grp.geometry.y,
+                               s=28, color=color, alpha=0.9,
+                               edgecolors='white', linewidths=0.4, zorder=3)
+        else:
+            ax_map.scatter(cities_gdf.geometry.x, cities_gdf.geometry.y,
+                           s=20, color='#888888', alpha=0.8, zorder=3)
+
+        ax_map.annotate('', xy=(0.955, 0.920), xytext=(0.955, 0.875),
+                        xycoords='axes fraction',
+                        arrowprops=dict(arrowstyle='->', lw=1.5, color='black'))
+        ax_map.text(0.955, 0.933, 'N', transform=ax_map.transAxes,
+                    fontsize=9, fontweight='bold', ha='center', va='bottom')
+
+        sb_x0, sb_x1, sb_y = 0.05, 0.20, 0.05
+        ax_map.add_line(_SLn([sb_x0, sb_x1], [sb_y, sb_y],
+                             transform=ax_map.transAxes, color='black', lw=1.5))
+        for xp in [sb_x0, sb_x1]:
+            ax_map.add_line(_SLn([xp, xp], [sb_y - 0.01, sb_y + 0.01],
+                                  transform=ax_map.transAxes, color='black', lw=1.0))
+        ax_map.text((sb_x0 + sb_x1) / 2, sb_y - 0.025, '~500 km',
+                    transform=ax_map.transAxes, fontsize=5.5, ha='center', va='top')
+
+        ax_map.set_xlabel('Longitude (°E)', fontsize=8)
+        ax_map.set_ylabel('Latitude (°N)', fontsize=8)
+        ax_map.tick_params(labelsize=7)
+        ax_map.grid(True, alpha=0.2, linestyle='--', linewidth=0.5)
+        ax_map.set_aspect('equal')
+        ax_map.set_title('A', fontsize=10, fontweight='bold', pad=8)
+
+        legend_handles = [
+            mpatches.Patch(facecolor=cluster25_colors.get(c, '#aaaaaa'),
+                           label=f'Cluster {c}', linewidth=0)
+            for c in all_clusters
+            if c in cluster_summary['Cluster25'].values
+        ]
+        ax_map.legend(handles=legend_handles, loc='lower right', fontsize=5.5,
+                      title='Cluster', title_fontsize=6.5, framealpha=0.92,
+                      edgecolor='black', ncol=2)
+
+    # =========================================================================
+    # BAR CHART PANEL
+    # =========================================================================
+    cluster_totals = (cluster_workshop_prof
+                      .groupby('Cluster25')['count'].sum()
+                      .sort_values(ascending=True))
+    cluster_list = cluster_totals.index.tolist()
+    professions = sorted(cluster_workshop_prof['profession'].unique())
+
+    data_matrix = pd.DataFrame(0, index=cluster_list, columns=professions)
+    for _, row in cluster_workshop_prof.iterrows():
+        if row['Cluster25'] in data_matrix.index:
+            data_matrix.loc[row['Cluster25'], row['profession']] = row['count']
+
+    # Use profession_colors when provided, otherwise fall back to tab20
+    _bar_fallback = plt.get_cmap('tab20').colors
+    left = np.zeros(len(cluster_list))
+    for pi, prof in enumerate(professions):
+        vals = data_matrix[prof].values
+        if vals.sum() > 0:
+            if profession_colors is not None and prof in profession_colors:
+                bar_color = profession_colors[prof]
+            else:
+                bar_color = _bar_fallback[pi % len(_bar_fallback)]
+            ax_bar.barh([f'Cluster {c}' for c in cluster_list], vals, left=left,
+                        color=bar_color, edgecolor='white', linewidth=0.5, label=prof)
+            left += vals
+
+    for i, cl in enumerate(cluster_list):
+        total = cluster_totals[cl]
+        if total > 0:
+            ax_bar.text(total + 0.2, i, f'{int(total)}',
+                        va='center', ha='left', fontsize=6.5, fontweight='bold')
+
+    ax_bar.set_xlabel('Workshop Attendees', fontsize=8)
+    bar_title = 'B' if show_map_panel else 'Workshop Attendees by Profession per Cluster'
+    ax_bar.set_title(bar_title, fontsize=10, fontweight='bold', pad=8)
+    ax_bar.tick_params(axis='both', labelsize=7)
+    ax_bar.grid(axis='x', alpha=0.3, linestyle='--', linewidth=0.5)
+    handles, labels = ax_bar.get_legend_handles_labels()
+    if handles:
+        ax_bar.legend(handles, labels, loc='lower right', fontsize=5,
+                      title='Profession', title_fontsize=6,
+                      framealpha=0.95, edgecolor='black', ncol=1)
+
+    fig.suptitle(
+        f'Stakeholder Distribution by Climate Cluster ({config.PROJECT_STUDY_YEAR})',
+        fontsize=11, fontweight='bold', y=0.98)
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+
+    print("✅ Cluster stakeholder map created!")
+    return fig
+
+
+def create_cluster_classification_donut(
+    cluster_summary,
+    cluster25_colors=None,
+    figsize=(8, 8),
+    title=None
+):
+    """
+    3-ring donut showing cluster-level city engagement funnel.
+
+    Ring 1 (inner):  N target cities per cluster (coloured by cluster)
+    Ring 2 (middle): Cities with ≥1 registered stakeholder vs. none
+    Ring 3 (outer):  Cities with ≥1 workshop attendee vs. not attended
+                     (N/A segment where no registration exists)
+
+    Parameters
+    ----------
+    cluster_summary : DataFrame
+        Columns: Cluster25, n_cities, cities_with_reg, cities_with_att
+    cluster25_colors : dict, optional
+    figsize : tuple
+    title : str, optional
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+    """
+    import matplotlib.patches as mpatches
+
+    clusters = cluster_summary['Cluster25'].tolist()
+    if cluster25_colors is None:
+        cmap = plt.get_cmap('tab10')
+        cluster25_colors = {c: cmap(i / max(len(clusters) - 1, 1))
+                            for i, c in enumerate(clusters)}
+
+    total_cities = int(cluster_summary['n_cities'].sum())
+
+    ring1_sizes, ring1_colors, ring1_labels = [], [], []
+    ring2_sizes, ring2_colors, ring2_labels = [], [], []
+    ring3_sizes, ring3_colors, ring3_labels = [], [], []
+
+    for _, row in cluster_summary.iterrows():
+        cl = row['Cluster25']
+        n = int(row['n_cities'])
+        with_reg = int(row['cities_with_reg'])
+        no_reg = n - with_reg
+        with_att = int(row['cities_with_att'])
+        reg_no_att = with_reg - with_att
+
+        base = cluster25_colors.get(cl, '#aaaaaa')
+
+        ring1_sizes.append(n)
+        ring1_colors.append(base)
+        ring1_labels.append(str(cl))
+
+        ring2_sizes += [with_reg, no_reg]
+        ring2_colors += [base, '#d5d8dc']
+        ring2_labels += ['Reg.', 'No Reg.']
+
+        ring3_sizes += [with_att, reg_no_att, no_reg]
+        ring3_colors += [base, '#aaaaaa', '#e8e8e8']
+        ring3_labels += ['Attended', 'Not Att.', 'N/A']
+
+    fig, ax = plt.subplots(figsize=figsize, subplot_kw=dict(aspect='equal'))
+
+    wedges_r1, _ = ax.pie(
+        ring1_sizes, radius=0.50, colors=ring1_colors,
+        labels=None, startangle=90,
+        wedgeprops=dict(width=0.15, edgecolor='white', linewidth=2.0))
+    for wedge, label, count in zip(wedges_r1, ring1_labels, ring1_sizes):
+        ang = (wedge.theta2 + wedge.theta1) / 2
+        x = 0.425 * np.cos(np.deg2rad(ang))
+        y = 0.425 * np.sin(np.deg2rad(ang))
+        ax.text(x, y, f'{label}\n({count})', ha='center', va='center',
+                fontsize=7, fontweight='bold', color='black')
+
+    wedges_r2, _ = ax.pie(
+        ring2_sizes, radius=0.65, colors=ring2_colors,
+        labels=None, startangle=90,
+        wedgeprops=dict(width=0.15, edgecolor='white', linewidth=1.5))
+    for wedge, label, count in zip(wedges_r2, ring2_labels, ring2_sizes):
+        if count > 0:
+            ang = (wedge.theta2 + wedge.theta1) / 2
+            x = 0.575 * np.cos(np.deg2rad(ang))
+            y = 0.575 * np.sin(np.deg2rad(ang))
+            ax.text(x, y, f'{label}\n({count})', ha='center', va='center',
+                    fontsize=7, fontweight='normal', color='black')
+
+    wedges_r3, _ = ax.pie(
+        ring3_sizes, radius=0.80, colors=ring3_colors,
+        labels=None, startangle=90,
+        wedgeprops=dict(width=0.15, edgecolor='white', linewidth=1.0))
+    for wedge, label, count in zip(wedges_r3, ring3_labels, ring3_sizes):
+        if count > 0:
+            ang = (wedge.theta2 + wedge.theta1) / 2
+            x = 0.90 * np.cos(np.deg2rad(ang))
+            y = 0.90 * np.sin(np.deg2rad(ang))
+            if label == 'N/A':
+                wedge.set_hatch('///')
+                wedge.set_edgecolor('grey')
+                ax.text(x, y, f'{label}\n({count})', ha='center', va='center',
+                        fontsize=7, fontweight='normal', color='black',
+                        bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
+                                  edgecolor='grey', alpha=0.8))
+            else:
+                ax.text(x, y, f'{label}\n({count})', ha='center', va='center',
+                        fontsize=7, fontweight='normal', color='black')
+
+    centre_circle = plt.Circle((0, 0), 0.35, fc='white', linewidth=0)
+    ax.add_artist(centre_circle)
+    ax.text(0, 0.08, f'{total_cities}', ha='center', va='center',
+            fontsize=28, fontweight='bold', color='black')
+    ax.text(0, -0.06, 'Target Cities', ha='center', va='center',
+            fontsize=12, fontweight='normal', color='black')
+    ax.text(0, -0.16, 'across clusters', ha='center', va='center',
+            fontsize=9, fontweight='normal', color='#666666')
+    ax.axis('equal')
+
+    if title is None:
+        title = (f'Cluster Engagement Funnel: Registration & Attendance '
+                 f'({config.PROJECT_STUDY_YEAR})')
+    fig.suptitle(title, fontsize=13, fontweight='bold', y=0.98)
+
+    legend_elements = [
+        mpatches.Patch(facecolor='white', edgecolor='black', linewidth=1,
+                       label='Ring 1: Target cities per climate cluster'),
+        mpatches.Patch(facecolor='white', edgecolor='black', linewidth=1,
+                       label='Ring 2: Cities with registered stakeholders'),
+        mpatches.Patch(facecolor='white', edgecolor='black', linewidth=1,
+                       label='Ring 3: Cities with workshop attendees'),
+        mpatches.Patch(facecolor='#e8e8e8', edgecolor='grey', hatch='///',
+                       label='N/A: no registered stakeholders'),
+    ]
+    ax.legend(handles=legend_elements, loc='upper center', fontsize=7.5,
+              frameon=True, facecolor='white', edgecolor='black',
+              framealpha=0.9, bbox_to_anchor=(0.5, -0.08), ncol=2)
+
+    plt.tight_layout()
+    print("✅ Cluster classification donut created!")
+    return fig
+
+
+def create_cluster_perception_chart(
+    warming_by_cluster,
+    diurnal_by_cluster,
+    warming_total,
+    diurnal_total,
+    cluster25_colors=None,
+    figsize=(14, 5.5),
+    legend_scale=1.0,
+    peak_by_cluster=None,
+    peak_total=None,
+):
+    """
+    Cluster-level perception analysis: warming (Q61) + diurnal heat (Q60) stacked bars
+    with embedded overall donut insets.
+
+    Mirrors create_perception_chart_with_donuts but rows = climate clusters.
+
+    Parameters
+    ----------
+    warming_by_cluster : DataFrame
+        crosstab(Cluster25, '61_temp_increase_10yrs')
+    diurnal_by_cluster : DataFrame
+        crosstab(Cluster25, '60_diurnal_severity_heat')
+    warming_total : Series
+        Overall warming response counts
+    diurnal_total : Series
+        Overall diurnal response counts
+    cluster25_colors : dict, optional
+        {cluster_id: hex_color}; used for y-tick label colouring
+    figsize : tuple
+    legend_scale : float
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+    fig2 : matplotlib.figure.Figure  (standalone donut summary)
+    """
+    warming_colors = {
+        'Yes': '#d62728',
+        'No': '#2ca02c',
+        "I'm not sure": '#7f7f7f',
+        "I'd rather not say": '#c7c7c7',
+    }
+    diurnal_colors = {
+        'During the day': '#ff7f0e',
+        'At night': '#1f77b4',
+        'Both': '#9467bd',
+        "I'd rather not say": '#c7c7c7',
+    }
+    peak_colors = {
+        'December – February': '#4e79a7',
+        'March – May':         '#d62728',
+        'June – August':       '#2ca02c',
+        'September – November': '#ff7f0e',
+        'I am not sure':            '#7f7f7f',
+        "I'd rather not say":       '#c7c7c7',
+    }
+
+    warming_order  = ['Yes', 'No', "I'm not sure", "I'd rather not say"]
+    diurnal_order  = ['During the day', 'At night', 'Both', "I'd rather not say"]
+    peak_order     = ['December – February', 'March – May',
+                      'June – August', 'September – November',
+                      'I am not sure', "I'd rather not say"]
+
+    warming_cols = [c for c in warming_order if c in warming_by_cluster.columns]
+    diurnal_cols = [c for c in diurnal_order if c in diurnal_by_cluster.columns]
+
+    warming_data = warming_by_cluster[warming_cols].fillna(0)
+    diurnal_data = diurnal_by_cluster[diurnal_cols].fillna(0)
+
+    _three = peak_by_cluster is not None and peak_total is not None
+    if _three:
+        peak_cols = [c for c in peak_order if c in peak_by_cluster.columns]
+        peak_data = peak_by_cluster[peak_cols].fillna(0)
+
+    cluster_labels = [f'Cluster {c}' for c in warming_data.index]
+
+    # =========================================================================
+    # MAIN FIGURE
+    # =========================================================================
+    fig = plt.figure(figsize=figsize)
+    _ncol = 3 if _three else 2
+    gs = GridSpec(1, _ncol, figure=fig, width_ratios=[1] * _ncol, wspace=0.08)
+    ax1 = fig.add_subplot(gs[0, 0])
+    ax2 = fig.add_subplot(gs[0, 1])
+    ax3 = fig.add_subplot(gs[0, 2]) if _three else None
+
+    # --- LEFT: Warming ---
+    left = np.zeros(len(warming_data))
+    for col in warming_cols:
+        values = warming_data[col].values
+        ax1.barh(range(len(warming_data)), values, left=left,
+                 color=warming_colors.get(col, '#c7c7c7'), label=col, height=0.65)
+        left += values
+
+    ax1.set_yticks(range(len(warming_data)))
+    ax1.set_yticklabels(cluster_labels, fontsize=9)
+    ax1.set_xlabel('Number of Participants', fontsize=10)
+    ax1.set_title('A) City Warming Over 10 Years (by Cluster)',
+                  fontsize=11, fontweight='bold', loc='left')
+    ax1.invert_yaxis()
+    max_w = int(warming_data.sum(axis=1).max()) + 5
+    ax1.set_xlim(0, max_w)
+
+    for i, cl in enumerate(warming_data.index):
+        total = warming_data.loc[cl].sum()
+        ax1.text(total + 0.3, i, f'n={int(total)}', va='center', fontsize=8, color='gray')
+
+    # Donut inset (warming overall)
+    warming_vals   = [warming_total.get(cat, 0) for cat in warming_order
+                      if warming_total.get(cat, 0) > 0]
+    warming_lbls_d = [cat for cat in warming_order if warming_total.get(cat, 0) > 0]
+    warming_cols_d = [warming_colors[c] for c in warming_lbls_d]
+    total_warming  = sum(warming_vals)
+
+    ax1_ins = ax1.inset_axes([0.58, 0.33, 0.40, 0.45])
+    wedges, _, autotexts = ax1_ins.pie(
+        warming_vals, labels=None, colors=warming_cols_d,
+        autopct=lambda p: f'{p:.0f}%' if p > 5 else '',
+        pctdistance=0.75, startangle=90,
+        wedgeprops=dict(width=0.45, edgecolor='white', linewidth=0.5))
+    for at in autotexts:
+        at.set_fontsize(7); at.set_color('white'); at.set_fontweight('bold')
+    ax1_ins.text(0, 0.05, f'{total_warming}', ha='center', va='center',
+                 fontsize=12, fontweight='bold', color='black')
+    ax1_ins.text(0, -0.18, 'Participants', ha='center', va='center',
+                 fontsize=6, color='#666666')
+    ax1_ins.set_title('Overall', fontsize=8, fontweight='bold', pad=2)
+
+    ax1.legend(loc='lower right', fontsize=8 * legend_scale, title='Response',
+               title_fontsize=9 * legend_scale, framealpha=0.95,
+               bbox_to_anchor=(0.99, 0.01))
+
+    # --- RIGHT: Diurnal ---
+    left = np.zeros(len(diurnal_data))
+    for col in diurnal_cols:
+        values = diurnal_data[col].values
+        ax2.barh(range(len(diurnal_data)), values, left=left,
+                 color=diurnal_colors.get(col, '#c7c7c7'), label=col, height=0.65)
+        left += values
+
+    ax2.set_yticks(range(len(diurnal_data)))
+    ax2.set_yticklabels([])
+    ax2.set_xlabel('Number of Participants', fontsize=10)
+    ax2.set_title('B) Timing of Most Severe Heat (by Cluster)',
+                  fontsize=11, fontweight='bold', loc='left')
+    ax2.invert_yaxis()
+    max_d = int(diurnal_data.sum(axis=1).max()) + 5
+    ax2.set_xlim(0, max_d)
+
+    for i, cl in enumerate(diurnal_data.index):
+        total = diurnal_data.loc[cl].sum()
+        ax2.text(total + 0.3, i, f'n={int(total)}', va='center', fontsize=8, color='gray')
+
+    # Donut inset (diurnal overall)
+    diurnal_vals   = [diurnal_total.get(cat, 0) for cat in diurnal_order
+                      if diurnal_total.get(cat, 0) > 0]
+    diurnal_lbls_d = [cat for cat in diurnal_order if diurnal_total.get(cat, 0) > 0]
+    diurnal_cols_d = [diurnal_colors[c] for c in diurnal_lbls_d]
+    total_diurnal  = sum(diurnal_vals)
+
+    ax2_ins = ax2.inset_axes([0.58, 0.33, 0.40, 0.45])
+    wedges2, _, autotexts2 = ax2_ins.pie(
+        diurnal_vals, labels=None, colors=diurnal_cols_d,
+        autopct=lambda p: f'{p:.0f}%' if p > 5 else '',
+        pctdistance=0.75, startangle=90,
+        wedgeprops=dict(width=0.45, edgecolor='white', linewidth=0.5))
+    for at in autotexts2:
+        at.set_fontsize(7); at.set_color('white'); at.set_fontweight('bold')
+    ax2_ins.text(0, 0.05, f'{total_diurnal}', ha='center', va='center',
+                 fontsize=12, fontweight='bold', color='black')
+    ax2_ins.text(0, -0.18, 'Participants', ha='center', va='center',
+                 fontsize=6, color='#666666')
+    ax2_ins.set_title('Overall', fontsize=8, fontweight='bold', pad=2)
+
+    ax2.legend(loc='lower right', fontsize=8 * legend_scale, title='Response',
+               title_fontsize=9 * legend_scale, framealpha=0.95,
+               bbox_to_anchor=(0.99, 0.01))
+
+    # --- PANEL C: Peak Season / Month (Q58) ---
+    if _three:
+        left = np.zeros(len(peak_data))
+        for col in peak_cols:
+            values = peak_data[col].values
+            ax3.barh(range(len(peak_data)), values, left=left,
+                     color=peak_colors.get(col, '#c7c7c7'), label=col, height=0.65)
+            left += values
+
+        ax3.set_yticks(range(len(peak_data)))
+        ax3.set_yticklabels([])
+        ax3.set_xlabel('Number of Participants', fontsize=10)
+        ax3.set_title('C) Peak Heat Season (by Cluster)',
+                      fontsize=11, fontweight='bold', loc='left')
+        ax3.invert_yaxis()
+        max_p = int(peak_data.sum(axis=1).max()) + 5
+        ax3.set_xlim(0, max_p)
+
+        for i, cl in enumerate(peak_data.index):
+            total = peak_data.loc[cl].sum()
+            ax3.text(total + 0.3, i, f'n={int(total)}', va='center', fontsize=8, color='gray')
+
+        peak_vals   = [peak_total.get(cat, 0) for cat in peak_order
+                       if peak_total.get(cat, 0) > 0]
+        peak_lbls_d = [cat for cat in peak_order if peak_total.get(cat, 0) > 0]
+        peak_cols_d = [peak_colors.get(c, '#c7c7c7') for c in peak_lbls_d]
+        total_peak  = sum(peak_vals)
+
+        ax3_ins = ax3.inset_axes([0.58, 0.33, 0.40, 0.45])
+        _, _, autotexts3i = ax3_ins.pie(
+            peak_vals, labels=None, colors=peak_cols_d,
+            autopct=lambda p: f'{p:.0f}%' if p > 5 else '',
+            pctdistance=0.75, startangle=90,
+            wedgeprops=dict(width=0.45, edgecolor='white', linewidth=0.5))
+        for at in autotexts3i:
+            at.set_fontsize(7); at.set_color('white'); at.set_fontweight('bold')
+        ax3_ins.text(0, 0.05, f'{total_peak}', ha='center', va='center',
+                     fontsize=12, fontweight='bold', color='black')
+        ax3_ins.text(0, -0.18, 'Participants', ha='center', va='center',
+                     fontsize=6, color='#666666')
+        ax3_ins.set_title('Overall', fontsize=8, fontweight='bold', pad=2)
+
+        ax3.legend(loc='lower right', fontsize=8 * legend_scale, title='Response',
+                   title_fontsize=9 * legend_scale, framealpha=0.95,
+                   bbox_to_anchor=(0.99, 0.01))
+
+    _suptitle = ('Stakeholder Perception by Climate Cluster: '
+                 'Warming, Diurnal Heating & Peak Season' if _three else
+                 'Stakeholder Perception by Climate Cluster: Warming & Diurnal Heating')
+    fig.suptitle(_suptitle, fontsize=13, fontweight='bold', y=0.98)
+    plt.tight_layout(rect=[0, 0, 1, 0.94])
+
+    # =========================================================================
+    # SEPARATE DONUTS FIGURE (standalone)
+    # =========================================================================
+    _donut_specs = [
+        (warming_vals, warming_cols_d, warming_lbls_d, total_warming,
+         'A) Overall Warming Perception\n(Has city warmed in 10 years)'),
+        (diurnal_vals, diurnal_cols_d, diurnal_lbls_d, total_diurnal,
+         'B) Overall Diurnal Heating Pattern\n(When is heat most severe)'),
+    ]
+    if _three:
+        _donut_specs.append(
+            (peak_vals, peak_cols_d, peak_lbls_d, total_peak,
+             'C) Overall Peak Heat Season\n(Hottest time of year)')
+        )
+
+    _nd = len(_donut_specs)
+    fig2, _axd = plt.subplots(1, _nd, figsize=(6 * _nd, 5))
+    if _nd == 1:
+        _axd = [_axd]
+
+    for _axi, (_vals, _cols, _lbls, _tot, _title) in zip(_axd, _donut_specs):
+        _wedges, _, _autot = _axi.pie(
+            _vals, labels=None, colors=_cols,
+            autopct=lambda p: f'{p:.1f}%' if p > 3 else '',
+            pctdistance=0.75, startangle=90,
+            wedgeprops=dict(width=0.5, edgecolor='white'))
+        for _at in _autot:
+            _at.set_fontsize(10); _at.set_color('white'); _at.set_fontweight('bold')
+        _axi.text(0, 0.06, f'{_tot}', ha='center', va='center',
+                  fontsize=18, fontweight='bold', color='black')
+        _axi.text(0, -0.15, 'Participants', ha='center', va='center',
+                  fontsize=9, color='#666666')
+        _axi.set_title(_title, fontsize=11, fontweight='bold')
+        _axi.legend(_wedges, _lbls, loc='center left', bbox_to_anchor=(1.0, 0.5),
+                    fontsize=9 * legend_scale, title='Response',
+                    title_fontsize=10 * legend_scale)
+
+    fig2.suptitle(
+        'Stakeholder Perception: Overall Summaries (Cluster Aggregation)',
+        fontsize=13, fontweight='bold', y=1.02)
+    plt.tight_layout()
+
+    print("✅ Cluster perception charts created!")
+    print("   - Main chart with embedded donuts (by cluster)")
+    print("   - Separate standalone donut chart")
+
+    return fig, fig2
+
+
+def create_national_perception_donuts(
+    warming_total,
+    diurnal_total,
+    peak_total,
+    legend_scale: float = 1.2,
+    figsize: tuple = None,
+    title: str = 'National Stakeholder Perception: Overall Summaries',
+):
+    """
+    National-level perception summary: three large donuts (Warming · Diurnal ·
+    Peak Season) side-by-side, pooling every participant.
+
+    Uses the identical colour logic, seasonal ordering and "not sure / rather
+    not say" handling as create_perception_chart_with_donuts (city) and
+    create_cluster_perception_chart (cluster), so all three levels match.
+
+    Parameters
+    ----------
+    warming_total, diurnal_total, peak_total : pd.Series
+        Overall response counts (index = response category) for Q61 / Q60 / Q58.
+    legend_scale : float
+    figsize : tuple, optional
+        Defaults to (18, 5) — three donuts.
+    title : str
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+    """
+    warming_colors = {
+        'Yes': '#d62728', 'No': '#2ca02c',
+        "I'm not sure": '#7f7f7f', "I'd rather not say": '#c7c7c7',
+    }
+    diurnal_colors = {
+        'During the day': '#ff7f0e', 'At night': '#1f77b4',
+        'Both': '#9467bd', "I'd rather not say": '#c7c7c7',
+    }
+    peak_colors = {
+        'December – February': '#4e79a7', 'March – May': '#d62728',
+        'June – August': '#2ca02c', 'September – November': '#ff7f0e',
+        'I am not sure': '#7f7f7f', "I'd rather not say": '#c7c7c7',
+    }
+    warming_order = ['Yes', 'No', "I'm not sure", "I'd rather not say"]
+    diurnal_order = ['During the day', 'At night', 'Both', "I'd rather not say"]
+    peak_order    = ['December – February', 'March – May', 'June – August',
+                     'September – November', 'I am not sure', "I'd rather not say"]
+
+    specs = [
+        (warming_total, warming_order, warming_colors,
+         'A) Overall Warming Perception\n(Has city warmed in 10 years)'),
+        (diurnal_total, diurnal_order, diurnal_colors,
+         'B) Overall Diurnal Heating Pattern\n(When is heat most severe)'),
+        (peak_total, peak_order, peak_colors,
+         'C) Overall Peak Heat Season\n(Hottest time of year)'),
+    ]
+
+    if figsize is None:
+        figsize = (18, 5)
+    fig, axes = plt.subplots(1, 3, figsize=figsize)
+
+    for ax, (total, order, cmap, panel_title) in zip(axes, specs):
+        vals   = [total.get(cat, 0) for cat in order if total.get(cat, 0) > 0]
+        labels = [cat for cat in order if total.get(cat, 0) > 0]
+        colors = [cmap.get(c, '#c7c7c7') for c in labels]
+        grand  = sum(vals)
+
+        wedges, _, autot = ax.pie(
+            vals, labels=None, colors=colors,
+            autopct=lambda p: f'{p:.1f}%' if p > 3 else '',
+            pctdistance=0.75, startangle=90,
+            wedgeprops=dict(width=0.5, edgecolor='white'))
+        for at in autot:
+            at.set_fontsize(10); at.set_color('white'); at.set_fontweight('bold')
+        ax.text(0, 0.06, f'{grand}', ha='center', va='center',
+                fontsize=18, fontweight='bold', color='black')
+        ax.text(0, -0.15, 'Participants', ha='center', va='center',
+                fontsize=9, color='#666666')
+        ax.set_title(panel_title, fontsize=11, fontweight='bold')
+        ax.legend(wedges, labels, loc='center left', bbox_to_anchor=(1.0, 0.5),
+                  fontsize=9 * legend_scale, title='Response',
+                  title_fontsize=10 * legend_scale)
+
+    fig.suptitle(title, fontsize=13, fontweight='bold', y=1.02)
+    plt.tight_layout()
+
+    print("✅ National perception donuts created (warming · diurnal · peak season)")
+    return fig
 
 
 def create_persistent_heat_event_summary_chart(cities_data, base_dir=None, study_year=2024, dpi=300):
@@ -12102,17 +13435,29 @@ _MONTH_NAMES_SHORT = {1: 'Jan', 2: 'Feb', 3: 'Mar', 4: 'Apr',
 
 
 def create_single_page_heatmap(data, mk_sig, lst_time, time_dim,
-                               fig_w, fig_h, output_path, dpi=300):
-    """Single-page LST heatmap with Mann-Kendall  markers.
+                               fig_w, fig_h, output_path, dpi=300,
+                               pre_sorted=False, separator_after_rows=None,
+                               cluster_lookup=None):
+    """Single-page LST heatmap with Mann-Kendall trend markers.
 
     Parameters
     ----------
-    data : pd.DataFrame   (cities × time-periods)
-    mk_sig : dict         {city: bool}
-    lst_time : str        'day' | 'night'
-    time_dim : str        'year' | 'month'
-    fig_w, fig_h : float  figure size in inches
-    output_path : str     PNG output path (PDF saved alongside)
+    data : pd.DataFrame        (cities × time-periods)
+    mk_sig : dict              {city: (trend_str, p_val)} — trend_str is
+                               'increasing', 'decreasing', or ''; also
+                               accepts legacy bool or bare string values.
+    lst_time : str             'day' | 'night'
+    time_dim : str             'year' | 'month'
+    fig_w, fig_h : float       figure size in inches
+    output_path : str          SVG output path (PDF saved alongside)
+    pre_sorted : bool          if True, skip internal mean-LST sort
+    separator_after_rows : list[int] | None
+                               0-based row indices after which a thick
+                               horizontal separator line is drawn
+                               (e.g. [9, 10] draws lines after rows 9 and 10)
+    cluster_lookup : dict | None
+                               {city_name: cluster_int} — when provided, appends
+                               '[C{N}]' to each city row label (yearly heatmaps only)
     """
     import os as _os
     from pathlib import Path as _Path
@@ -12125,15 +13470,66 @@ def create_single_page_heatmap(data, mk_sig, lst_time, time_dim,
         return
 
     df = data.copy()
-    df['_mean'] = df.mean(axis=1)
-    df = df.sort_values('_mean', ascending=False).drop('_mean', axis=1)
+    if not pre_sorted:
+        df['_mean'] = df.mean(axis=1)
+        df = df.sort_values('_mean', ascending=False).drop('_mean', axis=1)
 
     if time_dim == 'month':
         df.columns = [_MONTH_NAMES_SHORT.get(int(c), c) for c in df.columns]
 
-    # Only append  for yearly heatmaps (not monthly)
-    if time_dim == 'year':
-        df.index = [f"{c} " if mk_sig.get(c, False) else c for c in df.index]
+    # Build city label: "↑ CityName *** [C7]" / "↓ CityName *" / "CityName [C4]"
+    # mk_sig values may be (trend, p_val) tuples, bare strings, or legacy bools
+    def _mk_label(city):
+        v = mk_sig.get(city, '')
+        if isinstance(v, tuple):
+            trend, p_val = v[0], float(v[1]) if len(v) > 1 else 1.0
+        elif v is True:
+            trend, p_val = 'increasing', 0.001   # legacy bool — assume sig
+        elif v is False or v == '':
+            trend, p_val = '', 1.0
+        else:
+            trend, p_val = str(v), 1.0  # bare string with unknown p
+
+        if trend == 'increasing':
+            arrow = '\u2191'
+        elif trend == 'decreasing':
+            arrow = '\u2193'
+        else:
+            arrow = ''
+
+        stars = ('***' if p_val < 0.001 else
+                 '**'  if p_val < 0.01  else
+                 '*'   if p_val < 0.05  else '')
+
+        # Build base label
+        if arrow:
+            base = f'{arrow} {city} {stars}' if stars else f'{arrow} {city}'
+        else:
+            base = city
+
+        # Append cluster label if lookup provided
+        if cluster_lookup:
+            cid = cluster_lookup.get(city)
+            if cid is not None:
+                base = f'{base} [C{int(cid)}]'
+        return base
+
+    # Yearly: full label with MK arrow + stars + cluster
+    # Monthly: cluster label only (no MK significance — monthly stats not computed)
+    def _monthly_label(city):
+        base = city
+        if cluster_lookup:
+            cid = cluster_lookup.get(city)
+            if cid is not None:
+                base = f'{city} [C{int(cid)}]'
+        return base
+
+    # Apply MK labels when yearly, OR when mk_sig is explicitly provided (e.g. cluster monthly)
+    # Fall back to cluster-suffix-only label when no significance data supplied (city monthly)
+    if time_dim == 'year' or mk_sig:
+        df.index = [_mk_label(c) for c in df.index]
+    elif cluster_lookup:
+        df.index = [_monthly_label(c) for c in df.index]
 
     n_cities = len(df)
     n_cols = len(df.columns)
@@ -12167,7 +13563,7 @@ def create_single_page_heatmap(data, mk_sig, lst_time, time_dim,
 
     if time_dim == 'year':
         ax.set_title(f'{lst_time.title()}-time LST — {label}\n'
-                     f' = significant warming trend (Mann-Kendall p<0.05)',
+                     f'\u2191\u2193 MK trend  * p<0.05  ** p<0.01  *** p<0.001',
                      fontsize=8, fontweight='bold', pad=8)
     else:
         ax.set_title(f'{lst_time.title()}-time LST — {label}',
@@ -12185,6 +13581,12 @@ def create_single_page_heatmap(data, mk_sig, lst_time, time_dim,
     ax.set_yticklabels(df.index, fontsize=tick_fs)
     ax.set_ylim(n_cities, 0)  # ensure full range visible
 
+    # Draw thick separator lines between row groups (publication heatmaps)
+    if separator_after_rows:
+        for row_idx in separator_after_rows:
+            y = row_idx + 1   # seaborn y-axis: row 0 top → n_cities bottom
+            ax.axhline(y=y, color='black', linewidth=2.0, zorder=10)
+
     _plt.tight_layout(pad=0.5)
 
     out_path = _Path(output_path)
@@ -12197,3 +13599,2278 @@ def create_single_page_heatmap(data, mk_sig, lst_time, time_dim,
 
     _plt.close(fig)
     print(f'   Saved: {_os.path.basename(str(out_path))}')
+
+
+# ─── NB03 temporal trend chart ───────────────────────────────────────────────
+
+_NB03_COLOURS = {
+    # Day-time: warm orange/gold tones
+    'uc_day':    '#E07B00',
+    'bra_day':   '#B8860B',
+    'delta_day': '#B22222',       # RED day SUHI
+    'cr_day_fill':   '#FFDAB9',
+    # Night-time: near-black to grey tones (not blue)
+    'uc_night':  '#1C1C1C',
+    'bra_night': '#6B6B6B',
+    'delta_night':  '#9932CC',    # PURPLE night SUHI
+    'cr_night_fill': '#A8A8A8',
+}
+_NB03_MARKERS   = {'uc': 'o', 'bra': 's', 'delta': '^'}
+_NB03_MON_ABBR  = ['Jan','Feb','Mar','Apr','May','Jun',
+                    'Jul','Aug','Sep','Oct','Nov','Dec']
+
+
+def create_temporal_chart(city, df_ann, df_mon,
+                           df_del_ann, df_del_mon,
+                           ann_stats, mon_stats,
+                           del_ann_stats, del_mon_stats,
+                           save_path=None, dpi=150,
+                           ylim_lst=(10, 50),
+                           ylim_suhii=(-3, 3)):
+    """
+    Combined annual (left) + monthly (right) LST trend chart.
+
+    Both panels show day and night on the same axes.
+    Delta (UC-BRA) on right y-axis of BOTH panels.
+    Sen slope as thin dashed overlay per zone.
+    CR P5-P95 as shaded envelope.
+    Peak/trough annotated with hollow circle + label.
+    Cloud flag: grey x at panel bottom for low-coverage years/months.
+
+    Parameters
+    ----------
+    city : str
+    df_ann, df_mon : pd.DataFrame
+        Annual / monthly aggregated data (zone, period, year/month, median_lst,
+        p05_lst, p95_lst, low_coverage).
+    df_del_ann, df_del_mon : pd.DataFrame
+        Delta (UC-BRA) annual / monthly data (period, year/month, delta_lst).
+    ann_stats, mon_stats : pd.DataFrame
+        Pre-computed MK + Sen stats keyed by (city, zone, period).
+    del_ann_stats, del_mon_stats : pd.DataFrame
+        Delta trend stats keyed by (city, period).
+    save_path : Path | str | None
+    dpi : int
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    import numpy as _np
+    import matplotlib.pyplot as _plt
+    import matplotlib.patches as _mp
+    from matplotlib.lines import Line2D as _L2D
+    from matplotlib.gridspec import GridSpec as _GS
+
+    C = _NB03_COLOURS
+    MK = _NB03_MARKERS
+    MA = _NB03_MON_ABBR
+    _ZONE_LABEL = {'urban_core': 'UC', 'bra': 'BRA', 'city_region': 'CR'}
+
+    def _trend_line(idx, slope, intercept):
+        x = _np.array(idx, dtype=float)
+        return intercept + slope * (x - x[0])
+
+    def _stats_row(stats_df, zone, period):
+        if stats_df is None or stats_df.empty:
+            return None
+        if 'zone' in stats_df.columns:
+            sub = stats_df[(stats_df['zone'] == zone) & (stats_df['period'] == period)]
+        else:
+            sub = stats_df[stats_df['period'] == period]
+        return sub.iloc[0] if not sub.empty else None
+
+    def _stats_box(ax, rows, header, x=0.02, y=0.98, va='top'):
+        """Compact MK/Sen stats box.  va='top' → top-left; va='bottom' → bottom-left."""
+        lines = [f'\u2500 {header} \u2500']
+        any_data = False
+        for label, row in rows:
+            if row is None:
+                continue
+            any_data = True
+            sym = {'increasing': '\u2191', 'decreasing': '\u2193'}.get(
+                str(row.get('mk_trend', '')), '\u2014')
+            p = row.get('mk_p', _np.nan)
+            try:
+                pf = float(p)
+                sig = '***' if pf < 0.001 else ('**' if pf < 0.01 else ('*' if pf < 0.05 else 'ns'))
+            except (TypeError, ValueError):
+                sig = ''
+            hr = '[H&R]' if row.get('autocorr_corrected', False) else ''
+            bd = row.get('sen_slope_per_decade', _np.nan)
+            try:
+                dec_str = f'{float(bd):+.2f}\u00b0C/dec'
+            except (TypeError, ValueError):
+                dec_str = ''
+            parts = [sym, sig]
+            if dec_str: parts.append(dec_str)
+            if hr:      parts.append(hr)
+            lines.append(f'  {label}: {" ".join(pt for pt in parts if pt)}')
+        if any_data:
+            ax.text(x, y, '\n'.join(lines),
+                    transform=ax.transAxes, fontsize=7.0,
+                    va=va, ha='left', family='monospace',
+                    bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                              alpha=0.50, edgecolor='none'),
+                    zorder=10, clip_on=False)
+
+    def _annotate_peak_trough(ax, x_vals, y_vals, color, side='left', is_monthly=False):
+        if len(y_vals) == 0:
+            return
+        hi_i = _np.nanargmax(y_vals)
+        lo_i = _np.nanargmin(y_vals)
+        # Skip trough annotation if it coincides with peak (flat series)
+        pairs = [(hi_i, 'peak'), (lo_i, 'trough')]
+        if hi_i == lo_i:
+            pairs = [(hi_i, 'peak')]
+
+        x_min, x_max = ax.get_xlim()
+        y_min, y_max = ax.get_ylim()
+        x_span = x_max - x_min if x_max != x_min else 1.0
+        y_span = y_max - y_min if y_max != y_min else 1.0
+
+        for i, lab in pairs:
+            ax.plot(x_vals[i], y_vals[i], 'o', ms=8, mfc='none',
+                    mec=color, mew=1.3, zorder=9, clip_on=True)
+            x_label = MA[int(x_vals[i]) - 1] if is_monthly else str(x_vals[i])
+
+            # Adaptive horizontal offset: push label away from nearest x-edge
+            x_frac = (x_vals[i] - x_min) / x_span
+            if x_frac > 0.65:       # point is in right third → label goes left
+                xoff, ha = -5, 'right'
+            else:                   # otherwise label goes right
+                xoff, ha = +5, 'left'
+
+            # Adaptive vertical offset: peak label goes up unless near top edge
+            y_frac = (y_vals[i] - y_min) / y_span
+            if lab == 'peak':
+                yoff = -14 if y_frac > 0.80 else +14
+            else:
+                yoff = +14 if y_frac < 0.20 else -14
+
+            ax.annotate(f'{x_label}: {y_vals[i]:.1f}\u00b0C',
+                        xy=(x_vals[i], y_vals[i]),
+                        xytext=(xoff, yoff),
+                        textcoords='offset points',
+                        fontsize=5.5, color=color, ha=ha,
+                        annotation_clip=True,
+                        bbox=dict(boxstyle='round,pad=0.15', facecolor='white',
+                                  edgecolor=color, alpha=0.85, lw=0.5),
+                        arrowprops=dict(arrowstyle='-', color=color,
+                                        lw=0.5, ls='solid'))
+
+    # ── Smoothing helper ─────────────────────────────────────────────────────
+    def _smooth(x, y, kind='annual'):
+        """Return smoothed y values. Gaussian filter for annual; spline for monthly."""
+        try:
+            from scipy.ndimage import gaussian_filter1d as _gf
+            from scipy.interpolate import make_interp_spline as _mis
+        except ImportError:
+            return y   # scipy not available — return raw
+        if len(y) < 4:
+            return y
+        if kind == 'monthly':
+            # Cubic spline on 1-12, evaluated on fine grid then sampled back at integers
+            xs = _np.array(x, dtype=float)
+            ys = _np.array(y, dtype=float)
+            try:
+                spl = _mis(xs, ys, k=3)
+                xf  = _np.linspace(xs[0], xs[-1], 300)
+                yf  = spl(xf)
+                # Sample back at original integer months
+                return _np.array([float(spl(_np.array([xi])))[0] for xi in xs])
+            except Exception:
+                return y
+        else:
+            # Gaussian blur — sigma=0.8 gives gentle smoothing on 20-pt series
+            return _gf(_np.array(y, dtype=float), sigma=0.8)
+
+    # ── A4 landscape figure (11.0 × 7.0 in) — two panels side by side ───────
+    # Font size constants for A4 publication legibility
+    _FS_TITLE  = 10    # figure suptitle
+    _FS_AX     = 8.5   # axis labels
+    _FS_TICK   = 7.5   # tick labels
+    _FS_ANNOT  = 5.5   # peak/trough annotations
+    _FS_SEAS   = 6.5   # wet-season text
+    _FS_LEG    = 7.5   # legend
+
+    fig = _plt.figure(figsize=(11.0, 7.0))
+    fig.suptitle(f'{city} \u2014 MODIS LST Temporal Analysis (Day & Night)',
+                 fontsize=_FS_TITLE, fontweight='bold', y=1.01)
+    gs    = _GS(1, 2, figure=fig, wspace=0.25)
+    ax_a  = fig.add_subplot(gs[0])
+    ax_m  = fig.add_subplot(gs[1])
+    ax_a2 = ax_a.twinx()
+    ax_m2 = ax_m.twinx()
+
+    # Uniform LST y-axis for cross-city/cluster comparability
+    if ylim_lst is not None:
+        ax_a.set_ylim(ylim_lst)
+        ax_m.set_ylim(ylim_lst)
+
+    for period in ['day', 'night']:
+        suf = f'_{period}'
+        uc_col  = C[f'uc{suf}'];  bra_col = C[f'bra{suf}']
+        del_col = C[f'delta{suf}']; cr_fill = C[f'cr{suf}_fill']
+
+        # ── Annual panel ──────────────────────────────────────────────────────
+        for zone, col, mk in [('urban_core', uc_col, 'uc'),
+                               ('bra',        bra_col, 'bra')]:
+            sub = df_ann[(df_ann['zone'] == zone) & (df_ann['period'] == period)]
+            if sub.empty:
+                continue
+            sub = sub.sort_values('year')
+            x, y_raw = sub['year'].values, sub['median_lst'].values
+            y = _smooth(x, y_raw, kind='annual')
+            mask = sub['low_coverage'].values if 'low_coverage' in sub.columns else _np.zeros(len(sub), dtype=bool)
+            ax_a.plot(x, y, color=col, lw=1.6, zorder=4)
+            # Sen slope overlay
+            sr = _stats_row(ann_stats, zone, period)
+            if sr is not None and not _np.isnan(sr.get('sen_slope_per_year', _np.nan)):
+                yhat = _trend_line(x, sr['sen_slope_per_year'], sr['intercept'])
+                ax_a.plot(x, yhat, color=col, lw=0.9, ls='--', zorder=3)
+            # Cloud flag
+            for xi in x[mask]:
+                ax_a.text(xi, y.min() - 0.5, '\u2715', ha='center', va='bottom',
+                          fontsize=5, color='#999', zorder=5)
+            # Peak/trough — UC only to avoid clutter
+            if zone == 'urban_core':
+                _annotate_peak_trough(ax_a, list(x), list(y_raw), col)
+
+        # CR P5-P95 band (only if percentile columns exist)
+        cr_a = df_ann[(df_ann['zone'] == 'city_region') & (df_ann['period'] == period)]
+        if not cr_a.empty and 'p05_lst' in cr_a.columns and 'p95_lst' in cr_a.columns:
+            cr_s = cr_a.sort_values('year')
+            ax_a.fill_between(cr_s['year'], cr_s['p05_lst'], cr_s['p95_lst'],
+                               color=cr_fill, alpha=0.45, zorder=1,
+                               label=f'City Region (range) {period}')
+
+        # ── SUHII on right y-axis — thin prominent line with uniform cosmetic glow ──
+        # set_ylim is called AFTER the loop (across both periods) to avoid clipping
+        da = df_del_ann[df_del_ann['period'] == period] if not df_del_ann.empty else _np.empty(0)
+        if hasattr(da, 'empty') and not da.empty:
+            da = da.sort_values('year')
+            xd, yd_raw = da['year'].values, da['delta_lst'].values
+            yd = _smooth(xd, yd_raw, kind='annual')
+            # Cosmetic glow: wide transparent line behind the actual line
+            ax_a2.plot(xd, yd, color=del_col, lw=7, alpha=0.15, zorder=6, solid_capstyle='round')
+            ax_a2.plot(xd, yd, color=del_col, lw=2.0, ls='-', zorder=8)
+            # SUHII Sen slope dashed overlay
+            dr = _stats_row(del_ann_stats, 'delta_uc_bra', period)
+            if dr is not None and not _np.isnan(dr.get('sen_slope_per_year', _np.nan)):
+                ax_a2.plot(xd, _trend_line(xd, dr['sen_slope_per_year'], dr['intercept']),
+                           color=del_col, lw=1.2, ls='--', zorder=7)
+
+        # ── Monthly panel ─────────────────────────────────────────────────────
+        for zone, col, mk in [('urban_core', uc_col, 'uc'),
+                               ('bra',        bra_col, 'bra')]:
+            sub = df_mon[(df_mon['zone'] == zone) & (df_mon['period'] == period)]
+            if sub.empty:
+                continue
+            clim = sub.groupby('month')['median_lst'].mean().reset_index()
+            x, y_raw = clim['month'].values, clim['median_lst'].values
+            y = _smooth(x, y_raw, kind='monthly')
+            ax_m.plot(x, y, color=col, lw=1.6, zorder=4)
+            sr = _stats_row(mon_stats, zone, period)
+            if sr is not None and not _np.isnan(sr.get('sen_slope_per_year', _np.nan)):
+                yhat = _trend_line(x, sr['sen_slope_per_year'], sr['intercept'])
+                ax_m.plot(x, yhat, color=col, lw=0.9, ls='--', zorder=3)
+            _annotate_peak_trough(ax_m, list(x), list(y_raw), col, is_monthly=True)
+
+        # CR P5-P95 monthly (only if percentile columns exist)
+        cr_m = df_mon[(df_mon['zone'] == 'city_region') & (df_mon['period'] == period)]
+        if not cr_m.empty and 'p05_lst' in cr_m.columns and 'p95_lst' in cr_m.columns:
+            cr_c = cr_m.groupby('month').agg(
+                p05=('p05_lst', 'mean'), p95=('p95_lst', 'mean')).reset_index()
+            ax_m.fill_between(cr_c['month'], cr_c['p05'], cr_c['p95'],
+                               color=cr_fill, alpha=0.45, zorder=1,
+                               label=f'City Region (range) {period}')
+
+        # SUHII monthly — thin prominent line with uniform cosmetic glow
+        # set_ylim is called AFTER the loop (across both periods) to avoid clipping
+        dm = df_del_mon[df_del_mon['period'] == period] if not df_del_mon.empty else _np.empty(0)
+        if hasattr(dm, 'empty') and not dm.empty:
+            dc = dm.groupby('month')['delta_lst'].mean().reset_index()
+            xm, ym_raw = dc['month'].values, dc['delta_lst'].values
+            ym = _smooth(xm, ym_raw, kind='monthly')
+            ax_m2.plot(xm, ym, color=del_col, lw=7, alpha=0.15, zorder=6, solid_capstyle='round')
+            ax_m2.plot(xm, ym, color=del_col, lw=2.0, ls='-', zorder=8)
+            rev_months = xm[ym_raw < 0]
+            if len(rev_months) > 0 and period == 'night':
+                ax_m2.annotate('SUHI\nreversal',
+                                xy=(rev_months[len(rev_months)//2], 0),
+                                xytext=(0, -20), textcoords='offset points',
+                                fontsize=_FS_SEAS, color=del_col, ha='center',
+                                arrowprops=dict(arrowstyle='->', color=del_col, lw=0.7))
+
+    # ── SUHII axis limits — set once across BOTH periods to prevent clipping ──
+    def _suhii_ylim(df_del, val_col='delta_lst'):
+        if not hasattr(df_del, 'empty') or df_del.empty:
+            return None
+        vals = df_del[val_col].dropna().values
+        if len(vals) == 0:
+            return None
+        c    = (vals.max() + vals.min()) / 2
+        half = max(vals.max() - vals.min(), 0.3) / 2
+        return (c - half * 3.5, c + half * 3.5)
+
+    _lim_a = ylim_suhii if ylim_suhii is not None else _suhii_ylim(df_del_ann)
+    _lim_m = ylim_suhii if ylim_suhii is not None else _suhii_ylim(df_del_mon)
+    if _lim_a:
+        ax_a2.set_ylim(*_lim_a)
+    ax_a2.axhline(0, color='#888', lw=0.7, ls=':', alpha=0.7, zorder=2)
+    if _lim_m:
+        ax_m2.set_ylim(*_lim_m)
+    ax_m2.axhline(0, color='#888', lw=0.7, ls=':', alpha=0.7, zorder=2)
+
+    # Wet-season shading in monthly panel
+    ax_m.axvspan(5.5, 10.5, color='#AADDFF', alpha=0.12, zorder=0)
+    ax_m.text(8, 0.97, 'Wet season', fontsize=_FS_SEAS, color='#5588AA',
+              ha='center', va='top', style='italic',
+              transform=ax_m.get_xaxis_transform())
+
+    # ── Axis labels & ticks ───────────────────────────────────────────────────
+    ax_a.set_xlabel('Year',  fontsize=_FS_AX)
+    ax_a.set_ylabel('Annual median LST (\u00b0C)', fontsize=_FS_AX)
+    ax_a2.set_ylabel('SUHII — UC\u2212BRA (\u00b0C)', fontsize=_FS_AX - 0.5,
+                     color='#555')
+    ax_m.set_xlabel('Month', fontsize=_FS_AX)
+    ax_m.set_ylabel('Monthly mean LST (\u00b0C)', fontsize=_FS_AX)
+    ax_m2.set_ylabel('SUHII — UC\u2212BRA (\u00b0C)', fontsize=_FS_AX - 0.5,
+                     color='#555')
+    ax_m.set_xticks(range(1, 13))
+    ax_m.set_xticklabels(MA, fontsize=_FS_TICK)
+    for _ax in [ax_a, ax_a2, ax_m, ax_m2]:
+        _ax.tick_params(labelsize=_FS_TICK)
+    # Integer year ticks derived from data
+    _all_yrs = sorted({int(y) for y in df_ann['year'].dropna().unique()
+                        if 2000 < float(y) < 2100})
+    if _all_yrs:
+        _tick_step = 2 if len(_all_yrs) > 10 else 1
+        _tick_yrs  = [y for y in _all_yrs if (y - _all_yrs[0]) % _tick_step == 0]
+        ax_a.set_xticks(_tick_yrs)
+        ax_a.set_xticklabels([str(y) for y in _tick_yrs],
+                              fontsize=_FS_TICK, rotation=45, ha='right')
+
+    # ── Stats boxes — day at top-left, night at bottom-left of each panel ───
+    _day_hdr   = 'Day-time trend (- - = Sen slope)'
+    _night_hdr = 'Night-time trend (- - = Sen slope)'
+    # Annual panel
+    _stats_box(ax_a, [
+        ('UC',    _stats_row(ann_stats,     'urban_core',   'day')),
+        ('BRA',   _stats_row(ann_stats,     'bra',          'day')),
+        ('SUHII', _stats_row(del_ann_stats, 'delta_uc_bra', 'day')),
+    ], header=_day_hdr, x=0.02, y=0.98, va='top')
+    _stats_box(ax_a, [
+        ('UC',    _stats_row(ann_stats,     'urban_core',   'night')),
+        ('BRA',   _stats_row(ann_stats,     'bra',          'night')),
+        ('SUHII', _stats_row(del_ann_stats, 'delta_uc_bra', 'night')),
+    ], header=_night_hdr, x=0.02, y=0.02, va='bottom')
+    # Monthly panel
+    _stats_box(ax_m, [
+        ('UC',    _stats_row(mon_stats,     'urban_core',   'day')),
+        ('BRA',   _stats_row(mon_stats,     'bra',          'day')),
+        ('SUHII', _stats_row(del_mon_stats, 'delta_uc_bra', 'day')),
+    ], header=_day_hdr, x=0.02, y=0.98, va='top')
+    _stats_box(ax_m, [
+        ('UC',    _stats_row(mon_stats,     'urban_core',   'night')),
+        ('BRA',   _stats_row(mon_stats,     'bra',          'night')),
+        ('SUHII', _stats_row(del_mon_stats, 'delta_uc_bra', 'night')),
+    ], header=_night_hdr, x=0.02, y=0.02, va='bottom')
+
+    # ── Legend — single row at bottom centre, pure proxies, no markers ────────
+    _sl = dict(lw=1.6, ls='-')
+    _leg_handles = [
+        _L2D([0],[0], color=C['uc_day'],       **_sl,           label='UC — day'),
+        _L2D([0],[0], color=C['uc_night'],     **_sl,           label='UC — night'),
+        _L2D([0],[0], color=C['bra_day'],       **_sl,          label='BRA — day'),
+        _L2D([0],[0], color=C['bra_night'],     **_sl,          label='BRA — night'),
+        _L2D([0],[0], color=C['delta_day'],   lw=2.0, ls='-',   label='SUHII — day'),
+        _L2D([0],[0], color=C['delta_night'], lw=2.0, ls='-',   label='SUHII — night'),
+        _mp.Patch(facecolor=C['cr_day_fill'],   alpha=0.55,     label='City Region range — day'),
+        _mp.Patch(facecolor=C['cr_night_fill'], alpha=0.55,     label='City Region range — night'),
+        _L2D([0],[0], color='#777', lw=0.9, ls='--',            label="Sen\u2019s slope (- -)"),
+    ]
+    fig.legend(handles=_leg_handles, loc='lower center', ncol=5,
+               fontsize=_FS_LEG, framealpha=0.92, bbox_to_anchor=(0.5, -0.12))
+
+    _plt.tight_layout()
+    if save_path:
+        from pathlib import Path as _P
+        sp = _P(save_path)
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(sp,                dpi=dpi, bbox_inches='tight', facecolor='white')
+        fig.savefig(sp.with_suffix('.pdf'), format='pdf',
+                    bbox_inches='tight', facecolor='white')
+        print(f'   Saved: {sp.name}')
+    return fig
+
+
+# ─── NB03 stakeholder validation sunburst charts ─────────────────────────────
+
+def create_validation_sunburst_charts(validation_df, monthly_validation_df,
+                                       results_dir, dpi=150):
+    """
+    Multi-layer sunburst donut charts for stakeholder validation.
+
+    Two figures produced:
+    - Annual: Q61 (perceived warming) vs UC MK trend
+    - Monthly: Q58 (peak season) vs UC hottest month
+
+    Each city gets one donut with three rings:
+      Inner  (r=0.50): city share of total stakeholders
+      Middle (r=0.70): agreement (blue) vs disagreement (red)
+      Outer  (r=0.90): duration of stay in city (colour-coded)
+
+    Parameters
+    ----------
+    validation_df : pd.DataFrame
+        Annual validation rows. Must have columns: city, n_stakeholders,
+        pct_of_total, overall_agreement, duration_counts (dict),
+        day_significance, night_significance.
+    monthly_validation_df : pd.DataFrame
+        Monthly validation rows. Must have: city, n_stakeholders,
+        pct_of_total, overall_agreement, duration_counts (dict),
+        lst_day_hottest, lst_night_hottest.
+    results_dir : Path | str
+    dpi : int
+
+    Returns
+    -------
+    tuple[Figure, Figure]  (fig_annual, fig_monthly)
+    """
+    import math as _math
+    import numpy as _np
+    import matplotlib.pyplot as _plt
+    from pathlib import Path as _P
+
+    _DUR_CATS = ['Within the last 5 years', 'Between 5 - 10 years',
+                 'Between 11 - 15 years', 'Over 15 years']
+    _DUR_COL  = {
+        'Within the last 5 years': '#FFD700',
+        'Between 5 - 10 years':    '#1AC9F5',
+        'Between 11 - 15 years':   '#32CD32',
+        'Over 15 years':           '#8B008B',
+    }
+    _AGREE_COL    = '#0000FF'
+    _DISAGREE_COL = '#FF0000'
+
+    def _draw_panel(ax, row, total_stake, mode):
+        n     = row['n_stakeholders']
+        pct_t = row['pct_of_total']
+        agr   = row['overall_agreement']
+        dur   = row.get('duration_counts', {})
+
+        # ── Helper: place count labels inside ring wedges ─────────────────────
+        # Skips wedges narrower than min_deg° (unreadable) and zero-count wedges.
+        # Font size is intentionally smaller than the central total-n label (18pt).
+        def _label_ring(patches, counts, min_deg=18, fs=6, col='white'):
+            for w, v in zip(patches, counts):
+                span = abs(w.theta2 - w.theta1)
+                if span < min_deg or v == 0:
+                    continue
+                mid_rad = _np.radians((w.theta1 + w.theta2) / 2)
+                r_c = w.r - w.width / 2   # radial centre of the ring band
+                ax.text(r_c * _np.cos(mid_rad), r_c * _np.sin(mid_rad),
+                        str(int(round(v))), ha='center', va='center',
+                        fontsize=fs, fontweight='bold', color=col)
+
+        # ── Inner ring: city/cluster share of total stakeholders ──────────────
+        inner_p, _ = ax.pie([n, total_stake - n], radius=0.50,
+               colors=['#FFA500', '#E0E0E0'],
+               wedgeprops=dict(width=0.20, edgecolor='white', linewidth=2),
+               startangle=90)
+        # Label the orange wedge only (the grey = all other cities, not labelled)
+        _label_ring(inner_p[:1], [n], min_deg=10, fs=5, col='white')
+
+        # ── Middle ring: agreed vs disagreed ──────────────────────────────────
+        if not (isinstance(agr, float) and _np.isnan(agr)):
+            agr_n = int(round(n * agr / 100))
+            dis_n = n - agr_n
+            mid_p, _ = ax.pie([agr, 100 - agr], radius=0.70,
+                   colors=[_AGREE_COL, _DISAGREE_COL],
+                   wedgeprops=dict(width=0.20, edgecolor='white', linewidth=2),
+                   startangle=90)
+            _label_ring(mid_p, [agr_n, dis_n], min_deg=18, fs=6, col='white')
+
+        # ── Outer ring: duration of stay ──────────────────────────────────────
+        dur_s = [float(dur.get(d, 0) or 0) for d in _DUR_CATS]
+        if sum(dur_s) > 0:
+            out_p, _ = ax.pie(dur_s, radius=0.90,
+                   colors=[_DUR_COL[d] for d in _DUR_CATS],
+                   wedgeprops=dict(width=0.20, edgecolor='white', linewidth=2),
+                   startangle=90)
+            _label_ring(out_p, dur_s, min_deg=20, fs=5.5, col='white')
+
+        ax.text(0,  0.15, row['city'],  ha='center', va='center',
+                fontsize=10, fontweight='bold')
+        ax.text(0, -0.05, str(n),       ha='center', va='center',
+                fontsize=18, fontweight='bold')
+        ax.text(0, -0.25, f'({pct_t:.1f}%)', ha='center', va='center', fontsize=9)
+
+        if mode == 'annual':
+            lbl = (f"Day: {row['day_significance']}\n"
+                   f"Night: {row['night_significance']}")
+        else:
+            # Show what stakeholders said + what MODIS says (day and night peak)
+            stk_resp = str(row.get('stakeholder_peak_response', 'N/A') or 'N/A')
+            # Shorten long quarter strings for readability
+            _short = {
+                'March \u2013 May': 'Mar–May', 'March - May': 'Mar–May',
+                'June \u2013 August': 'Jun–Aug', 'June - August': 'Jun–Aug',
+                'September \u2013 November': 'Sep–Nov', 'September - November': 'Sep–Nov',
+                'December \u2013 February': 'Dec–Feb', 'December - February': 'Dec–Feb',
+            }
+            stk_short = _short.get(stk_resp, stk_resp)
+            lbl = (f"Stakeholders: {stk_short}\n"
+                   f"LST day peak:   {row['lst_day_hottest']}\n"
+                   f"LST night peak: {row['lst_night_hottest']}")
+        ax.text(0.5, 0.94, lbl, transform=ax.transAxes,
+                fontsize=7.5, ha='center', va='top',
+                bbox=dict(boxstyle='round,pad=0.4', facecolor='lightyellow',
+                          edgecolor='gray', linewidth=0.8))
+        ax.set_aspect('equal')
+
+    def _build_fig(df_plot, total_stake, mode, title):
+        rows = df_plot[df_plot['n_stakeholders'] > 0]
+        n_c = len(rows)
+        if n_c == 0:
+            return None
+        mc  = min(5, n_c)
+        nr  = _math.ceil(n_c / mc)
+        fig = _plt.figure(figsize=(8 * mc, 8 * nr + 3))
+        gs  = fig.add_gridspec(nr + 1, mc,
+                                height_ratios=[5] * nr + [1], hspace=0.30)
+        for idx, (_, row) in enumerate(rows.iterrows()):
+            r, c = divmod(idx, mc)
+            _draw_panel(fig.add_subplot(gs[r, c]), row, total_stake, mode)
+
+        leg = fig.add_subplot(gs[nr, :])
+        leg.axis('off')
+        handles = [
+            _plt.Line2D([0],[0], marker='s', color='w',
+                        markerfacecolor=_AGREE_COL,    markersize=14,
+                        label='Agrees with LST'),
+            _plt.Line2D([0],[0], marker='s', color='w',
+                        markerfacecolor=_DISAGREE_COL, markersize=14,
+                        label='Disagrees with LST'),
+        ]
+        for d in _DUR_CATS:
+            handles.append(_plt.Line2D([0],[0], marker='s', color='w',
+                                        markerfacecolor=_DUR_COL[d],
+                                        markersize=14, label=d))
+        leg.legend(handles=handles, loc='center', ncol=3,
+                   frameon=False, fontsize=12)
+        fig.suptitle(title, fontsize=14, fontweight='bold', y=0.99)
+        _plt.tight_layout()
+        return fig
+
+    out = _P(results_dir)
+    tot_ann = validation_df['n_stakeholders'].sum()
+    tot_mon = monthly_validation_df['n_stakeholders'].sum()
+
+    fig_a = _build_fig(
+        validation_df, tot_ann, 'annual',
+        ('Annual Validation: Perceived Warming vs UC LST Trend\n'
+         'Inner: City share  |  Middle: Agreement/Disagreement  |  Outer: Duration'),
+    )
+    fig_m = _build_fig(
+        monthly_validation_df, tot_mon, 'monthly',
+        ('Monthly Validation: Peak Season vs UC Hottest Month (Day OR Night)\n'
+         'Inner: City share  |  Middle: Agreement/Disagreement  |  Outer: Duration'),
+    )
+
+    for fig, stem in [(fig_a, 'Stakeholder_Validation_Annual_Sunburst'),
+                      (fig_m, 'Stakeholder_Validation_Monthly_Sunburst')]:
+        if fig is None:
+            continue
+        fp = out / stem
+        fig.savefig(fp.with_suffix('.svg'), bbox_inches='tight', facecolor='white')
+        fig.savefig(fp.with_suffix('.pdf'), format='pdf',
+                    bbox_inches='tight', facecolor='white')
+        _plt.close(fig)
+        print(f'  Saved: {stem}.svg/.pdf')
+
+
+# =============================================================================
+# NB04 — Daily LST Visualization Functions
+# =============================================================================
+
+def create_nb04_event_plot(
+    modis_df,
+    era5_df,
+    city_name: str,
+    study_year: int,
+    audit_day: dict,
+    audit_night: dict,
+    output_path=None,
+    figsize=(11.69, 8.27),
+    dpi: int = 300,
+    show_inline: bool = False,
+):
+    """
+    Two-panel daily LST time-series chart for NB04 (A4 landscape).
+
+    Layout
+    ------
+    Top panel    : MODIS UC LST — day (orange/red) + night (blue/navy)
+    Bottom panel : ERA5-Land UC LST — day (orange/red) + night (blue/navy)
+
+    Annotations per panel
+    ~~~~~~~~~~~~~~~~~~~~~
+    * Shaded fill: LST min-max range (light, per period)
+    * Solid line : median LST
+    * Dashed lines: P90 threshold (day = red dashed, night = blue dashed)
+    * Black dots : individual MODIS / ERA5 hot days/nights above P90
+    * Grey shading: every persistent event window (≥ 2 consecutive)
+    * Coloured bracket: selected SEVIRI event — bold, labelled with tier
+    * Pi/Pii style horizontal bracket with vertical end-bars
+
+    Parameters
+    ----------
+    modis_df, era5_df : pd.DataFrame or None
+        Full daily LST DataFrames (columns: date, day_lst_min/median/max,
+        night_lst_min/median/max).
+    city_name : str
+    study_year : int
+    audit_day, audit_night : dict
+        Output of ``daily_analysis_utils.run_city_event_pipeline`` for 'day'
+        and 'night' respectively.
+    output_path : str or Path or None
+        If given, figure is saved here (SVG).
+    figsize : tuple
+        Figure size in inches (default A4 landscape 11.69 × 8.27).
+    dpi : int
+    show_inline : bool
+        If True the figure is shown interactively (plt.show()), else closed
+        after saving.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure or None
+    """
+    import matplotlib.pyplot as _plt
+    import matplotlib.dates as mdates
+    import matplotlib.patches as mpatches
+    import numpy as _np
+
+    if modis_df is None and era5_df is None:
+        return None
+
+    # ── colour scheme ─────────────────────────────────────────────────────────
+    DAY_COL      = '#d73027'    # red-orange — day
+    DAY_FILL     = '#fdae61'    # light orange fill
+    NIGHT_COL    = '#4575b4'    # blue — night
+    NIGHT_FILL   = '#abd9e9'    # light blue fill
+    SEL_DAY_COL  = '#a50026'    # dark red — selected day event bracket
+    SEL_NGT_COL  = '#313695'    # dark blue — selected night event bracket
+    PERSIST_ALPHA = 0.12        # background shading for any persistent event
+
+    _TIER_COLORS = {'EXCELLENT': '#1a9850', 'GOOD': '#f77f00', 'FAIR': '#999999'}
+
+    fig, axes = _plt.subplots(2, 1, figsize=figsize, sharex=True,
+                               gridspec_kw={'hspace': 0.12})
+
+    def _draw_panel(ax, df, dataset_label, audit_d, audit_n, ds_type):
+        """Render one panel (MODIS or ERA5)."""
+        if df is None:
+            ax.text(0.5, 0.5, f'No {dataset_label} data', transform=ax.transAxes,
+                    ha='center', va='center', fontsize=12, color='grey')
+            ax.set_ylabel(f'{dataset_label}\nLST (°C)')
+            return
+
+        df = df.copy()
+        df['date'] = pd.to_datetime(df['date'])
+        df = df.sort_values('date')
+
+        # ── day range + line ──────────────────────────────────────────────────
+        if 'day_lst_min' in df.columns and 'day_lst_max' in df.columns:
+            ax.fill_between(df['date'], df['day_lst_min'], df['day_lst_max'],
+                            color=DAY_FILL, alpha=0.35, linewidth=0, label='Day range')
+        if 'day_lst_median' in df.columns:
+            ax.plot(df['date'], df['day_lst_median'],
+                    color=DAY_COL, linewidth=1.2, label='Day LST (median)', zorder=3)
+
+        # ── night range + line ────────────────────────────────────────────────
+        if 'night_lst_min' in df.columns and 'night_lst_max' in df.columns:
+            ax.fill_between(df['date'], df['night_lst_min'], df['night_lst_max'],
+                            color=NIGHT_FILL, alpha=0.35, linewidth=0, label='Night range')
+        if 'night_lst_median' in df.columns:
+            ax.plot(df['date'], df['night_lst_median'],
+                    color=NIGHT_COL, linewidth=1.2, label='Night LST (median)', zorder=3)
+
+        # ── P90 thresholds ────────────────────────────────────────────────────
+        thresholds = {**audit_d.get('thresholds', {}), **audit_n.get('thresholds', {})}
+        key_day   = f'{ds_type}_p90_celsius'   # same key used in build_event_json
+        key_night = f'{ds_type}_p90_celsius'   # both audits use the same key name
+        t_day   = audit_d.get('thresholds', {}).get(key_day)
+        t_night = audit_n.get('thresholds', {}).get(key_night)
+
+        if t_day is not None:
+            ax.axhline(t_day, color=DAY_COL, linestyle='--', linewidth=1.0,
+                       alpha=0.7, label=f'Day P90 = {t_day:.1f}°C', zorder=4)
+        if t_night is not None:
+            ax.axhline(t_night, color=NIGHT_COL, linestyle='--', linewidth=1.0,
+                       alpha=0.7, label=f'Night P90 = {t_night:.1f}°C', zorder=4)
+
+        # ── mark individual hot days (dots) ───────────────────────────────────
+        if 'day_lst_median' in df.columns and t_day is not None:
+            hot_d = df[df['day_lst_median'] >= t_day]
+            ax.scatter(hot_d['date'], hot_d['day_lst_median'],
+                       color=DAY_COL, s=18, zorder=5, alpha=0.6)
+        if 'night_lst_median' in df.columns and t_night is not None:
+            hot_n = df[df['night_lst_median'] >= t_night]
+            ax.scatter(hot_n['date'], hot_n['night_lst_median'],
+                       color=NIGHT_COL, s=18, zorder=5, alpha=0.6)
+
+        # ── grey shading for every persistent event ───────────────────────────
+        all_events = (
+            audit_d.get('era5_persistent_events' if ds_type == 'era5' else 'modis_persistent_events', []) +
+            audit_n.get('era5_persistent_events' if ds_type == 'era5' else 'modis_persistent_events', [])
+        )
+        shaded_windows = set()
+        for evt in all_events:
+            key = (evt.get('start_date'), evt.get('end_date'))
+            if key in shaded_windows:
+                continue
+            shaded_windows.add(key)
+            try:
+                s = pd.to_datetime(evt['start_date'])
+                e = pd.to_datetime(evt['end_date']) + pd.Timedelta(days=1)
+                ax.axvspan(s, e, color='grey', alpha=PERSIST_ALPHA, linewidth=0, zorder=1)
+            except Exception:
+                pass
+
+        # ── bracket helper ────────────────────────────────────────────────────
+        y_min, y_max = ax.get_ylim()
+        _bracket_gap = (y_max - y_min) * 0.08   # space below threshold line
+
+        def _draw_bracket(start_str, end_str, label, color, above_y, bar_frac=0.02):
+            try:
+                s = pd.to_datetime(start_str)
+                e = pd.to_datetime(end_str)
+            except Exception:
+                return
+            bh   = (y_max - y_min) * bar_frac
+            brak = above_y - _bracket_gap
+            # horizontal bar
+            ax.plot([s, e], [brak, brak], color=color, linewidth=2.5,
+                    solid_capstyle='butt', zorder=8)
+            # end ticks
+            ax.plot([s, s], [brak - bh, brak + bh], color=color, linewidth=2.5, zorder=9)
+            ax.plot([e, e], [brak - bh, brak + bh], color=color, linewidth=2.5, zorder=9)
+            mid = s + (e - s) / 2
+            ax.text(mid, brak + bh * 1.5, label,
+                    ha='center', va='bottom', fontsize=7.5, fontweight='bold',
+                    color=color, zorder=10)
+
+        # ── selected event brackets (day and night) ───────────────────────────
+        sel_d = audit_d.get('selected_event')
+        sel_n = audit_n.get('selected_event')
+
+        if sel_d and t_day is not None:
+            tier_d = sel_d.get('tier', 'FAIR')
+            _draw_bracket(sel_d['start_date'], sel_d['end_date'],
+                          f"SEL-Day [{tier_d}]", SEL_DAY_COL, t_day)
+
+        if sel_n and t_night is not None:
+            tier_n = sel_n.get('tier', 'FAIR')
+            _draw_bracket(sel_n['start_date'], sel_n['end_date'],
+                          f"SEL-Night [{tier_n}]", SEL_NGT_COL, t_night)
+
+        # ── axes formatting ───────────────────────────────────────────────────
+        ax.set_ylabel(f'{dataset_label}\nLST (°C)', fontsize=9)
+        ax.tick_params(axis='y', labelsize=8)
+        ax.grid(axis='y', linestyle=':', linewidth=0.5, alpha=0.5)
+        ax.legend(loc='upper right', fontsize=7, ncol=2, framealpha=0.88,
+                  handlelength=1.2, columnspacing=0.8,
+                  bbox_to_anchor=(0.99, 0.99), borderaxespad=0)
+
+    # ── draw both panels ─────────────────────────────────────────────────────
+    _draw_panel(axes[0], modis_df, 'MODIS', audit_day, audit_night, 'modis')
+    _draw_panel(axes[1], era5_df,  'ERA5-Land', audit_day, audit_night, 'era5')
+
+    # ── x-axis (shared) ───────────────────────────────────────────────────────
+    axes[1].xaxis.set_major_locator(mdates.MonthLocator())
+    axes[1].xaxis.set_major_formatter(mdates.DateFormatter('%b'))
+    axes[1].tick_params(axis='x', labelsize=8)
+
+    # ── title ─────────────────────────────────────────────────────────────────
+    fig.suptitle(
+        f'{city_name}  —  Daily Urban-Core LST  ({study_year})\n'
+        'Dashed = P90 threshold  |  Grey shade = persistent hot event  |  '
+        'Bracket = selected event for SEVIRI',
+        fontsize=9, y=0.99,
+    )
+
+    fig.tight_layout(rect=[0, 0, 1, 0.97])
+
+    if output_path is not None:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(str(output_path), bbox_inches='tight',
+                    facecolor='white', dpi=dpi)
+
+    if show_inline:
+        _plt.show()
+    else:
+        if output_path is not None:
+            _plt.close(fig)
+
+    return fig
+
+
+def create_cluster_event_frequency_chart(
+    cluster_event_summary,
+    city_event_records: dict,
+    cluster_lookup: dict,
+    period: str = 'day',
+    output_path=None,
+    figsize=None,
+    dpi: int = 300,
+):
+    """
+    Grouped barplot: number of ERA5 persistent events per city, grouped by
+    cluster, colour-coded by tier of the selected event.
+
+    Parameters
+    ----------
+    cluster_event_summary : pd.DataFrame
+        Output of ``daily_analysis_utils.aggregate_cluster_events``.
+    city_event_records : dict
+        ``{city: audit_dict}`` — one audit per city for the given period.
+    cluster_lookup : dict
+        ``{city: cluster_int}``.
+    period : str
+        'day' or 'night' (for the axis title).
+    output_path : str or Path or None
+    figsize : tuple or None
+        Auto-scaled from number of cities if None.
+    dpi : int
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+    """
+    import matplotlib.pyplot as _plt
+    import matplotlib.patches as mpatches
+
+    _TIER_COLORS = {'EXCELLENT': '#1a9850', 'GOOD': '#f77f00',
+                    'FAIR': '#999999', None: '#cccccc'}
+    _TIER_ORDER  = ['EXCELLENT', 'GOOD', 'FAIR']
+
+    # Build per-city rows: city, cluster, n_events, n_days, tier_of_selected
+    rows = []
+    for city, cnum in sorted(cluster_lookup.items()):
+        rec = city_event_records.get(city)
+        if rec is None:
+            continue
+        n_events = len(rec.get('era5_persistent_events', []))
+        sel      = rec.get('selected_event')
+        tier     = sel.get('tier') if sel else None
+        dur      = sel.get('duration', 0) if sel else 0
+        rows.append({'city': city, 'cluster': int(cnum),
+                     'n_events': n_events, 'duration': dur, 'tier': tier})
+
+    if not rows:
+        return None
+
+    import pandas as _pd
+    df_plot = _pd.DataFrame(rows).sort_values(['cluster', 'city'])
+    cities  = df_plot['city'].tolist()
+    n       = len(cities)
+
+    if figsize is None:
+        figsize = (max(8, n * 0.45), 5)
+
+    fig, ax = _plt.subplots(figsize=figsize)
+
+    bar_colors = [_TIER_COLORS.get(t, '#cccccc') for t in df_plot['tier']]
+    bars = ax.bar(range(n), df_plot['n_events'], color=bar_colors,
+                  edgecolor='white', linewidth=0.5)
+
+    # Label each bar with duration of selected event
+    for i, (bar, row) in enumerate(zip(bars, df_plot.itertuples())):
+        if row.duration > 0:
+            ax.text(bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() + 0.1,
+                    f'{row.duration}d', ha='center', va='bottom',
+                    fontsize=6.5, color='#333333')
+
+    # ── x-axis city labels with cluster numbers ───────────────────────────────
+    x_labels = [f"{r['city']}\n[C{r['cluster']:02d}]" for _, r in df_plot.iterrows()]
+    ax.set_xticks(range(n))
+    ax.set_xticklabels(x_labels, fontsize=7, rotation=45, ha='right')
+
+    # ── cluster boundary lines ────────────────────────────────────────────────
+    prev_cl = None
+    for i, cl in enumerate(df_plot['cluster']):
+        if prev_cl is not None and cl != prev_cl:
+            ax.axvline(i - 0.5, color='#444444', linewidth=0.8, linestyle=':')
+        prev_cl = cl
+
+    # ── legend ───────────────────────────────────────────────────────────────
+    patches = [mpatches.Patch(color=_TIER_COLORS[t], label=t) for t in _TIER_ORDER]
+    ax.legend(handles=patches, title='Selected event tier',
+              loc='upper right', fontsize=8, title_fontsize=8)
+
+    ax.set_ylabel('ERA5 persistent hot events (count)', fontsize=9)
+    ax.set_xlabel('City [Cluster]', fontsize=9)
+    ax.set_title(
+        f'ERA5 Persistent Hot-Event Count per City — {period.capitalize()}\n'
+        'Bar colour = tier of selected SEVIRI event  |  Label = selected duration (days)',
+        fontsize=9,
+    )
+    ax.yaxis.set_major_locator(_plt.MaxNLocator(integer=True))
+    ax.grid(axis='y', linestyle=':', linewidth=0.5, alpha=0.5)
+
+    fig.tight_layout()
+
+    if output_path is not None:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(str(output_path), bbox_inches='tight',
+                    facecolor='white', dpi=dpi)
+        _plt.close(fig)
+
+    return fig
+
+
+def create_seviri_era5_scatter(
+    day_rows: list,
+    night_rows: list,
+    zone: str = 'urban_core',
+    output_dir=None,
+    output_stem: str = 'SEVIRI_vs_ERA5_scatter_combined',
+    figsize=(11.69, 5.85),
+    dpi: int = 300,
+):
+    """
+    Combined day + night scatter: SEVIRI LST vs ERA5-Land LST (event window).
+
+    Two panels side-by-side (left = Day, right = Night).  Each point = one city.
+    Colour = MODIS-tier of the selected event.  1:1 line + OLS regression.
+    Saves PDF + SVG.
+
+    Parameters
+    ----------
+    day_rows, night_rows : list of dict
+        Each dict: 'city', 'era5_mean', 'seviri_mean', 'tier' (optional).
+    zone : str
+        Zone label for axis titles ('urban_core', 'bra', etc.).
+    output_dir : str or Path or None
+    output_stem : str
+    figsize : tuple  — half-A4 landscape by default
+    dpi : int
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure or None
+    """
+    import matplotlib.pyplot as _plt
+    import matplotlib.patches as _mpatches
+    import numpy as _np
+
+    _TIER_COLORS = {
+        'EXCELLENT': '#1a9850',
+        'GOOD':      '#f77f00',
+        'FAIR':      '#999999',
+        None:        '#cccccc',
+    }
+
+    all_rows = {'day': day_rows or [], 'night': night_rows or []}
+    panels = [
+        (p, [r for r in all_rows[p]
+             if r.get('era5_mean') is not None and r.get('seviri_mean') is not None])
+        for p in ('day', 'night')
+    ]
+    panels = [(p, rows) for p, rows in panels if rows]
+
+    if not panels:
+        return None
+
+    n_panels = len(panels)
+    fig, axes = _plt.subplots(1, n_panels, figsize=figsize, squeeze=False)
+
+    zone_label = zone.replace('_', ' ').title()
+    all_tiers_seen: set = set()
+
+    for col, (period, rows) in enumerate(panels):
+        ax = axes[0, col]
+        era5_vals   = _np.array([r['era5_mean']   for r in rows])
+        seviri_vals = _np.array([r['seviri_mean'] for r in rows])
+        tiers       = [r.get('tier') for r in rows]
+        cities      = [r['city'] for r in rows]
+        colors      = [_TIER_COLORS.get(t, '#cccccc') for t in tiers]
+        all_tiers_seen.update(tiers)
+
+        ax.scatter(era5_vals, seviri_vals, c=colors, s=55,
+                   edgecolors='white', linewidths=0.5, zorder=3)
+
+        lims = [min(era5_vals.min(), seviri_vals.min()) - 1,
+                max(era5_vals.max(), seviri_vals.max()) + 1]
+        ax.plot(lims, lims, 'k--', linewidth=0.8, label='1:1', zorder=2)
+
+        if len(era5_vals) >= 2:
+            m, b = _np.polyfit(era5_vals, seviri_vals, 1)
+            x_fit = _np.linspace(lims[0], lims[1], 100)
+            ax.plot(x_fit, m * x_fit + b, color='#d73027', linewidth=1.2,
+                    label=f'Fit: y={m:.2f}x+{b:.1f}', zorder=2)
+            resid  = seviri_vals - (m * era5_vals + b)
+            ss_res = (resid ** 2).sum()
+            ss_tot = ((seviri_vals - seviri_vals.mean()) ** 2).sum()
+            r2     = 1 - ss_res / ss_tot if ss_tot > 0 else float('nan')
+            ax.text(0.04, 0.96, f'r² = {r2:.3f}   n = {len(rows)}',
+                    transform=ax.transAxes, fontsize=7.5, va='top',
+                    bbox=dict(boxstyle='round,pad=0.25', fc='white', alpha=0.8))
+
+        for vx, vy, city in zip(era5_vals, seviri_vals, cities):
+            ax.annotate(city, (vx, vy), fontsize=5,
+                        xytext=(3, 3), textcoords='offset points', color='#444444')
+
+        ax.set_xlim(lims)
+        ax.set_ylim(lims)
+        ax.set_aspect('equal')
+        ax.grid(linestyle=':', linewidth=0.4, alpha=0.45)
+        ax.set_xlabel('ERA5-Land LST (°C)', fontsize=9)
+        ax.set_ylabel('SEVIRI LST (°C)', fontsize=9)
+        ax.set_title(
+            f'{"Daytime" if period == "day" else "Nighttime"} | {zone_label}',
+            fontsize=10, fontweight='bold',
+        )
+        ax.legend(fontsize=7, loc='lower right')
+
+    tier_order = [t for t in ('EXCELLENT', 'GOOD', 'FAIR', None) if t in all_tiers_seen]
+    tier_handles = [
+        _mpatches.Patch(color=_TIER_COLORS.get(t, '#cccccc'), label=t or 'No event')
+        for t in tier_order
+    ]
+    if tier_handles:
+        fig.legend(handles=tier_handles, title='MODIS tier',
+                   fontsize=7, title_fontsize=7.5,
+                   loc='lower center', ncol=len(tier_handles),
+                   bbox_to_anchor=(0.5, -0.01))
+
+    fig.suptitle(
+        'SEVIRI vs ERA5-Land LST — Event-Window Comparison\n'
+        '(one point per city; event-window mean)',
+        fontsize=10, y=1.01,
+    )
+    fig.tight_layout()
+
+    if output_dir is not None:
+        from pathlib import Path as _Path
+        _Path(output_dir).mkdir(parents=True, exist_ok=True)
+        for ext in ('svg', 'pdf'):
+            fig.savefig(
+                str(_Path(output_dir) / f'{output_stem}.{ext}'),
+                format=ext, bbox_inches='tight', facecolor='white', dpi=dpi,
+            )
+        _plt.close(fig)
+
+    return fig
+
+
+def create_era5_modis_hexbin(
+    paired_data: dict,
+    title: str = 'ERA5-Land vs MODIS Daily LST',
+    output_path=None,
+    figsize=(11, 5),
+    dpi: int = 300,
+    gridsize: int = 35,
+    show_inline: bool = False,
+):
+    """
+    Two-panel hexbin scatter plot comparing ERA5-Land vs MODIS daily LST.
+
+    Left panel = Day, Right panel = Night.  Each hexbin cell is coloured by
+    the number of co-located (ERA5, MODIS) observation pairs it contains.
+    A 1:1 reference line and an OLS regression line are drawn on both panels.
+    Metric annotations (r², bias, RMSE, n) appear in the top-left corner.
+
+    This function works for both city-level (one city's paired observations)
+    and cluster-level (pooled observations from all cities in the cluster).
+
+    Parameters
+    ----------
+    paired_data : dict
+        Keys ``'day'`` and/or ``'night'``, each containing a dict with:
+        - ``'era5'``  : array-like of ERA5 LST values (°C)
+        - ``'modis'`` : array-like of MODIS LST values (°C)
+        - ``'metrics'``: dict with keys r, r2, bias, rmse, mae, n
+          (output of ``daily_analysis_utils.compute_correlation_metrics``)
+    title : str
+        Figure suptitle.
+    output_path : str or Path or None
+        Save path for the SVG figure.
+    figsize : tuple
+        Figure size in inches (default half-A4 landscape).
+    dpi : int
+    gridsize : int
+        Number of hexagons along each axis (higher = finer grid).
+    show_inline : bool
+        If True, call plt.show(); else close after saving.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure or None
+    """
+    import matplotlib.pyplot as _plt
+    import matplotlib.colors as mcolors
+    import numpy as _np
+
+    periods_present = [p for p in ('day', 'night') if p in paired_data
+                       and len(paired_data[p].get('era5', [])) > 1]
+    if not periods_present:
+        return None
+
+    n_panels = len(periods_present)
+    fig, axes = _plt.subplots(1, n_panels, figsize=figsize, squeeze=False)
+
+    # Truncated colormaps: skip the near-white bottom 22 % of the stock maps
+    # so that even a single-observation hexbin shows a visible dark golden colour.
+    import numpy as _np_hb
+    import matplotlib.cm as _mcm_hb
+    from matplotlib.colors import LinearSegmentedColormap as _LSC_hb
+    _day_cmap_hb   = _LSC_hb.from_list(
+        'YlOrRd_dark', _mcm_hb.get_cmap('YlOrRd')(_np_hb.linspace(0.22, 1.0, 256)))
+    _night_cmap_hb = _LSC_hb.from_list(
+        'YlGnBu_dark', _mcm_hb.get_cmap('YlGnBu')(_np_hb.linspace(0.22, 1.0, 256)))
+    _PERIOD_COLORS = {'day': _day_cmap_hb, 'night': _night_cmap_hb}
+    _PERIOD_LABELS = {'day': 'Daytime', 'night': 'Nighttime'}
+
+    for col, period in enumerate(periods_present):
+        ax   = axes[0, col]
+        data = paired_data[period]
+        era5  = _np.array(data['era5'],  dtype=float)
+        modis = _np.array(data['modis'], dtype=float)
+        mask  = _np.isfinite(era5) & _np.isfinite(modis)
+        era5, modis = era5[mask], modis[mask]
+
+        if len(era5) < 2:
+            ax.text(0.5, 0.5, 'Insufficient data', transform=ax.transAxes,
+                    ha='center', va='center', color='grey')
+            continue
+
+        cmap  = _PERIOD_COLORS.get(period, 'viridis')
+        hb    = ax.hexbin(era5, modis, gridsize=gridsize, cmap=cmap,
+                          mincnt=1, linewidths=0.2)
+        cb    = fig.colorbar(hb, ax=ax, shrink=0.85, pad=0.02)
+        cb.set_label('Observation count', fontsize=7)
+        cb.ax.tick_params(labelsize=6)
+
+        # 1:1 line
+        lims = [min(era5.min(), modis.min()) - 1,
+                max(era5.max(), modis.max()) + 1]
+        ax.plot(lims, lims, 'k--', linewidth=1.0, label='1:1', zorder=3)
+
+        # OLS regression
+        m, b = _np.polyfit(era5, modis, 1)
+        x_fit = _np.linspace(lims[0], lims[1], 200)
+        ax.plot(x_fit, m * x_fit + b, color='#e31a1c', linewidth=1.2,
+                label=f'Fit (slope={m:.2f})', zorder=3)
+
+        ax.set_xlim(lims); ax.set_ylim(lims)
+        ax.set_aspect('equal')
+
+        # Metrics annotation
+        mets = data.get('metrics', {})
+        r    = mets.get('r',    float('nan'))
+        r2   = mets.get('r2',   float('nan'))
+        bias = mets.get('bias', float('nan'))
+        rmse = mets.get('rmse', float('nan'))
+        n    = mets.get('n',    len(era5))
+        _fmt = lambda v: f'{v:.3f}' if _np.isfinite(v) else 'N/A'
+        ann  = (f"r = {_fmt(r)}\n"
+                f"r² = {_fmt(r2)}\n"
+                f"Bias = {bias:+.2f}°C\n"
+                f"RMSE = {_fmt(rmse)}°C\n"
+                f"n = {n:,}")
+        ax.text(0.03, 0.97, ann, transform=ax.transAxes,
+                fontsize=7.5, va='top', family='monospace',
+                bbox=dict(boxstyle='round,pad=0.3', fc='white', alpha=0.75))
+
+        ax.set_xlabel('ERA5-Land LST (°C)', fontsize=9)
+        ax.set_ylabel('MODIS LST (°C)',      fontsize=9)
+        ax.set_title(_PERIOD_LABELS[period], fontsize=10, fontweight='bold')
+        ax.tick_params(labelsize=8)
+        ax.grid(linestyle=':', linewidth=0.4, alpha=0.4)
+        ax.legend(fontsize=7, loc='lower right')
+
+    fig.suptitle(title, fontsize=10, y=1.01)
+    fig.tight_layout()
+
+    if output_path is not None:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(str(output_path), bbox_inches='tight',
+                    facecolor='white', dpi=dpi)
+
+    if show_inline:
+        _plt.show()
+    elif output_path is not None:
+        _plt.close(fig)
+
+    return fig
+
+    return fig_a, fig_m
+
+
+def create_suhii_city_chart(
+    df_seviri,
+    cluster_lookup: dict,
+    output_dir=None,
+    output_stem: str = 'SEVIRI_SUHII_cities',
+    figsize=(8.27, 11.69),
+    dpi: int = 300,
+    cl_legend_ncol: int = 3,
+):
+    """
+    Publication-quality city-level SUHII chart (portrait A4).
+
+    Two panels (Daytime left, Nighttime right).  Cities on Y-axis sorted by
+    daytime SUHII descending.  Bar fill = Cluster25 colour.
+
+    Parameters
+    ----------
+    df_seviri : pd.DataFrame
+        Columns needed: 'city', 'period', 'suhii', 'note'.
+        Only rows where note == 'ok' are plotted.
+    cluster_lookup : dict
+        city → Cluster25 integer.
+    output_dir : str or Path or None
+    output_stem : str
+    figsize : tuple  — default portrait A4
+    dpi : int
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure or None
+    """
+    import matplotlib.pyplot as _plt
+    import matplotlib.patches as _mpatches
+    import numpy as _np
+
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from config import CLUSTER25_COLORS as _CL_COL
+    except Exception:
+        _CL_COL = {}
+
+    _FALLBACK_CLR = '#888888'
+
+    _ok = df_seviri[df_seviri['note'] == 'ok'].copy()
+    _ok = _ok.dropna(subset=['suhii'])
+    if _ok.empty:
+        print('  No valid SEVIRI SUHII data — download cities first.')
+        return None
+
+    _day_df   = _ok[_ok['period'] == 'day'].set_index('city')['suhii']
+    _night_df = _ok[_ok['period'] == 'night'].set_index('city')['suhii']
+
+    _all_cities = sorted(set(_day_df.index) | set(_night_df.index))
+    _all_cities.sort(
+        key=lambda c: (
+            -float(_day_df[c])
+            if (c in _day_df.index and _np.isfinite(float(_day_df[c])))
+            else float('inf')
+        )
+    )
+
+    n = len(_all_cities)
+    if n == 0:
+        return None
+
+    y_pos = _np.arange(n)
+    bar_h = 0.55
+
+    # sharex=True enforces a uniform x-axis (SUHII) scale across both panels
+    fig, axes = _plt.subplots(1, 2, figsize=figsize, sharey=True, sharex=True,
+                               gridspec_kw={'wspace': 0.06})
+
+    for period, ax in [('day', axes[0]), ('night', axes[1])]:
+        _pdata = _day_df if period == 'day' else _night_df
+        for i, city in enumerate(_all_cities):
+            if city not in _pdata.index:
+                continue
+            val = float(_pdata[city])
+            if not _np.isfinite(val):
+                continue
+            cl_num = cluster_lookup.get(city)
+            fill   = (_CL_COL.get(cl_num, _FALLBACK_CLR)
+                      if cl_num is not None else _FALLBACK_CLR)
+            ax.barh(y_pos[i], val, bar_h,
+                    color=fill, edgecolor='#333333', linewidth=0.3, zorder=3)
+
+        ax.axvline(0, color='#555555', linewidth=0.8, zorder=2)
+        ax.grid(axis='x', linestyle=':', linewidth=0.35, alpha=0.45, zorder=0)
+        ax.set_xlabel('SUHII (°C)', fontsize=9)
+        ax.set_title(f'{"Daytime" if period == "day" else "Nighttime"}',
+                     fontsize=10, fontweight='bold')
+        ax.tick_params(labelsize=7)
+
+    axes[0].set_yticks(y_pos)
+    axes[0].set_yticklabels(_all_cities, fontsize=6)
+    axes[0].invert_yaxis()
+    axes[1].tick_params(left=False, labelleft=False)
+
+    _used_cl = sorted({cluster_lookup.get(c) for c in _all_cities
+                       if cluster_lookup.get(c) is not None})
+    _cl_handles = [
+        _mpatches.Patch(facecolor=_CL_COL.get(n, _FALLBACK_CLR), label=f'Cl {n}')
+        for n in _used_cl
+    ]
+
+    fig.legend(handles=_cl_handles,
+               title='Cluster (fill)', title_fontsize=7, fontsize=6.5,
+               loc='lower right', bbox_to_anchor=(0.98, 0.01),
+               ncol=cl_legend_ncol, framealpha=0.9)
+
+    _d_vals = _day_df.dropna()
+    _n_vals = _night_df.dropna()
+    if len(_d_vals) > 0 or len(_n_vals) > 0:
+        _nat_txt = (
+            f"National  Day: μ={_d_vals.mean():.2f}°C  "
+            f"[{_d_vals.min():.2f}–{_d_vals.max():.2f}]\n"
+            f"          Night: μ={_n_vals.mean():.2f}°C  "
+            f"[{_n_vals.min():.2f}–{_n_vals.max():.2f}]"
+        )
+        fig.text(0.02, 0.01, _nat_txt, ha='left', va='bottom', fontsize=7,
+                 bbox=dict(boxstyle='round,pad=0.4', fc='#f7f7f7', alpha=0.9))
+
+    fig.suptitle(
+        'City-Level SEVIRI SUHII\n'
+        '(fill = cluster colour  |  sorted by daytime ↓)',
+        fontsize=10, y=0.998,
+    )
+    fig.tight_layout(rect=[0, 0.08, 1, 0.975])
+
+    if output_dir is not None:
+        from pathlib import Path as _Path
+        _Path(output_dir).mkdir(parents=True, exist_ok=True)
+        for ext in ('svg', 'pdf'):
+            fig.savefig(
+                str(_Path(output_dir) / f'{output_stem}.{ext}'),
+                format=ext, bbox_inches='tight', facecolor='white', dpi=dpi,
+            )
+        _plt.close(fig)
+
+    return fig
+
+
+def create_heat_event_stacked_bar(
+    stats_df,
+    level: str = 'city',
+    output_dir=None,
+    output_stem: str = None,
+    figsize=None,
+    dpi: int = 300,
+):
+    """
+    Combined ERA5-Land + MODIS hot-day count chart (horizontal bars).
+
+    Two panels side-by-side: left = ERA5-Land, right = MODIS.
+    Day (red shades) and Night (blue shades) bars sit above/below each entity.
+    'cluster' level → A4 landscape (11.69" × 8.27").
+    'city'    level → A4 portrait  (8.27" × 11.69").
+    Saved as PDF + SVG.
+
+    Parameters
+    ----------
+    stats_df : pd.DataFrame
+        Columns: entity-id col, 'dataset', 'period',
+        'n_hot_days', 'total_persistent_days'.
+    level : str
+        'city' or 'cluster'.
+    output_dir : str or Path or None
+    output_stem : str or None  — defaults to 'hot_day_counts_{level}'
+    figsize : tuple or None
+    dpi : int
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure or None
+    """
+    import matplotlib.pyplot as _plt
+    import numpy as _np
+    import matplotlib.patches as _mpat
+
+    id_col = 'city' if level == 'city' else 'cluster_num'
+    if figsize is None:
+        figsize = (11.69, 8.27) if level == 'cluster' else (8.27, 11.69)
+    if output_stem is None:
+        output_stem = f'hot_day_counts_{level}'
+
+    DAY_PERSIST = '#a50026'
+    DAY_ISOL    = '#f4a582'
+    NGT_PERSIST = '#313695'
+    NGT_ISOL    = '#92c5de'
+    bar_h = 0.28
+
+    _df = stats_df.copy()
+    _df['isolated_days'] = _np.maximum(
+        _df['n_hot_days'].fillna(0) - _df['total_persistent_days'].fillna(0), 0
+    ).astype(int)
+    _df['persist_days'] = _df['total_persistent_days'].fillna(0).astype(int)
+
+    all_entities = sorted(
+        _df[id_col].dropna().unique(),
+        key=lambda x: (int(x) if str(x).isdigit() else 0, str(x)),
+    )
+    n = len(all_entities)
+    if n == 0:
+        return None
+
+    y     = _np.arange(n)
+    y_day = y - bar_h * 0.6
+    y_ngt = y + bar_h * 0.6
+
+    fig, axes = _plt.subplots(1, 2, figsize=figsize, sharey=True,
+                               gridspec_kw={'wspace': 0.06})
+
+    def _get(sub, entity, period, col):
+        r = sub[(sub[id_col] == entity) & (sub['period'] == period)]
+        return int(r[col].iloc[0]) if not r.empty else 0
+
+    for col_i, (ds, ds_label) in enumerate([('ERA5-Land', 'ERA5-Land'), ('MODIS', 'MODIS')]):
+        ax  = axes[col_i]
+        sub = _df[_df['dataset'] == ds]
+
+        for i, ent in enumerate(all_entities):
+            dp  = _get(sub, ent, 'day',   'persist_days')
+            di  = _get(sub, ent, 'day',   'isolated_days')
+            np_ = _get(sub, ent, 'night', 'persist_days')
+            ni  = _get(sub, ent, 'night', 'isolated_days')
+
+            ax.barh(y_day[i], dp,  bar_h, color=DAY_PERSIST, zorder=3)
+            ax.barh(y_day[i], di,  bar_h, left=dp,  color=DAY_ISOL,    zorder=3)
+            ax.barh(y_ngt[i], np_, bar_h, color=NGT_PERSIST, zorder=3)
+            ax.barh(y_ngt[i], ni,  bar_h, left=np_, color=NGT_ISOL,    zorder=3)
+
+        ax.set_title(ds_label, fontsize=10, fontweight='bold')
+        ax.set_xlabel('Hot-day count (days)', fontsize=8.5)
+        ax.grid(axis='x', linestyle=':', linewidth=0.4, alpha=0.5, zorder=0)
+        ax.axvline(0, color='#888888', linewidth=0.5)
+        ax.tick_params(labelsize=7.5)
+
+    axes[0].set_yticks(y)
+    axes[0].set_yticklabels(
+        [str(e) for e in all_entities],
+        fontsize=6.5 if level == 'city' else 8,
+    )
+    axes[0].invert_yaxis()
+    axes[0].set_ylabel(id_col.replace('_', ' ').title(), fontsize=9)
+    axes[1].tick_params(left=False, labelleft=False)
+
+    _handles = [
+        _mpat.Patch(facecolor=DAY_PERSIST, label='Day — persistent'),
+        _mpat.Patch(facecolor=DAY_ISOL,    label='Day — isolated'),
+        _mpat.Patch(facecolor=NGT_PERSIST, label='Night — persistent'),
+        _mpat.Patch(facecolor=NGT_ISOL,    label='Night — isolated'),
+    ]
+    fig.legend(handles=_handles, loc='lower center', ncol=4, fontsize=7.5,
+               framealpha=0.9, bbox_to_anchor=(0.5, 0.0))
+
+    fig.suptitle(
+        f'Hot-Day Counts — {level.title()} Level  '
+        '|  Dark = persistent event days  |  Light = isolated hot days',
+        fontsize=10, y=0.995,
+    )
+    fig.tight_layout(rect=[0, 0.06, 1, 0.97])
+
+    if output_dir is not None:
+        from pathlib import Path as _Path
+        _Path(output_dir).mkdir(parents=True, exist_ok=True)
+        for ext in ('svg', 'pdf'):
+            fig.savefig(
+                str(_Path(output_dir) / f'{output_stem}.{ext}'),
+                format=ext, bbox_inches='tight', facecolor='white', dpi=dpi,
+            )
+        _plt.close(fig)
+
+    return fig
+
+    return fig
+
+
+
+
+
+# === PUBLICATION FIGURES ===
+
+_A4_W  = 8.27
+_A4_H  = 11.69
+_HALF_H = _A4_H / 2
+
+
+def create_publication_nigeria_overview(
+    aoi_dict: Dict,
+    cities_csv_path,
+    landscape_path,
+    nigeria_path,
+    cluster25_colors: Dict,
+    active_cluster_ids: list = None,
+    study_year: int = 2024,
+    pop_override: Dict = None,
+    save_path=None,
+    dpi: int = 300,
+    figsize: tuple = (8.27, 11.69),
+    pop_scale: float = 0.6,
+) -> plt.Figure:
+    """A4 publication Nigeria overview: Cluster25 fills + proportional circles + cluster legend."""
+    import matplotlib.patches as mpatches
+
+    nigeria_gdf   = gpd.read_file(nigeria_path).to_crs('EPSG:4326')
+    landscape_gdf = gpd.read_file(landscape_path).to_crs('EPSG:4326')
+    landscape_gdf['geometry'] = landscape_gdf.geometry.buffer(0)
+
+    _p = Path(cities_csv_path)
+    if _p.suffix.lower() in ('.xlsx', '.xls'):
+        _df = pd.read_excel(cities_csv_path, sheet_name='Data')
+    else:
+        _df = pd.read_csv(cities_csv_path, thousands=',')
+    if 'City_Name' in _df.columns:
+        _df = _df.rename(columns={'City_Name': 'Urban Agglomeration',
+                                   'PWCent_Latitude': 'Latitude',
+                                   'PWCent_Longitude': 'Longitude'})
+        _df['Urban Agglomeration'] = _df['Urban Agglomeration'].str.strip()
+
+    yr = str(study_year)
+    pop_lookup, coord_lookup = {}, {}
+    for _, row in _df.iterrows():
+        name = row['Urban Agglomeration']
+        if pd.notna(name) and yr in _df.columns:
+            pv = row[yr]
+            pop_lookup[name]   = float(pv) * 1_000 if pd.notna(pv) else 0
+            coord_lookup[name] = (float(row['Longitude']), float(row['Latitude']))
+    if pop_override:
+        for c, pv in pop_override.items():
+            pop_lookup[c] = pv
+
+    cities = sorted(aoi_dict.keys())
+    land_merged = landscape_gdf.dissolve(by='Cluster25', as_index=False)
+    land_merged['color'] = land_merged['Cluster25'].map(cluster25_colors)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    fig.patch.set_facecolor('white')
+    land_merged.plot(ax=ax, color=land_merged['color'],
+                     edgecolor='white', linewidth=0.2, alpha=0.6, zorder=1)
+    nigeria_gdf.plot(ax=ax, facecolor='none', edgecolor='#333333',
+                     linewidth=1.5, zorder=2)
+
+    max_pop = max((pop_lookup.get(c, 0) for c in cities), default=1) or 1
+    label_texts, label_x, label_y = [], [], []
+
+    def _fmt(p):
+        if p >= 1_000_000: return f'{p/1_000_000:.1f}M'
+        if p >= 1_000:     return f'{p/1_000:.0f}k'
+        return f'{p:.0f}'
+
+    for city in cities:
+        lon, lat = coord_lookup.get(city, (None, None))
+        if lon is None:
+            continue
+        pop    = pop_lookup.get(city, 0)
+        radius = pop_scale * np.sqrt(pop / max_pop) if pop > 0 else 0
+        if radius > 0:
+            ax.add_patch(plt.Circle((lon, lat), radius, facecolor='#555555',
+                                    edgecolor='white', linewidth=0.8, alpha=0.75, zorder=4))
+        ax.plot(lon, lat, 'ko', markersize=3, zorder=6)
+        txt = ax.text(lon, lat - radius - 0.12, f'{city}\n({_fmt(pop)})',
+                      ha='center', va='top', fontsize=6.5, fontweight='bold',
+                      color='#111', zorder=7, linespacing=0.85)
+        label_texts.append(txt); label_x.append(lon); label_y.append(lat - radius - 0.12)
+
+    try:
+        from adjustText import adjust_text
+        # Keep labels close to their circles: small forces, tight expansion and a
+        # short maximum displacement so a label never drifts far from its city.
+        adjust_text(label_texts, x=label_x, y=label_y, ax=ax,
+                    force_text=(0.12, 0.25), force_points=(0.10, 0.18),
+                    expand_text=(1.02, 1.05), expand_points=(1.02, 1.05),
+                    arrowprops=dict(arrowstyle='-', color='#999', lw=0.4,
+                                    shrinkA=3, shrinkB=2),
+                    ensure_inside_axes=True, max_move=0.4)
+    except ImportError:
+        pass
+
+    bounds = nigeria_gdf.total_bounds
+    ax.set_xlim(bounds[0] - 0.5, bounds[2] + 0.5)
+    ax.set_ylim(bounds[1] - 1.0, bounds[3] + 0.5)
+    ax.set_aspect('equal')
+    ax.grid(True, alpha=0.15, linestyle='--', linewidth=0.5, zorder=0)
+    ax.set_xlabel('Longitude', fontsize=10); ax.set_ylabel('Latitude', fontsize=10)
+    ax.set_title('Study Cities — Nigeria Cluster25 Landscape Classification',
+                 fontsize=13, fontweight='bold', pad=14)
+
+    sc_cx = (bounds[0] + bounds[2]) / 2; sc_lat = bounds[1] - 0.7
+    ax.plot([sc_cx - 0.45, sc_cx + 0.45], [sc_lat, sc_lat], 'k-', linewidth=3, zorder=8)
+    for _xx in [sc_cx - 0.45, sc_cx + 0.45]:
+        ax.plot([_xx, _xx], [sc_lat - 0.1, sc_lat + 0.1], 'k-', linewidth=2, zorder=8)
+    ax.text(sc_cx, sc_lat + 0.15, '100 km', ha='center', va='bottom',
+            fontsize=8, fontweight='bold', zorder=8)
+    ax.annotate('N', xy=(0.96, 0.96), xytext=(0.96, 0.91), xycoords='axes fraction',
+                fontsize=12, ha='center', fontweight='bold',
+                arrowprops=dict(arrowstyle='->', lw=2, color='black'), zorder=10)
+
+    _items = [
+        plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='black',
+                   markersize=5, label='City location'),
+        mpatches.Patch(facecolor='none', edgecolor='#333', linewidth=1.5,
+                       label='National boundary'),
+        mpatches.Patch(facecolor='none', edgecolor='none', label=''),
+        mpatches.Patch(facecolor='none', edgecolor='none', label='Landscape Clusters (Cl25):'),
+    ]
+    _cids = sorted(active_cluster_ids) if active_cluster_ids \
+            else sorted(int(x) for x in land_merged['Cluster25'].unique())
+    for cid in _cids:
+        col = cluster25_colors.get(int(cid))
+        if col:
+            _items.append(mpatches.Patch(facecolor=col, edgecolor='white',
+                                          linewidth=0.5, alpha=0.8, label=f'Cluster {cid}'))
+    leg = ax.legend(handles=_items, loc='lower right', fontsize=7, framealpha=0.93,
+                    edgecolor='#555', title='Legend', title_fontsize=9, ncol=2,
+                    borderpad=0.8, labelspacing=0.35, handlelength=1.2, handletextpad=0.4)
+    fig.tight_layout()
+
+    # ── Graduated proportional-circle key, drawn just above the legend (no frame) ──
+    # Circles are in data coordinates (true circles under aspect='equal'); the anchor is
+    # read back from the rendered legend box so the key always sits above the legend.
+    from matplotlib.patches import Circle as _RefCircle
+    fig.canvas.draw()
+    _bb = leg.get_window_extent().transformed(ax.transAxes.inverted())
+    _cx, _by = ax.transData.inverted().transform(
+        ax.transAxes.transform(((_bb.x0 + _bb.x1) / 2, _bb.y1 + 0.012)))
+    _r_big = pop_scale * np.sqrt(1.0)
+    for _fr in (1.0, 0.4, 0.12):
+        _v = max_pop * _fr
+        _r = pop_scale * np.sqrt(_fr)
+        ax.add_patch(_RefCircle((_cx, _by + _r), _r, fill=False, edgecolor='#555',
+                                linewidth=0.9, zorder=9, clip_on=False))
+        _top = _by + 2 * _r
+        ax.plot([_cx - _r, _cx - _r_big - 0.12], [_top, _top], '-',
+                color='#888', lw=0.5, zorder=9, clip_on=False)
+        ax.text(_cx - _r_big - 0.16, _top, _fmt(_v), ha='right', va='center',
+                fontsize=6.5, zorder=10, clip_on=False)
+    ax.text(_cx, _by + 2 * _r_big + 0.06, 'Population', ha='center', va='bottom',
+            fontsize=7.5, fontweight='bold', zorder=10, clip_on=False)
+
+    if save_path:
+        _sp = Path(save_path)
+        fig.savefig(_sp.with_suffix('.svg'), format='svg', dpi=dpi,
+                    bbox_inches='tight', facecolor='white')
+        fig.savefig(_sp.with_suffix('.pdf'), format='pdf',
+                    bbox_inches='tight', facecolor='white')
+        print(f"   Saved: {_sp.stem}.svg + .pdf")
+    return fig
+
+
+def _draw_zone_panel(
+    ax,
+    aoi_gdf,
+    cr_gdf=None,
+    uc_gdf=None,
+    bra_gdf=None,
+    landscape_gdf=None,
+    cluster25_colors=None,
+    water_gdf=None,
+    roads_gdf=None,
+    places_gdf=None,
+    label_buffer_km: float = 1.4,
+) -> tuple:
+    """
+    Render three-zone layers on an existing axes.
+
+    Layer style rules:
+    - CR outline: thick (#333333, lw=2.0)
+    - UC outline: red (#cc0000, lw=1.8)
+    - BRA outline: very thin (#7a5c00, lw=0.4)
+    - Water: fill only — edgecolor set equal to facecolor so any rendered edge
+      is invisible regardless of backend antialiasing behaviour.
+    - Roads: thin grey lines
+
+    Returns (legend_handles, legend_labels).
+    """
+    from matplotlib.patches import Patch
+    from matplotlib.lines   import Line2D
+
+    _WATER_FC = '#4a9eca'   # water fill colour — reused for edge to suppress outlines
+
+    def _prep(gdf):
+        if gdf is None or gdf.empty:
+            return None
+        out = gdf.copy(); out['geometry'] = out.geometry.buffer(0)
+        return out.to_crs('EPSG:4326')
+
+    aoi_plot = _prep(aoi_gdf)
+    cr_plot  = _prep(cr_gdf)
+    bra_plot = _prep(bra_gdf)
+    uc_plot  = _prep(uc_gdf)
+
+    if aoi_plot is None:
+        return [], []
+
+    bounds = aoi_plot.total_bounds
+    w = bounds[2] - bounds[0]; h = bounds[3] - bounds[1]
+    ax.set_xlim(bounds[0] - w * 0.02, bounds[2] + w * 0.02)
+    ax.set_ylim(bounds[1] - h * 0.02, bounds[3] + h * 0.02)
+
+    leg_h, leg_l = [], []
+
+    # ── CR fill ─────────────────────────────────────────────────────────────────
+    if cr_plot is not None:
+        cr_plot.plot(ax=ax, facecolor='#f0f0eb', edgecolor='none', linewidth=0,
+                     alpha=0.30, zorder=1)
+        leg_h.append(Patch(facecolor='#f0f0eb', edgecolor='#333333', linewidth=0.2, alpha=0.85))
+        leg_l.append('City-Region (CR)')
+
+    # ── Landscape cluster fills ─────────────────────────────────────────────────
+    _cluster_labels = []
+    if landscape_gdf is not None and cluster25_colors is not None:
+        try:
+            land = landscape_gdf.to_crs('EPSG:4326').copy()
+            land['geometry'] = land.geometry.buffer(0)
+            clip_geom = (aoi_plot.geometry.union_all()
+                         if hasattr(aoi_plot.geometry, 'union_all')
+                         else aoi_plot.geometry.unary_union)
+            land_clip = gpd.clip(land, clip_geom)
+            if not land_clip.empty:
+                land_clip['_color'] = land_clip['Cluster25'].map(cluster25_colors)
+                land_clip = land_clip[land_clip['_color'].notna()]
+                if not land_clip.empty:
+                    land_clip.plot(ax=ax, color=land_clip['_color'],
+                                   edgecolor='none', linewidth=0, alpha=0.50, zorder=2)
+                    land_clip = land_clip.copy()
+                    land_clip['_area'] = land_clip.geometry.area
+                    labeled = set()
+                    for _, row in land_clip.sort_values('_area', ascending=False).iterrows():
+                        cid = int(row['Cluster25'])
+                        if cid in labeled or row.geometry.area < 0.003:
+                            continue
+                        c = row.geometry.centroid
+                        if bounds[0] <= c.x <= bounds[2] and bounds[1] <= c.y <= bounds[3]:
+                            _cluster_labels.append((c.x, c.y, f'C{cid}'))
+                            labeled.add(cid)
+        except Exception:
+            pass
+
+    # ── BRA fill ────────────────────────────────────────────────────────────────
+    if bra_plot is not None:
+        bra_plot.plot(ax=ax, facecolor='#f5c842', edgecolor='none', linewidth=0,
+                      alpha=0.28, zorder=3)
+        leg_h.append(Patch(facecolor='#f5c842', edgecolor='#7a5c00', linewidth=0.4,
+                           linestyle='--', alpha=0.75))
+        leg_l.append('BRA')
+
+    # ── Water fill — edge set equal to fill colour to suppress any visible outline
+    if water_gdf is not None and not water_gdf.empty:
+        _wtr = water_gdf.to_crs('EPSG:4326').copy()
+        _wtr['geometry'] = _wtr.geometry.buffer(0)
+        _wtr.plot(ax=ax, facecolor=_WATER_FC, edgecolor=_WATER_FC, linewidth=0.5,
+                  alpha=0.80, zorder=4)
+        leg_h.append(Patch(facecolor=_WATER_FC, edgecolor='none', linewidth=0, alpha=0.80))
+        leg_l.append('Water')
+
+    # ── UC fill ─────────────────────────────────────────────────────────────────
+    if uc_plot is not None:
+        uc_plot.plot(ax=ax, facecolor='#e07b00', edgecolor='none', linewidth=0,
+                     alpha=0.72, zorder=5)
+        leg_h.append(Patch(facecolor='#e07b00', edgecolor='#cc0000', linewidth=1.8, alpha=0.90))
+        leg_l.append('Urban Core (UC)')
+
+    # ── Outlines drawn on top of fills ─────────────────────────────────────────
+    if bra_plot is not None:
+        bra_plot.plot(ax=ax, facecolor='none', edgecolor='#7a5c00',
+                      linewidth=0.4, linestyle='--', alpha=0.92, zorder=6)
+    if uc_plot is not None:
+        uc_plot.plot(ax=ax, facecolor='none', edgecolor='#cc0000',
+                     linewidth=1.8, linestyle='-', alpha=0.95, zorder=7)
+    if cr_plot is not None:
+        cr_plot.plot(ax=ax, facecolor='none', edgecolor='#333333',
+                     linewidth=0.2, linestyle='-', alpha=0.88, zorder=8)
+
+    # ── Cluster ID labels ────────────────────────────────────────────────────────
+    for cx, cy, lbl in _cluster_labels:
+        ax.text(cx, cy, lbl, fontsize=5.5, ha='center', va='center', color='#111',
+                fontweight='bold',
+                bbox=dict(boxstyle='round,pad=0.12', facecolor='white',
+                          alpha=0.55, edgecolor='none'), zorder=9)
+
+    # ── Roads ────────────────────────────────────────────────────────────────────
+    if roads_gdf is not None and not roads_gdf.empty:
+        roads_gdf.to_crs('EPSG:4326').plot(ax=ax, color='#888888', linewidth=0.35,
+                                            alpha=0.70, zorder=10)
+        leg_h.append(Line2D([0], [0], color='#888888', linewidth=1.2, alpha=0.85))
+        leg_l.append('Roads')
+
+    ax.set_aspect('equal')
+    ax.grid(True, alpha=0.15, linestyle=':', color='gray', zorder=0)
+    ax.tick_params(axis='both', which='major', labelsize=5.5)
+
+    return leg_h, leg_l
+
+
+def create_publication_city_grid(
+    city_names: list,
+    zone_results: Dict,
+    results_aoi_path,
+    landscape_gdf,
+    cluster25_colors: Dict,
+    storage_crs: str = 'EPSG:4326',
+    save_path=None,
+    dpi: int = 300,
+    figsize: tuple = (8.27, 5.845),
+    single_north_arrow: bool = False,
+) -> plt.Figure:
+    """
+    2x3 publication grid (half-A4 landscape).
+
+    Parameters
+    ----------
+    single_north_arrow : bool, default False
+        If False (NB01 default) a small north arrow is drawn on every city panel.
+        If True, the per-panel arrows are suppressed and a single north arrow is
+        drawn just above the shared legend (used for the manuscript Figure 4).
+
+    Layout uses a 4-column GridSpec with a ~2 cm spacer between column 0
+    (Kano / Lagos) and columns 2-3 (Abuja+Jos / Port Harcourt+Legend):
+
+      Row 0:  city[0]  |  [~2 cm gap]  |  city[1]  |  city[2]
+      Row 1:  city[3]  |  [~2 cm gap]  |  city[4]  |  legend
+
+    No suburb labels. Compact scale bar (5pt text). North arrow at CR top-right.
+    """
+    from matplotlib.gridspec import GridSpec
+
+    SPACER = 0.175         # spacer column as fraction of a data-column unit (~1 cm on A4)
+    NROWS  = 2
+    fig = plt.figure(figsize=figsize, facecolor='white')
+    gs  = GridSpec(NROWS, 4, figure=fig,
+                   width_ratios=[1, SPACER, 1, 1],
+                   hspace=0.08, wspace=0.04)
+
+    # (gs_row, gs_col) for each city in city_names[:5]
+    GS_POS = [(0, 0), (0, 2), (0, 3), (1, 0), (1, 2)]
+
+    shared_h, shared_l = None, None
+
+    for idx, city in enumerate(city_names[:5]):
+        gs_row, gs_col = GS_POS[idx]
+        ax = fig.add_subplot(gs[gs_row, gs_col])
+
+        if city not in zone_results:
+            ax.set_visible(False)
+            continue
+
+        res       = zone_results[city]
+        city_slug = res.get('city_slug', city.replace(' ', '_').lower())
+        city_dir  = Path(res.get('city_dir', Path(results_aoi_path) / city_slug))
+
+        def _load_or_none(p):
+            p = Path(p)
+            if p.exists():
+                try:
+                    g = gpd.read_file(p)
+                    return g if not g.empty else None
+                except Exception:
+                    return None
+            return None
+
+        water_gdf = _load_or_none(city_dir / f'{city_slug}_water_bodies_4326.geojson')
+        osm_dir   = city_dir / 'osm'
+        roads_gdf = _load_or_none(osm_dir / f'{city_slug}_roads_4326.geojson')
+
+        def _prep_zone(gdf):
+            if gdf is None or gdf.empty:
+                return None
+            out = gdf.to_crs(storage_crs).copy()
+            out['geometry'] = out.geometry.buffer(0)
+            return out
+
+        cr_4326  = _prep_zone(res.get('cr_gdf'))
+        uc_4326  = _prep_zone(res.get('uc_gdf'))
+        bra_4326 = _prep_zone(res.get('bra_gdf'))
+
+        if cr_4326 is None:
+            ax.set_visible(False)
+            continue
+
+        _union = (cr_4326.geometry.union_all()
+                  if hasattr(cr_4326.geometry, 'union_all')
+                  else cr_4326.geometry.unary_union)
+        extent = gpd.GeoDataFrame(geometry=[_union.convex_hull], crs=storage_crs)
+
+        leg_h, leg_l = _draw_zone_panel(
+            ax=ax, aoi_gdf=extent,
+            cr_gdf=cr_4326, uc_gdf=uc_4326, bra_gdf=bra_4326,
+            landscape_gdf=landscape_gdf, cluster25_colors=cluster25_colors,
+            water_gdf=water_gdf, roads_gdf=roads_gdf,
+            places_gdf=None,
+        )
+        if shared_h is None:
+            shared_h, shared_l = leg_h, leg_l
+
+        # Compact scale bar
+        _xlim = ax.get_xlim(); _ylim = ax.get_ylim()
+        _ext_km = (_xlim[1] - _xlim[0]) * 111.0
+        _scale_km = next((s for s in [50, 20, 10, 5, 2, 1] if s < _ext_km * 0.35), 1)
+        _sdeg = _scale_km / 111.0
+        _x0   = _xlim[0] + (_xlim[1] - _xlim[0]) * 0.05
+        _y0   = _ylim[0] + (_ylim[1] - _ylim[0]) * 0.07
+        _dh   = (_ylim[1] - _ylim[0]) * 0.012
+        ax.plot([_x0, _x0 + _sdeg], [_y0, _y0], 'k-', linewidth=2.0, zorder=15,
+                solid_capstyle='butt')
+        for _xx in [_x0, _x0 + _sdeg]:
+            ax.plot([_xx, _xx], [_y0 - _dh, _y0 + _dh], 'k-', linewidth=1.3, zorder=15)
+        ax.text(_x0 + _sdeg / 2, _y0 + _dh * 1.5, f'{_scale_km} km',
+                ha='center', va='bottom', fontsize=5.0, fontweight='bold', zorder=15,
+                bbox=dict(boxstyle='round,pad=0.12', facecolor='white',
+                          alpha=0.75, edgecolor='none'))
+
+        # North arrow at CR top-right corner — arrowhead points UP (north).
+        # Suppressed when a single shared arrow is requested (manuscript Figure 4).
+        if not single_north_arrow:
+            _cr_b  = cr_4326.to_crs('EPSG:4326').total_bounds
+            _ax_w  = _xlim[1] - _xlim[0]; _ax_h = _ylim[1] - _ylim[0]
+            _na_xf  = max(0.08, min((_cr_b[2] - _xlim[0]) / _ax_w - 0.10, 0.90))
+            _na_tip = max(0.22, min((_cr_b[3] - _ylim[0]) / _ax_h - 0.04, 0.88))
+            _na_base = max(0.06, _na_tip - 0.11)
+            ax.annotate('',
+                        xy=(_na_xf, _na_tip),       # arrowhead at top (pointing north)
+                        xytext=(_na_xf, _na_base),  # tail at bottom
+                        xycoords='axes fraction',
+                        arrowprops=dict(arrowstyle='->', lw=1.2, color='black',
+                                       mutation_scale=8),
+                        zorder=16)
+            ax.text(_na_xf, _na_tip + 0.025, 'N',
+                    transform=ax.transAxes, ha='center', va='bottom',
+                    fontsize=6.5, fontweight='bold', color='black', zorder=16)
+
+        ax.set_title(city, fontsize=8.5, fontweight='bold', pad=3)
+        ax.set_xlabel(''); ax.set_ylabel('')
+
+    # Shared legend in gs[1, 3]
+    ax_leg = fig.add_subplot(gs[1, 3])
+    ax_leg.set_axis_off()
+    # When a single shared arrow is requested, seat the legend lower so the arrow
+    # has clear space above it; otherwise centre it as before.
+    _leg_loc = 'lower center' if single_north_arrow else 'center'
+    if shared_h:
+        ax_leg.legend(handles=shared_h, labels=shared_l,
+                      loc=_leg_loc, ncol=1, fontsize=7.5, framealpha=0.95,
+                      edgecolor='#555', title='Legend', title_fontsize=8.5,
+                      borderpad=0.7, labelspacing=0.40,
+                      handlelength=1.3, handletextpad=0.45)
+
+    # Single north arrow, centred just above the shared legend
+    if single_north_arrow:
+        ax_leg.annotate('',
+                        xy=(0.5, 0.90), xytext=(0.5, 0.72),
+                        xycoords='axes fraction',
+                        arrowprops=dict(arrowstyle='->', lw=1.5, color='black',
+                                        mutation_scale=13),
+                        zorder=16)
+        ax_leg.text(0.5, 0.92, 'N', transform=ax_leg.transAxes,
+                    ha='center', va='bottom', fontsize=10, fontweight='bold',
+                    color='black', zorder=16)
+
+    fig.tight_layout()
+
+    if save_path:
+        _sp = Path(save_path)
+        fig.savefig(_sp.with_suffix('.svg'), format='svg', dpi=dpi,
+                    bbox_inches='tight', facecolor='white')
+        fig.savefig(_sp.with_suffix('.pdf'), format='pdf',
+                    bbox_inches='tight', facecolor='white')
+        print(f"   Saved: {_sp.stem}.svg + .pdf")
+    return fig
+
+
+def create_cluster_zone_population_chart(
+    cluster_zone_summary,
+    save_path=None,
+    dpi: int = 300,
+    figsize: tuple = (11.69, 5.845),
+) -> plt.Figure:
+    """
+    Dual-axis half-A4-landscape cluster chart.
+    Left y-axis:  grouped bars UC/BRA/CR (km2), sorted by CR area descending.
+    Right y-axis: WUP 2024 population — circle scatter (no connecting line).
+    """
+    import matplotlib.ticker as mticker
+
+    df = cluster_zone_summary.sort_values('total_cr_area_km2', ascending=False).reset_index(drop=True)
+    x_lbls = [f"Cl-{int(r.Cluster25):02d}\n({int(r.n_cities)})" for _, r in df.iterrows()]
+    x  = np.arange(len(df)); bw = 0.22
+
+    fig, ax1 = plt.subplots(figsize=figsize, facecolor='white')
+    ax2 = ax1.twinx()
+
+    _zone_cfg = [
+        ('total_uc_area_km2',  '#e07b00', 'UC area (km²)'),
+        ('total_bra_area_km2', '#f5c842', 'BRA area (km²)'),
+        ('total_cr_area_km2',  '#d0d0c8', 'CR area (km²)'),
+    ]
+    for (col_name, colour, lbl), off in zip(_zone_cfg, [-bw, 0, bw]):
+        vals = pd.to_numeric(df[col_name], errors='coerce').fillna(0).values
+        ax1.bar(x + off, vals, width=bw * 0.92, color=colour,
+                edgecolor='white', linewidth=0.5, alpha=0.90, label=lbl, zorder=3)
+
+    ax1.set_ylabel('Zone Area (km²)', fontsize=12)
+    ax1.set_xlabel('Cluster  (ID, N cities)', fontsize=12)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(x_lbls, fontsize=9)
+    ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f'{v:,.0f}'))
+    ax1.tick_params(axis='y', labelsize=9)
+    ax1.grid(axis='y', alpha=0.20, linestyle='--', zorder=0)
+    ax1.set_axisbelow(True)
+
+    pop_m = pd.to_numeric(df['total_population_wup_k'], errors='coerce').fillna(0).values / 1_000
+    ax2.scatter(x, pop_m, color='#1a237e', s=70, marker='o',
+                edgecolors='white', linewidths=0.8, alpha=0.92,
+                label='WUP 2024 pop (M)', zorder=5)
+    ax2.set_ylabel('WUP 2024 Population (M)', fontsize=12, color='#1a237e')
+    ax2.tick_params(axis='y', labelcolor='#1a237e', labelsize=9)
+    ax2.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f'{v:.1f}M'))
+
+    h1, l1 = ax1.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax1.legend(h1 + h2, l1 + l2, loc='upper right', fontsize=10,
+               framealpha=0.92, edgecolor='#555', ncol=2, borderpad=0.8, labelspacing=0.45)
+    ax1.set_title('Cluster Zone Areas & WUP 2024 Population', fontsize=13,
+                  fontweight='bold', pad=10)
+    fig.tight_layout()
+
+    if save_path:
+        _sp = Path(save_path)
+        fig.savefig(_sp.with_suffix('.svg'), format='svg', dpi=dpi,
+                    bbox_inches='tight', facecolor='white')
+        fig.savefig(_sp.with_suffix('.pdf'), format='pdf',
+                    bbox_inches='tight', facecolor='white')
+        print(f"   Saved: {_sp.stem}.svg + .pdf")
+    return fig
+
+
+def create_cluster_multiline_trend(
+    cluster_zone_summary,
+    cities_df,
+    absorbed_map: Dict,
+    cluster25_colors: Dict = None,
+    save_path=None,
+    dpi: int = 300,
+    figsize: tuple = (11.69, 5.845),
+) -> plt.Figure:
+    """
+    Multi-line half-A4-landscape cluster population trend, styled after the
+    composite city population trend.
+
+    Each cluster uses its defined CLUSTER25_COLORS colour.
+    Growth rates expressed in M/yr (people per year, in millions) — consistent
+    with the total linear trend label.
+    2024 and 2050 diamond markers on the total line, with population annotations.
+    """
+    import matplotlib.lines   as mlines
+    import matplotlib.patches as mpatch
+    import matplotlib.ticker  as mticker
+
+    yr_cols = sorted([c for c in cities_df.columns if c.isdigit()])
+    # Use 5-year intervals plus 2024 so the study-year marker is exact
+    _base_yrs = [y for y in yr_cols if int(y) % 5 == 0]
+    pop_yrs   = sorted(set(_base_yrs + (['2024'] if '2024' in yr_cols else [])))
+    yr_ints   = list(map(int, pop_yrs))
+    last_year = yr_ints[-1]
+
+    # Fallback palette if cluster25_colors not provided
+    try:
+        _cm = plt.colormaps['tab20']
+    except AttributeError:
+        _cm = plt.cm.get_cmap('tab20')
+    _FALLBACK = [_cm(i / 20) for i in range(20)]
+
+    def _build_agg_df(city_list):
+        rows = []
+        for city in city_list:
+            members = [city] + [a for a, p in absorbed_map.items() if p == city]
+            src = cities_df[cities_df['Urban Agglomeration'].isin(members)]
+            if src.empty:
+                continue
+            agg = {c: src[c].sum() for c in yr_cols if c in src.columns}
+            agg['Urban Agglomeration'] = city
+            rows.append(agg)
+        return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+    df_cl = cluster_zone_summary.sort_values('Cluster25').reset_index(drop=True)
+
+    cluster_series = {}
+    for _, row in df_cl.iterrows():
+        cid    = int(row['Cluster25'])
+        cities = [c.strip() for c in str(row['cities']).split(',') if c.strip()]
+        agg_df = _build_agg_df(cities)
+        if agg_df.empty:
+            continue
+        ts = [agg_df[y].sum() if y in agg_df.columns else 0.0 for y in pop_yrs]
+        if len(ts) < 2 or all(v == 0 for v in ts):
+            continue
+        ts_m = [v / 1_000 for v in ts]   # millions
+        # Linear slope in M/yr
+        _nz = [i for i, v in enumerate(ts_m) if v > 0]
+        if len(_nz) >= 2:
+            _s, _ = np.polyfit(yr_ints[:len(ts_m)], ts_m, 1)
+            rate_m_yr = float(_s)
+        else:
+            rate_m_yr = 0.0
+        pop2024 = float(agg_df['2024'].sum()) / 1_000 if '2024' in agg_df.columns else 0.0
+        cluster_series[cid] = {'ts_m': ts_m, 'pop2024': pop2024, 'rate': rate_m_yr}
+
+    if not cluster_series:
+        print("WARNING: no cluster time-series data."); return None
+
+    # Total across all clusters
+    n_pts     = min(len(cs['ts_m']) for cs in cluster_series.values())
+    total_m   = [sum(cluster_series[cid]['ts_m'][i] for cid in cluster_series)
+                 for i in range(n_pts)]
+    yrs_total = yr_ints[:n_pts]
+
+    # split_i: index of first year >= 2025 (solid includes 2025 as last point)
+    SPLIT_YR = 2025
+    split_i  = next((i for i, y in enumerate(yrs_total) if y >= SPLIT_YR), len(yrs_total))
+
+    fig, ax = plt.subplots(figsize=figsize, facecolor='white')
+
+    # Grey projection shade
+    ax.axvspan(SPLIT_YR, last_year + 5, alpha=0.08, color='grey', zorder=0)
+
+    # Per-cluster lines — use CLUSTER25_COLORS, fall back to tab20 by index
+    sorted_cids = sorted(cluster_series.keys())
+    for fi, cid in enumerate(sorted_cids):
+        col = (cluster25_colors.get(int(cid)) if cluster25_colors else None) \
+              or _FALLBACK[fi % len(_FALLBACK)]
+        info = cluster_series[cid]
+        ts_m = info['ts_m']
+        yrs  = yr_ints[:len(ts_m)]
+        si   = next((i for i, y in enumerate(yrs) if y >= SPLIT_YR), len(yrs))
+        end_s = min(si + 1, len(yrs))
+        ax.plot(yrs[:end_s], ts_m[:end_s],
+                color=col, linewidth=1.2, alpha=0.80, zorder=3)
+        if si < len(yrs):
+            ax.plot(yrs[si:], ts_m[si:],
+                    color=col, linewidth=1.0, alpha=0.45, linestyle='--', zorder=3)
+
+    # Total line (navy, thick)
+    end_s_tot = min(split_i + 1, len(total_m))
+    ax.plot(yrs_total[:end_s_tot], total_m[:end_s_tot],
+            color='navy', linewidth=2.4, alpha=0.92, zorder=5,
+            label='Total (all clusters)')
+    if split_i < len(total_m):
+        ax.plot(yrs_total[split_i:], total_m[split_i:],
+                color='navy', linewidth=2.0, alpha=0.55, linestyle='--', zorder=5)
+
+    # Vertical reference lines with rotated year labels
+    _y_max = max(total_m) * 1.10
+    for yr_ref, lc, lw in [(2024, '#444444', 1.4), (last_year, '#777777', 1.0)]:
+        ax.axvline(yr_ref, color=lc, linestyle='--', linewidth=lw, alpha=0.90, zorder=6)
+        ax.text(yr_ref - 0.5, _y_max * 0.97, str(yr_ref),
+                rotation=90, ha='right', va='top',
+                fontsize=9, color=lc, fontweight='bold', zorder=7)
+
+    # Diamond markers on total line at 2024 and last_year, with population labels
+    for yr_ref in [2024, last_year]:
+        if yr_ref in yrs_total:
+            _idx = yrs_total.index(yr_ref)
+            _val = total_m[_idx]
+            ax.scatter(yr_ref, _val, marker='D', s=65,
+                       color='navy', edgecolors='white', linewidths=0.8, zorder=8)
+            # Annotation with population value
+            _xoff = 0.42 if yr_ref == 2024 else 0.55
+            _yoff = 0.38 if yr_ref == 2024 else 0.56
+            ax.annotate(f"Total {yr_ref}:\n{_val:.1f} M",
+                        xy=(yr_ref, _val), xycoords='data',
+                        xytext=(_xoff, _yoff), textcoords='axes fraction',
+                        fontsize=9.5, fontweight='bold', color='navy',
+                        ha='left', va='center',
+                        arrowprops=dict(arrowstyle='->', color='#444', lw=0.9))
+
+    # "Projected" label in shaded area
+    _proj_mid = (SPLIT_YR + last_year) / 2
+    ax.text(_proj_mid, max(total_m) * 1.04, 'Projected',
+            ha='center', va='bottom', fontsize=9.5,
+            fontstyle='italic', color='#555555', zorder=9)
+
+    # Linear regression on total
+    _slope, _intercept = np.polyfit(yrs_total, total_m, 1)
+    _ypred  = np.poly1d([_slope, _intercept])(yrs_total)
+    _ss_res = np.sum((np.array(total_m) - _ypred) ** 2)
+    _ss_tot = np.sum((np.array(total_m) - np.mean(total_m)) ** 2)
+    _r2 = 1 - _ss_res / _ss_tot if _ss_tot > 0 else 0.0
+    ax.plot(yrs_total, _ypred, linestyle=':', color='grey', linewidth=1.2, alpha=0.70,
+            label=f'Linear trend ({_slope:+.2f} M/yr)', zorder=2)
+    ax.text(0.22, 0.12,
+            f'y = {_slope:.2f}·x + {_intercept:.0f}\n(R² = {_r2:.4f})',
+            transform=ax.transAxes, fontsize=8.5, color='grey',
+            ha='left', va='bottom',
+            bbox=dict(boxstyle='round,pad=0.25', facecolor='white',
+                      edgecolor='grey', alpha=0.70))
+
+    # 10-year growth rates box — in M/yr (consistent with linear trend)
+    _milestone_yrs = list(range(yr_ints[0], last_year + 1, 10))
+    if last_year not in _milestone_yrs:
+        _milestone_yrs.append(last_year)
+    _gr_lines = []
+    for _ia in range(len(_milestone_yrs) - 1):
+        _y0, _y1 = _milestone_yrs[_ia], _milestone_yrs[_ia + 1]
+        if _y0 in yrs_total and _y1 in yrs_total:
+            _p0 = total_m[yrs_total.index(_y0)]
+            _p1 = total_m[yrs_total.index(_y1)]
+            _gr = (_p1 - _p0) / (_y1 - _y0)  # M/yr
+            _gr_lines.append(f'{_y0}–{_y1}: {_gr:+.2f} M/yr')
+    if _gr_lines:
+        ax.text(0.02, 0.97, '10-yr Growth Rate:\n' + '\n'.join(_gr_lines),
+                transform=ax.transAxes, va='top', fontsize=7.5,
+                bbox=dict(boxstyle='round,pad=0.35',
+                          facecolor='#d9ecff', edgecolor='#003d7a', alpha=0.88))
+
+    # Axis formatting
+    ax.set_xlabel('Year', fontsize=11)
+    ax.set_ylabel('Aggregated Population (M)', fontsize=11)
+    ax.set_title('Cluster25 Population Trends — WUP Reference', fontsize=13,
+                 fontweight='bold', pad=10)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f'{int(round(v))}M'))
+    ax.tick_params(axis='both', labelsize=9)
+    ax.grid(True, alpha=0.15, linestyle=':', zorder=0)
+    ax.set_axisbelow(True)
+    ax.set_xlim(yr_ints[0] - 2, last_year + 4)
+    ax.set_ylim(0, max(total_m) * 1.12)
+
+    # Legend: Total + linear trend + per-cluster (no projection/year reference entries)
+    _leg_h = [
+        mlines.Line2D([0], [0], color='navy', linewidth=2.4),
+        mlines.Line2D([0], [0], color='grey', linestyle=':', linewidth=1.2, alpha=0.70),
+    ]
+    _leg_l = [
+        'Total — all clusters',
+        f'Linear trend ({_slope:+.2f} M/yr)',
+    ]
+    for cid in sorted_cids:
+        info = cluster_series[cid]
+        col  = (cluster25_colors.get(int(cid)) if cluster25_colors else None) \
+               or _FALLBACK[sorted_cids.index(cid) % len(_FALLBACK)]
+        lbl  = f"C{cid:02d}  {info['pop2024']:.1f}M  ({info['rate']:+.2f}M/yr)"
+        _leg_h.append(mlines.Line2D([0], [0], color=col, linewidth=1.8))
+        _leg_l.append(lbl)
+
+    ax.legend(_leg_h, _leg_l,
+              loc='upper left',
+              fontsize=8.5, framealpha=0.92, edgecolor='#aaa',
+              title='Cluster | Pop 2024 | Growth (M/yr)',
+              title_fontsize=9.5, ncol=2,
+              borderpad=0.8, labelspacing=0.35,
+              handlelength=1.6, handletextpad=0.5, columnspacing=1.0)
+
+    fig.tight_layout()
+
+    if save_path:
+        _sp = Path(save_path)
+        fig.savefig(_sp.with_suffix('.svg'), format='svg', dpi=dpi,
+                    bbox_inches='tight', facecolor='white')
+        fig.savefig(_sp.with_suffix('.pdf'), format='pdf',
+                    bbox_inches='tight', facecolor='white')
+        print(f"   Saved: {_sp.stem}.svg + .pdf")
+    return fig

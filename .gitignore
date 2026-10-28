@@ -43,6 +43,7 @@ data/inputs/gee_service_account.json
 
 # Notebook caches (OSM Overpass API responses — ~700 MB, re-downloadable)
 notebooks/cache/
+Notebook/cache/
 
 # IDE
 .vscode/
@@ -75,6 +76,7 @@ data/inputs/osm_nigeria/**/*.osm.pbf
 
 # Notebook OSM cache
 notebooks/cache/
+Notebook/cache/
 
 # Rough note
 sketch.jpg

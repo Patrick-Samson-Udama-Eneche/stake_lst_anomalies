@@ -85,42 +85,51 @@ def validate_extraction_metadata(output_path, dataset_type):
     return True, "Metadata matches current method"
 
 
-def initialize_gee(service_account_key, project_id):
+def initialize_gee(service_account_key=None, project_id=None):
     """
     Initialize Google Earth Engine with service account credentials.
-    
+
+    When called with no arguments, falls back to ``config.GEE_CONFIG``
+    (the standard invocation in all NB0x notebooks).
+
     Parameters:
     -----------
-    service_account_key : str
-        Path to the service account JSON file
-    project_id : str
-        Google Cloud Project ID
-        
+    service_account_key : str | None
+        Path to the service account JSON file.
+        Defaults to ``config.GEE_CONFIG['service_json']``.
+    project_id : str | None
+        Google Cloud Project ID.
+        Defaults to ``config.GEE_CONFIG['project_id']``.
+
     Returns:
     --------
     bool
         True if initialization successful, False otherwise
     """
     try:
-        if not os.path.exists(service_account_key):
-            print(f"❌ Service account key not found: {service_account_key}")
-            return False
-            
-        print(f"🔑 Found service account key: {service_account_key}")
-        
-        credentials = service_account.Credentials.from_service_account_file(
-            service_account_key,
-            scopes=['https://www.googleapis.com/auth/earthengine']
-        )
-        
-        ee.Initialize(credentials=credentials, project=project_id)
-        
+        import config as _cfg
+        if service_account_key is None:
+            service_account_key = _cfg.GEE_CONFIG.get('service_json', '')
+        if project_id is None:
+            project_id = _cfg.GEE_CONFIG.get('project_id', '')
+
+        if service_account_key and os.path.exists(service_account_key):
+            print(f"🔑 Found service account key: {service_account_key}")
+            credentials = service_account.Credentials.from_service_account_file(
+                service_account_key,
+                scopes=['https://www.googleapis.com/auth/earthengine']
+            )
+            ee.Initialize(credentials=credentials, project=project_id)
+        else:
+            # Fall back to application-default credentials (gcloud auth login)
+            ee.Initialize(project=project_id)
+
         # Test the connection
         ee.Number(1).getInfo()
-        
+
         print("✅ Google Earth Engine initialized successfully")
         return True
-        
+
     except Exception as e:
         print(f"❌ GEE Initialization error: {e}")
         return False
@@ -915,7 +924,7 @@ def init_ee_in_worker():
         _ee.Number(1).getInfo()          # already initialised
     except Exception:
         project_root = (Path(_os.getcwd()).parent
-                        if Path(_os.getcwd()).name == 'notebooks'
+                        if Path(_os.getcwd()).name.lower() in ('notebooks', 'notebook')
                         else Path(_os.getcwd()))
         sys.path.insert(0, str(project_root))
         import config as _cfg
@@ -1092,3 +1101,344 @@ def process_city_period(city_name, bounds_list, city_dir, period_type,
             'message': str(e),
             'traceback': _tb.format_exc(),
         }
+
+
+def extract_three_zone_lst(city_name, zones, years, output_dir,
+                            source_version='NB01_v5_SMOD',
+                            col_id=None):
+    """
+    Extract monthly MODIS MYD11A1 LST composites for UC, BRA, and City-Region.
+
+    Strategy
+    --------
+    For each year, 12 month-composite features are built server-side in a
+    single ee.FeatureCollection and retrieved with one getInfo() call per year
+    (19 round-trips per city instead of 76 quarterly calls with per-image
+    mapping).
+
+    QA filtering
+    -----------
+    Combined mask: QC bits 0-1 in {00, 01} — strict and moderate accepted in
+    one pass, no server-side branching.  Temperature bounds 5–70 °C applied
+    before compositing.
+
+    Output schema
+    -------------
+    year, month,
+    uc_day_median,  uc_day_n,  uc_night_median,  uc_night_n,
+    bra_day_median, bra_day_n, bra_night_median, bra_night_n,
+    cr_day_p05, cr_day_median, cr_day_p95, cr_day_n,
+    cr_night_p05, cr_night_median, cr_night_p95, cr_night_n,
+    n_images
+
+    Parameters
+    ----------
+    city_name : str
+    zones : dict
+        {'uc_ee': ee.Geometry, 'bra_ee': ee.Geometry, 'cr_ee': ee.Geometry,
+         'city_slug': str, 'cache_hash': str}
+    years : list[int]
+    output_dir : Path
+    source_version : str
+    col_id : str | None
+        MODIS collection ID; defaults to config.LST_CONFIG primary collection.
+
+    Returns
+    -------
+    pd.DataFrame | None
+    """
+    import json as _json
+    import traceback as _tb
+    from pathlib import Path as _Path
+    from datetime import datetime as _dt
+    import numpy as _np
+    import pandas as _pd
+
+    city_slug  = zones['city_slug']
+    cache_hash = zones['cache_hash']
+    out_dir    = _Path(output_dir) / city_slug
+    out_dir.mkdir(parents=True, exist_ok=True)
+    csv_path   = out_dir / f'{city_slug}_monthly_lst_threezone.csv'
+    meta_path  = csv_path.with_suffix('.meta.json')
+
+    # Cache check
+    if csv_path.exists() and meta_path.exists():
+        try:
+            meta = _json.loads(meta_path.read_text())
+            if (meta.get('source_version') == source_version and
+                    meta.get('cache_hash') == cache_hash):
+                df = _pd.read_csv(csv_path)
+                print(f'  [CACHE] {city_name}')
+                return df
+        except Exception:
+            pass
+
+    try:
+        import ee as _ee
+        import config as _cfg
+    except ImportError:
+        print(f'  [SKIP ] {city_name} - ee or config not available')
+        return None
+
+    uc_ee  = zones.get('uc_ee')
+    bra_ee = zones.get('bra_ee')
+    cr_ee  = zones.get('cr_ee')
+    if uc_ee is None or bra_ee is None or cr_ee is None:
+        print(f'  [SKIP ] {city_name} - GEE geometries not available')
+        return None
+
+    if col_id is None:
+        col_id = _cfg.LST_CONFIG['collections'][
+            _cfg.LST_CONFIG['primary_collection']]['id']
+
+    def _month_feature(year, month):
+        """Build one ee.Feature for a single year-month composite."""
+        start = _ee.Date.fromYMD(year, month, 1)
+        end   = start.advance(1, 'month')
+
+        col = (_ee.ImageCollection(col_id)
+               .filterDate(start, end)
+               .filterBounds(cr_ee))
+
+        def _mask_img(img):
+            day_lst   = img.select('LST_Day_1km').multiply(0.02).subtract(273.15)
+            night_lst = img.select('LST_Night_1km').multiply(0.02).subtract(273.15)
+            day_qa    = img.select('QC_Day')
+            night_qa  = img.select('QC_Night')
+            # Combined strict+moderate mask — no server-side branching
+            day_mask   = day_qa.bitwiseAnd(3).lte(1).And(day_lst.gt(5)).And(day_lst.lt(70))
+            night_mask = night_qa.bitwiseAnd(3).lte(1).And(night_lst.gt(5)).And(night_lst.lt(70))
+            return (day_lst.updateMask(day_mask).rename('day')
+                           .addBands(night_lst.updateMask(night_mask).rename('night')))
+
+        def _qa_count(img):
+            """Tag each image with strict / moderate pixel counts inside CR.
+
+            Uses lightweight Reducer.sum() on boolean masks — much cheaper than
+            the full LST statistics reducers.  Properties set on each image:
+              d_s  — strict-quality day pixels in CR   (QC bits 0-1 = 00)
+              d_m  — moderate-quality day pixels in CR (QC bits 0-1 = 01)
+              n_s  — strict-quality night pixels in CR
+              n_m  — moderate-quality night pixels in CR
+            """
+            day_lst   = img.select('LST_Day_1km').multiply(0.02).subtract(273.15)
+            night_lst = img.select('LST_Night_1km').multiply(0.02).subtract(273.15)
+            day_qa    = img.select('QC_Day')
+            night_qa  = img.select('QC_Night')
+            t_day   = day_lst.gt(5).And(day_lst.lt(70))
+            t_night = night_lst.gt(5).And(night_lst.lt(70))
+            strict_d   = day_qa.bitwiseAnd(3).eq(0).And(t_day)
+            moderate_d = day_qa.bitwiseAnd(3).eq(1).And(t_day)
+            strict_n   = night_qa.bitwiseAnd(3).eq(0).And(t_night)
+            moderate_n = night_qa.bitwiseAnd(3).eq(1).And(t_night)
+            _r = _ee.Reducer.sum()
+            _kw = dict(geometry=cr_ee, scale=1000, maxPixels=1e6, bestEffort=True)
+            return img.set({
+                'd_s': strict_d.rename('v').reduceRegion(_r, **_kw).get('v'),
+                'd_m': moderate_d.rename('v').reduceRegion(_r, **_kw).get('v'),
+                'n_s': strict_n.rename('v').reduceRegion(_r, **_kw).get('v'),
+                'n_m': moderate_n.rename('v').reduceRegion(_r, **_kw).get('v'),
+            })
+
+        masked = col.map(_mask_img)
+        tagged = col.map(_qa_count)   # lightweight pixel-count pass on raw collection
+
+        # Image-level QA counts (strict = preferred, moderate = supplement)
+        _gt0   = _ee.Filter.greaterThan
+        _lte0  = _ee.Filter.lessThanOrEquals
+        n_day_strict    = tagged.filter(_gt0('d_s', 0)).size()
+        n_day_moderate  = tagged.filter(
+            _ee.Filter.And(_lte0('d_s', 0), _gt0('d_m', 0))).size()
+        n_night_strict  = tagged.filter(_gt0('n_s', 0)).size()
+        n_night_moderate = tagged.filter(
+            _ee.Filter.And(_lte0('n_s', 0), _gt0('n_m', 0))).size()
+
+        # Monthly pixel-wise composite: median + count across valid days
+        comp = masked.reduce(
+            _ee.Reducer.median().combine(_ee.Reducer.count(), sharedInputs=True))
+        # Band names after reduce: 'day_median', 'day_count', 'night_median', 'night_count'
+
+        # Spatial statistics reducer: mean, median, min, max, std across zone pixels
+        # Applied to the monthly median composite — each pixel value is its temporal
+        # median for the month, so these are *spatial* descriptors of the zone.
+        _stats_r = (
+            _ee.Reducer.mean()
+            .combine(_ee.Reducer.median(), sharedInputs=True)
+            .combine(_ee.Reducer.min(),    sharedInputs=True)
+            .combine(_ee.Reducer.max(),    sharedInputs=True)
+            .combine(_ee.Reducer.stdDev(), sharedInputs=True)
+        )
+        # Keys produced: '{band}_mean', '{band}_median', '{band}_min',
+        #                '{band}_max', '{band}_stdDev'
+        # where band = 'day_median' or 'night_median'
+
+        lst_comp = comp.select(['day_median', 'night_median'])
+        cnt_comp = comp.select(['day_count',  'night_count'])
+
+        uc_s  = lst_comp.reduceRegion(_stats_r,          uc_ee,  1000, maxPixels=1e9, bestEffort=True)
+        uc_n  = cnt_comp.reduceRegion(_ee.Reducer.mean(), uc_ee,  1000, maxPixels=1e9, bestEffort=True)
+        bra_s = lst_comp.reduceRegion(_stats_r,          bra_ee, 1000, maxPixels=1e9, bestEffort=True)
+        bra_n = cnt_comp.reduceRegion(_ee.Reducer.mean(), bra_ee, 1000, maxPixels=1e9, bestEffort=True)
+
+        # CR: full spatial stats + P5/P95 envelope
+        _cr_r = (
+            _ee.Reducer.percentile([5, 50, 95])
+            .combine(_ee.Reducer.mean(),   sharedInputs=True)
+            .combine(_ee.Reducer.min(),    sharedInputs=True)
+            .combine(_ee.Reducer.max(),    sharedInputs=True)
+            .combine(_ee.Reducer.stdDev(), sharedInputs=True)
+        )
+        cr_s = lst_comp.reduceRegion(_cr_r,              cr_ee, 1000, maxPixels=1e9, bestEffort=True)
+        cr_n = cnt_comp.reduceRegion(_ee.Reducer.mean(),  cr_ee, 1000, maxPixels=1e9, bestEffort=True)
+
+        return _ee.Feature(None, {
+            'year'  : year,
+            'month' : month,
+            # UC — spatial stats over urban core pixels
+            'uc_day_mean'     : uc_s.get('day_median_mean'),
+            'uc_day_median'   : uc_s.get('day_median_median'),
+            'uc_day_min'      : uc_s.get('day_median_min'),
+            'uc_day_max'      : uc_s.get('day_median_max'),
+            'uc_day_std'      : uc_s.get('day_median_stdDev'),
+            'uc_day_n'        : uc_n.get('day_count'),
+            'uc_night_mean'   : uc_s.get('night_median_mean'),
+            'uc_night_median' : uc_s.get('night_median_median'),
+            'uc_night_min'    : uc_s.get('night_median_min'),
+            'uc_night_max'    : uc_s.get('night_median_max'),
+            'uc_night_std'    : uc_s.get('night_median_stdDev'),
+            'uc_night_n'      : uc_n.get('night_count'),
+            # BRA — spatial stats over background reference area pixels
+            'bra_day_mean'    : bra_s.get('day_median_mean'),
+            'bra_day_median'  : bra_s.get('day_median_median'),
+            'bra_day_min'     : bra_s.get('day_median_min'),
+            'bra_day_max'     : bra_s.get('day_median_max'),
+            'bra_day_std'     : bra_s.get('day_median_stdDev'),
+            'bra_day_n'       : bra_n.get('day_count'),
+            'bra_night_mean'  : bra_s.get('night_median_mean'),
+            'bra_night_median': bra_s.get('night_median_median'),
+            'bra_night_min'   : bra_s.get('night_median_min'),
+            'bra_night_max'   : bra_s.get('night_median_max'),
+            'bra_night_std'   : bra_s.get('night_median_stdDev'),
+            'bra_night_n'     : bra_n.get('night_count'),
+            # CR — spatial stats + P5/P95 envelope
+            'cr_day_p05'      : cr_s.get('day_median_p5'),
+            'cr_day_median'   : cr_s.get('day_median_p50'),
+            'cr_day_p95'      : cr_s.get('day_median_p95'),
+            'cr_day_mean'     : cr_s.get('day_median_mean'),
+            'cr_day_min'      : cr_s.get('day_median_min'),
+            'cr_day_max'      : cr_s.get('day_median_max'),
+            'cr_day_std'      : cr_s.get('day_median_stdDev'),
+            'cr_day_n'        : cr_n.get('day_count'),
+            'cr_night_p05'    : cr_s.get('night_median_p5'),
+            'cr_night_median' : cr_s.get('night_median_p50'),
+            'cr_night_p95'    : cr_s.get('night_median_p95'),
+            'cr_night_mean'   : cr_s.get('night_median_mean'),
+            'cr_night_min'    : cr_s.get('night_median_min'),
+            'cr_night_max'    : cr_s.get('night_median_max'),
+            'cr_night_std'    : cr_s.get('night_median_stdDev'),
+            'cr_night_n'      : cr_n.get('night_count'),
+            # Image-level counts: total, strict-quality, moderate-only supplement
+            # n_images        — all MODIS granules in the month (before QA)
+            # n_days          — total usable day images  (strict + moderate)
+            # n_nights        — total usable night images (strict + moderate)
+            # n_day_strict    — images with ≥1 strict-quality day pixel in CR
+            # n_day_moderate  — images with ≥1 moderate day pixel but 0 strict (supplements)
+            # n_night_strict  / n_night_moderate — same for night
+            'n_images'        : col.size(),
+            'n_days'          : n_day_strict.add(n_day_moderate),
+            'n_nights'        : n_night_strict.add(n_night_moderate),
+            'n_day_strict'    : n_day_strict,
+            'n_day_moderate'  : n_day_moderate,
+            'n_night_strict'  : n_night_strict,
+            'n_night_moderate': n_night_moderate,
+        })
+
+    all_rows = []
+    for year in years:
+        for month in range(1, 13):
+            try:
+                # One getInfo() per month keeps the computation graph small enough
+                # for large-geometry cities (e.g. Port Harcourt) that exceed GEE's
+                # interactive memory limit when all 12 months are bundled together.
+                feat  = _month_feature(year, month).getInfo()
+                feats = [feat]
+            except Exception as e:
+                print(f'    WARNING {city_name} {year}-{month:02d}: {e}')
+                feats = []
+            for f in feats:
+                p = f.get('properties', {})
+                if p.get('year') is None:
+                    continue
+                all_rows.append({
+                    'year'  : int(p['year']),
+                    'month' : int(p['month']),
+                    # UC
+                    'uc_day_mean'     : p.get('uc_day_mean'),
+                    'uc_day_median'   : p.get('uc_day_median'),
+                    'uc_day_min'      : p.get('uc_day_min'),
+                    'uc_day_max'      : p.get('uc_day_max'),
+                    'uc_day_std'      : p.get('uc_day_std'),
+                    'uc_day_n'        : p.get('uc_day_n'),
+                    'uc_night_mean'   : p.get('uc_night_mean'),
+                    'uc_night_median' : p.get('uc_night_median'),
+                    'uc_night_min'    : p.get('uc_night_min'),
+                    'uc_night_max'    : p.get('uc_night_max'),
+                    'uc_night_std'    : p.get('uc_night_std'),
+                    'uc_night_n'      : p.get('uc_night_n'),
+                    # BRA
+                    'bra_day_mean'    : p.get('bra_day_mean'),
+                    'bra_day_median'  : p.get('bra_day_median'),
+                    'bra_day_min'     : p.get('bra_day_min'),
+                    'bra_day_max'     : p.get('bra_day_max'),
+                    'bra_day_std'     : p.get('bra_day_std'),
+                    'bra_day_n'       : p.get('bra_day_n'),
+                    'bra_night_mean'  : p.get('bra_night_mean'),
+                    'bra_night_median': p.get('bra_night_median'),
+                    'bra_night_min'   : p.get('bra_night_min'),
+                    'bra_night_max'   : p.get('bra_night_max'),
+                    'bra_night_std'   : p.get('bra_night_std'),
+                    'bra_night_n'     : p.get('bra_night_n'),
+                    # CR
+                    'cr_day_p05'      : p.get('cr_day_p05'),
+                    'cr_day_median'   : p.get('cr_day_median'),
+                    'cr_day_p95'      : p.get('cr_day_p95'),
+                    'cr_day_mean'     : p.get('cr_day_mean'),
+                    'cr_day_min'      : p.get('cr_day_min'),
+                    'cr_day_max'      : p.get('cr_day_max'),
+                    'cr_day_std'      : p.get('cr_day_std'),
+                    'cr_day_n'        : p.get('cr_day_n'),
+                    'cr_night_p05'    : p.get('cr_night_p05'),
+                    'cr_night_median' : p.get('cr_night_median'),
+                    'cr_night_p95'    : p.get('cr_night_p95'),
+                    'cr_night_mean'   : p.get('cr_night_mean'),
+                    'cr_night_min'    : p.get('cr_night_min'),
+                    'cr_night_max'    : p.get('cr_night_max'),
+                    'cr_night_std'    : p.get('cr_night_std'),
+                    'cr_night_n'      : p.get('cr_night_n'),
+                    'n_images'        : p.get('n_images',         0),
+                    'n_days'          : p.get('n_days',           0),
+                    'n_nights'        : p.get('n_nights',         0),
+                    'n_day_strict'    : p.get('n_day_strict',     0),
+                    'n_day_moderate'  : p.get('n_day_moderate',   0),
+                    'n_night_strict'  : p.get('n_night_strict',   0),
+                    'n_night_moderate': p.get('n_night_moderate', 0),
+                })
+
+    if not all_rows:
+        return None
+
+    df = (_pd.DataFrame(all_rows)
+            .sort_values(['year', 'month'])
+            .reset_index(drop=True))
+    df.to_csv(csv_path, index=False)
+    meta_path.write_text(_json.dumps({
+        'source_version': source_version,
+        'cache_hash'    : cache_hash,
+        'city'          : city_name,
+        'granularity'   : 'monthly',
+        'extracted_date': _dt.utcnow().isoformat(),
+        'n_records'     : len(df),
+    }, indent=2), encoding='utf-8')
+    print(f'  [DONE ] {city_name} - {len(df)} monthly records')
+    return df
+

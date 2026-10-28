@@ -855,3 +855,104 @@ def categorise_trend(warming_rate_str, trend_significance_str):
         return 'Insignificant Warming'
     else:
         return 'No Trend / Insig. Cooling'
+
+def run_trend_analysis(series, mode='annual'):
+    """Three-layer trend analysis pipeline for LST time series.
+
+    Primary trend method is always non-parametric (Mann-Kendall / Hamed-Rao /
+    Seasonal MK + Sen slope).  OLS linear regression is added as a
+    supplementary diagnostic — useful for reporting R² alongside Sen slope
+    in tables and per-city summaries.
+
+    Parameters
+    ----------
+    series : pd.Series
+        Time-ordered LST values (annual medians or monthly medians).
+        For annual mode the index should be integer years (e.g. 2006–2025)
+        so that ``ols_slope`` is in °C yr⁻¹.  For monthly mode the index is
+        a DatetimeIndex and ``ols_slope`` is in °C month⁻¹ (positional).
+    mode : 'annual' | 'monthly'
+        'monthly' triggers Seasonal Mann-Kendall (period=12).
+
+    Returns
+    -------
+    dict
+        Primary  : n, mk_z, mk_p, mk_trend, autocorr_corrected,
+                   lag1_autocorr, ljungbox_pvalue,
+                   sen_slope_per_year, sen_slope_per_decade, intercept
+        Supplementary OLS : ols_slope, ols_r_squared, ols_p_value
+
+    References
+    ----------
+    Ljung & Box (1978) https://doi.org/10.1093/biomet/65.2.297
+    Mann (1945); Kendall (1975) Rank Correlation Methods, Griffin.
+    Hamed & Rao (1998) https://doi.org/10.1016/S0022-1694(97)00125-X
+    Hirsch et al. (1982) https://doi.org/10.1029/WR018i001p00107
+    Sen (1968) https://doi.org/10.1080/01621459.1968.10480934
+    """
+    import numpy as _np
+    import pandas as _pd
+    import pymannkendall as _mk
+    from statsmodels.stats.diagnostic import acorr_ljungbox as _lb
+
+    clean = series.dropna()
+    out = {
+        'n': len(clean),
+        'mk_z': _np.nan, 'mk_p': _np.nan,
+        'mk_trend': 'insufficient data',
+        'autocorr_corrected': False,
+        'lag1_autocorr': _np.nan, 'ljungbox_pvalue': _np.nan,
+        'sen_slope_per_year': _np.nan, 'sen_slope_per_decade': _np.nan,
+        'intercept': _np.nan,
+        # Supplementary OLS
+        'ols_slope': _np.nan, 'ols_r_squared': _np.nan, 'ols_p_value': _np.nan,
+    }
+    if len(clean) < 4:
+        return out
+
+    # Layer 1: Ljung-Box autocorrelation detection
+    lb_res  = _lb(clean, lags=[1], return_df=True)
+    lb_p    = float(lb_res['lb_pvalue'].iloc[0])
+    lag1    = float(clean.autocorr(lag=1))
+    out['ljungbox_pvalue'] = round(lb_p, 6)
+    out['lag1_autocorr']   = round(lag1, 4)
+    autocorr = lb_p < 0.05
+    out['autocorr_corrected'] = autocorr
+
+    # Layer 2: Trend test (auto-selected)
+    try:
+        if mode == 'monthly':
+            result = _mk.seasonal_test(clean, period=12)
+        elif autocorr:
+            result = _mk.hamed_rao_modification_test(clean)
+        else:
+            result = _mk.original_test(clean)
+
+        out['mk_z']     = round(float(result.z),    4)
+        out['mk_p']     = round(float(result.p),    6)
+        out['mk_trend'] = result.trend
+
+        # Layer 3: Sen slope (in pymannkendall result)
+        out['sen_slope_per_year']   = round(float(result.slope),     6)
+        out['sen_slope_per_decade'] = round(float(result.slope) * 10, 5)
+        out['intercept']            = round(float(result.intercept), 4)
+    except Exception as e:
+        out['mk_trend'] = f'error: {e}'
+
+    # Supplementary OLS (Layer 3b) — goodness-of-fit companion to Sen slope
+    # Uses actual year integers for annual series so slope is in °C yr⁻¹;
+    # uses positional index for datetime-indexed monthly series (°C month⁻¹).
+    try:
+        from scipy.stats import linregress as _linreg
+        if isinstance(clean.index, _pd.DatetimeIndex):
+            _x = _np.arange(len(clean), dtype=float)   # positional (monthly)
+        else:
+            _x = _np.array(clean.index, dtype=float)   # year integers (annual)
+        _ols = _linreg(_x, clean.values)
+        out['ols_slope']     = round(float(_ols.slope),       6)
+        out['ols_r_squared'] = round(float(_ols.rvalue ** 2), 4)
+        out['ols_p_value']   = round(float(_ols.pvalue),      6)
+    except Exception:
+        pass  # OLS is supplementary; primary analysis is unaffected
+
+    return out
