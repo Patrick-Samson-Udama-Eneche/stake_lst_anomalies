@@ -32,10 +32,9 @@ from shapely.geometry import Polygon
 
 # ── constants ───────────────────────────────────────────────────────────────
 VERSION = "1.0.1"
-# Date carried by the v1.0.0 package's own CHANGELOG.md, read off that file rather than
-# chosen here. v1.0.0 was finalised but never deposited, so this is a build date, not a
-# publication date, and v1.0.1 may legitimately carry the same one.
-V100_DATE = "2026-10-28"
+# Release date of v1.0.0, as published on Zenodo (record 23050560) and recorded in that
+# deposit's own CHANGELOG.md. Verified against Results/05_hotspot_analysis/_archive_v1.0.0/.
+V100_DATE = "2026-09-30"
 DATASET_DIR  = "surface_thermal_anomaly_stakeholder_composite"   # published dataset root
 DATASET_STEM = "surface_thermal_anomaly_stakeholder_composite"
 # The Zenodo record title. Deliberately free of counts and years so it stays stable across
@@ -64,6 +63,9 @@ R05 = ROOT / "Results" / "05_hotspot_analysis"
 MASTER_GPKG = R05 / "master_thermal_spots.gpkg"
 # the UN WUP 2024 table NB01 used for city selection (config.AOI_DATA_PATHS['cities_csv'])
 WUP_CSV = ROOT / "data" / "inputs" / "geospatial_features" / "Major_cities_population_Nigeria_WUP_2025.csv"
+# Hand-authored reference input, not a notebook output, so it lives on a TRACKED path:
+# it used to sit under docs/, which .gitignore excludes, and a fresh clone could not build.
+ABBREV_CSV = ROOT / "data" / "reference" / "abbreviations.csv"
 
 ZONE_MAP = {"urban_core": "uc", "bra": "bra", "city_region": "cr", "delta_uc_bra": "suhii"}
 ZONE_ORDER = ["uc", "bra", "cr", "suhii"]
@@ -438,20 +440,24 @@ def build_city_year_summary(ref, spots, study_year=STUDY_YEAR):
             df[c] = df["city"].map(mcc.set_index("city")[c])
 
     # A5: the NB05 roll-up has no row for a city with no spots, leaving validation_tier
-    # empty (Ikare). Fall back to the city's own selected-event tiers, taking the weaker of
-    # the two so the field stays a conservative summary of the event evidence.
-    _ORDER = ["FAIR", "GOOD", "EXCELLENT"]
-    def _weaker(a, b):
-        got = [t for t in (a, b) if isinstance(t, str) and t in _ORDER]
-        return min(got, key=_ORDER.index) if got else np.nan
+    # empty (Ikare). Fill it with the SAME rule NB05 applies to the other 55 cities, which
+    # is the day and night selected-event tiers joined day-first: 'EXCELLENT/GOOD'. Verified
+    # against master_city_composite.csv for all 55, zero exceptions. An earlier version of
+    # this fallback took the weaker of the two and would have written 'GOOD', a value in a
+    # different vocabulary from every other row.
+    def _tier_pair(a, b):
+        a = str(a).strip() if isinstance(a, str) and str(a).strip() else None
+        b = str(b).strip() if isinstance(b, str) and str(b).strip() else None
+        return f"{a}/{b}" if a and b else np.nan
     _miss = df["validation_tier"].isna()
     if _miss.any():
         df.loc[_miss, "validation_tier"] = [
-            _weaker(r.day_selected_event_tier, r.night_selected_event_tier)
+            _tier_pair(r.day_selected_event_tier, r.night_selected_event_tier)
             for r in df[_miss].itertuples()]
         DEVIATIONS.append(
             f"city_year_summary.validation_tier: filled for {int(_miss.sum())} city(ies) with no "
-            "NB05 roll-up row (no spots detected) from the weaker of their two selected-event tiers.")
+            "NB05 roll-up row (no spots detected) by joining their day and night "
+            "selected-event tiers day-first, the same rule NB05 uses for the other 55.")
     return df.sort_values(["city_slug", "study_year"]).reset_index(drop=True)
 
 
@@ -1020,7 +1026,7 @@ DESCR = {
     "perceived_diurnal_severity": ("Period in which heat is felt most severely.", "", "stakeholder", "questionnaire item 60", "NB02"),
     "perceived_peak_period": ("Months perceived as the city's temperature peak.", "", "stakeholder", "questionnaire item 58", "NB02"),
     "in_city_region": ("True when the marked point falls inside the city region of the city the participant answered for. False when it falls elsewhere, which is not an error: participants were asked about a city, not about where they were standing.", "", "derived", "point-in-polygon", "city_zones (cr) in this package"),
-    "containing_city": ("The study city whose city region contains the point, or empty when no study city does. Equals `city` when in_city_region is true. City regions are bounding boxes and can overlap; the participant's own city takes precedence, which resolves every overlap in this release.", "", "derived", "point-in-polygon", "city_zones (cr) in this package"),
+    "containing_city": ("The study city whose city region contains the point, or empty when no study city's does. Equals `city` when in_city_region is true. PRECEDENCE RULE: city regions are bounding boxes and can overlap, so a point can fall in more than one. Where it does, the participant's own city wins; only if the own city is not among them is the single containing city used. Three of the 94 points lie in two city regions - one Abuja point also inside Madalla, and two Port Harcourt points also inside Abonnema - and the own city is one of the two in all three, so the rule resolves every overlap in this release and never has to choose between two foreign cities.", "", "derived", "point-in-polygon", "city_zones (cr) in this package"),
     "recency_of_contact_with_city": ("How recently the participant was in touch with the city. Blank where the participant left the item unanswered; stored as given, with no imputation.", "", "stakeholder", "questionnaire item 56", "NB02"),
     "buffer_m": ("Buffer radius applied around stakeholder-marked points.", "m", "derived", "buffer sensitivity", "NB05"),
     "n_hit": ("Rows of the point-to-footprint join that fall inside a spot at this buffer, for the 105-participant cohort. A point inside several footprints contributes several rows.", "count", "derived", "buffer sensitivity", "scripts/compute_hitrate.py"),
@@ -1119,7 +1125,7 @@ DESCR.update({
     "selection_reason": ("Why this event was chosen for SEVIRI compositing.", "", "ERA5-Land", "event selection", "NB04 event audit"),
     "seviri_scene_available": ("True when a clipped SEVIRI composite exists for the selected window.", "", "MSG-SEVIRI", "scene inventory", "NB04 seviri folder"),
     # city roll-ups
-    "validation_tier": ("City-level validation tier rolled up from the selected events.", "", "ERA5-Land", "event selection", "NB05 master_city_composite.csv"),
+    "validation_tier": ("Quality tiers of the city's two selected heat events, joined day-first as '<day>/<night>', each one of FAIR, GOOD or EXCELLENT: 'EXCELLENT/GOOD' means the day event was EXCELLENT and the night event GOOD. It is a pair, not a single ranked grade, so do not order these values. Six combinations occur in this release.", "", "ERA5-Land", "event selection", "NB05 master_city_composite.csv"),
     "bh_any": ("True when any spot in the city survives BH-FDR control.", "", "SEVIRI", "BH-FDR q = 0.05", "NB05 master_city_composite.csv"),
     # dataset_info
     "key": ("Metadata key.", "", "derived", "packaging", "this script"),
@@ -1430,7 +1436,7 @@ def write_readme(layers, out_dir: Path, gpkg: Path):
 
     # The abbreviation list is read from the Data in Brief source of truth rather than
     # restated here, so the two can never disagree. Missing file fails the build.
-    _ab_src = ROOT / "docs" / "scs_rebuild" / "abbreviations_dib.csv"
+    _ab_src = ABBREV_CSV
     if not _ab_src.exists():
         raise FileNotFoundError(f"abbreviation list not found: {_ab_src}")
     _ab = pd.read_csv(_ab_src)
@@ -1637,17 +1643,16 @@ stated first below.
 
 ### Fixed
 
-- **`heat_event_catalogue` completed.** The catalogue was assembled by reading one event
-  audit file per city under the city's display name, but those files are written with
-  spaces replaced by underscores. The three cities whose names contain a space - Ado Ekiti,
-  Benin City and Port Harcourt - were silently skipped, so 37 of their events were absent
-  even though `city_year_summary` counted them. 770 to 807 rows, 53 to 56 cities.
 - **`city_year_summary.validation_tier` no longer null for a city with no spots.** Ikare
-  produced no spots, so it had no row in the source roll-up. It now takes the weaker of its
-  two selected-event tiers (GOOD).
+  produced no spots, so it had no row in the source roll-up and the field was empty. It now
+  carries `EXCELLENT/GOOD`, built by the same rule as the other 55 cities: the day and night
+  selected-event tiers joined day-first. Note that this field is a PAIR of tiers, not a single
+  ranked grade, so its values should not be ordered.
 - **`recency_of_contact_with_city`** replaces a field that was published as
   `years_associated_with_city`. The questionnaire item records how recently the participant
   was in touch with the city, not a duration in years.
+- **`checksums_md5.txt` now uses LF line endings;** the v1.0.0 manifest used CRLF, so
+  `md5sum -c` failed on Linux and macOS.
 - **Water masking is attributed correctly.** v1.0.0 listed OpenStreetMap water features as
   a source. No OpenStreetMap data is used anywhere: the MSG-SEVIRI water mask is built from
   JRC Global Surface Water bodies of at least 3 km2, the same source already credited for

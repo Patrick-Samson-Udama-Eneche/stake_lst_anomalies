@@ -68,7 +68,8 @@ data/outputs/
 Results/
 
 # Documentation (manuscripts, security setup, private project notes)
-docs/
+docs/*
+!docs/scs_rebuild/
 
 # Large OSM data files (too big for GitHub, re-downloadable from OpenStreetMap)
 data/inputs/osm_nigeria/*.osm.pbf

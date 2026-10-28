@@ -1,0 +1,36 @@
+abbreviation,meaning
+BH-FDR,Benjamini–Hochberg false discovery rate
+BRA,Background reference area
+CR,City region
+CRS,Coordinate reference system
+DOI,Digital object identifier
+ECMWF,European Centre for Medium-Range Weather Forecasts
+ERA5-Land,"ECMWF land reanalysis, fifth generation"
+EUMETSAT,European Organisation for the Exploitation of Meteorological Satellites
+GEE,Google Earth Engine
+"GHS-POP, GHS-SMOD",Global Human Settlement population grid; settlement model grid
+Gi*,"Getis–Ord local statistic, focal pixel included"
+GPS,Global Positioning System
+GSW,JRC Global Surface Water
+JRC,Joint Research Centre of the European Commission
+KDE,Kernel density estimation
+"L50, L75, L90","Contour levels at 0.50, 0.75 and 0.90 of the peak kernel density"
+LP DAAC,NASA Land Processes Distributed Active Archive Center
+LSA SAF,EUMETSAT Satellite Application Facility on Land Surface Analysis
+LST,Land surface temperature
+MK,Mann–Kendall
+MLST_DIR,LSA SAF MSG land surface temperature with directional effects (LSA-004)
+MODIS,Moderate Resolution Imaging Spectroradiometer
+MSG-SEVIRI,"Meteosat Second Generation, Spinning Enhanced Visible and Infrared Imager"
+MYD11A1,MODIS Aqua daily land surface temperature and emissivity product
+OLS,Ordinary least squares
+"P90, P10",90th and 10th percentile
+PHE,Persistent heat event
+PLT,Physiographic landscape typology
+QC,Quality control (flag)
+SD,Standard deviation
+SUHII,Surface urban heat island intensity
+UC,Urban core
+UN DESA,United Nations Department of Economic and Social Affairs
+UTC,Coordinated Universal Time
+WUP,World Urbanization Prospects

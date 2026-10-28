@@ -2,7 +2,7 @@
 """QA for the published composite package. Read-only apart from the marked validation block
 it fills in _build/build_report.md."""
 from __future__ import annotations
-import hashlib, json, re, shutil, subprocess, sys, tempfile, warnings
+import argparse, hashlib, json, re, shutil, subprocess, sys, tempfile, warnings
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -15,7 +15,10 @@ import pyogrio
 
 warnings.filterwarnings("ignore")
 ROOT = Path(__file__).resolve().parents[1]
-PKG = ROOT / "Results" / "05_hotspot_analysis" / "surface_thermal_anomaly_stakeholder_composite"
+DEFAULT_PKG = ROOT / "Results" / "05_hotspot_analysis" / "surface_thermal_anomaly_stakeholder_composite"
+# Rebound by --package so QA can validate a scratch build, and so the reproducibility
+# check can point at the folder it just rebuilt rather than the live deposit.
+PKG = DEFAULT_PKG
 GPKG = PKG / "surface_thermal_anomaly_stakeholder_composite.gpkg"
 R01, R03 = ROOT / "Results" / "01_aoi_delineation", ROOT / "Results" / "03_temporal_analysis"
 R04, R05 = ROOT / "Results" / "04_temporal_analysis_daily", ROOT / "Results" / "05_hotspot_analysis"
@@ -333,8 +336,14 @@ def main():
     check("no original participant id anywhere", not leaked, f"{sorted(leaked)}")
     raw = pd.read_csv(ROOT / "data" / "inputs" / "stakeholder_survey" / "master_composite.csv",
                       nrows=1, low_memory=False)
-    allowed = {"perceived_warming_10yr", "perceived_diurnal_severity", "perceived_peak_period",
-               "years_associated_with_city", "participant_code", "city", "city_slug",
+    # Published perception items, plus keys and derived fields. recency_of_contact_with_city
+    # replaces years_associated_with_city (A7); in_city_region and containing_city are
+    # derived by point-in-polygon (A4) and carry a boolean and a study-city name, never free
+    # text or anything from the questionnaire.
+    allowed = {"perceived_warming_10yr", "perceived_diurnal_severity",
+               "perceived_peak_period", "recency_of_contact_with_city",
+               "in_city_region", "containing_city",
+               "participant_code", "city", "city_slug",
                "cluster25", "spot_type", "study_year", "scenario_id", "geometry"}
     sk = set(d["stakeholder_perception"].columns) | set(d["stakeholder_spots_gps"].columns)
     check("no raw questionnaire column reaches the package",
@@ -463,6 +472,57 @@ def main():
           f"recomputed {_nman} digests, {len(_recomp)} mismatched; "
           f"CRLF lines: {_crlf}; "
           + ("md5sum -c unavailable" if _ext is None else f"md5sum -c exit {_ext}"))
+    # Every build input that is NOT a notebook cache must be under version control, or a
+    # fresh clone cannot build. docs/ is ignored wholesale, which is how the abbreviation
+    # list came to be unreachable; this check stops that recurring.
+    _inputs = [ROOT / "data" / "reference" / "abbreviations.csv",
+               ROOT / "data" / "inputs" / "geospatial_features" /
+               "Major_cities_population_Nigeria_WUP_2025.csv"]
+    _missing = [p.name for p in _inputs if not p.exists()]
+    _ignored = []
+    for _p in _inputs:
+        _r = subprocess.run(["git", "check-ignore", "-q", str(_p)], cwd=ROOT,
+                            capture_output=True, text=True)
+        if _r.returncode == 0:
+            _ignored.append(_p.name)
+    check("hand-authored build inputs exist and are not gitignored",
+          not _missing and not _ignored,
+          f"{len(_inputs)} inputs checked"
+          + ("" if not _missing else f"; missing {_missing}")
+          + ("" if not _ignored else f"; IGNORED {_ignored}"))
+
+    # The published v1.0.0 deposit, restored from Zenodo record 23050560, is the reference
+    # the alignment rule is measured against. Its own manifest is CRLF and records a stale
+    # README digest (the README was hand-edited after the manifest was written), so those
+    # two facts are asserted rather than treated as failures.
+    _arc = ROOT / "Results" / "05_hotspot_analysis" / "_archive_v1.0.0"
+    _am = _arc / "checksums_md5.txt"
+    if not _am.exists():
+        check("v1.0.0 archive present and verifies against its published manifest", False,
+              f"no manifest at {_am}")
+    else:
+        _exp = {}
+        for _l in _am.read_bytes().decode("utf-8").replace(chr(13), "").strip().split(chr(10)):
+            _dg, _nm = _l.split("  ", 1)
+            _exp[_nm] = _dg
+        _bad = []
+        for _nm, _dg in _exp.items():
+            _f = _arc / _nm
+            if not _f.exists():
+                _bad.append(_nm + " (absent)")
+                continue
+            _h = hashlib.md5()
+            with _f.open("rb") as _fh:
+                for _c in iter(lambda: _fh.read(1 << 20), b""):
+                    _h.update(_c)
+            if _h.hexdigest() != _dg:
+                _bad.append(_nm)
+        check("v1.0.0 archive present and verifies against its published manifest",
+              _bad == ["README.md"],
+              f"{len(_exp) - len(_bad)}/{len(_exp)} match; README.md is a known v1.0.0 "
+              f"defect (hand-edited after its digest was written)"
+              + ("" if _bad in ([], ["README.md"]) else f"; unexpected {_bad}"))
+
     # provenance rows and retired parameters
     _info = d["dataset_info"].set_index("key")["value"]
     _retired = {"era5_min_pixels", "bra_tolerance", "bra_max_dist_m", "bra_min_ring_m"}
@@ -543,5 +603,20 @@ def main():
     return 0 if npass == len(RES) else 1
 
 
+def _cli(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--package", type=Path, default=DEFAULT_PKG,
+                    help="deposit folder to validate (default: the published deposit folder)")
+    a = ap.parse_args(argv)
+    global PKG, GPKG
+    PKG = a.package.resolve()
+    GPKG = PKG / "surface_thermal_anomaly_stakeholder_composite.gpkg"
+    if not GPKG.exists():
+        print(f"no package at {GPKG}")
+        return 2
+    print(f"Package: {PKG}")
+    return main()
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(_cli())
