@@ -5042,6 +5042,15 @@ def create_nigeria_cities_landscape_map(
     ax.grid(True, alpha=0.15, linestyle='--', linewidth=0.5, zorder=0)
     ax.set_aspect('equal')
 
+    # Candidate cities absorbed into a neighbour: a heavy cross on a white halo, so the
+    # mark stays legible over any landscape-class colour.
+    if absorbed_points:
+        for _lon, _lat, _nm in absorbed_points:
+            ax.plot(_lon, _lat, 'o', markersize=9, markerfacecolor='white',
+                    markeredgecolor='none', alpha=0.95, zorder=7)
+            ax.plot(_lon, _lat, 'x', markersize=6, markeredgewidth=2.0,
+                    color='#B2182B', zorder=8)
+
     bounds = nigeria_gdf.total_bounds
     ax.set_xlim(bounds[0] - 0.5, bounds[2] + 0.5)
     ax.set_ylim(bounds[1] - 1.0, bounds[3] + 0.5)
@@ -9948,6 +9957,15 @@ Total Population at Risk (Gi*): {format_population(gi_star_pop)}
     ax.set_aspect('equal')
     
     # Expand bounds to include Lagos and labels
+    # Candidate cities absorbed into a neighbour: a heavy cross on a white halo, so the
+    # mark stays legible over any landscape-class colour.
+    if absorbed_points:
+        for _lon, _lat, _nm in absorbed_points:
+            ax.plot(_lon, _lat, 'o', markersize=9, markerfacecolor='white',
+                    markeredgecolor='none', alpha=0.95, zorder=7)
+            ax.plot(_lon, _lat, 'x', markersize=6, markeredgewidth=2.0,
+                    color='#B2182B', zorder=8)
+
     bounds = nigeria_gdf.total_bounds
     ax.set_xlim(bounds[0] - 0.5, bounds[2] + 0.5)
     ax.set_ylim(bounds[1] - 1.0, bounds[3] + 0.5)
@@ -15114,8 +15132,33 @@ def create_publication_nigeria_overview(
     dpi: int = 300,
     figsize: tuple = (8.27, 11.69),
     pop_scale: float = 0.6,
+    cluster_labels: Dict = None,
+    legend_cluster_ids: list = None,
+    highlight_cluster_ids: set = None,
+    absorbed_points: list = None,
+    pop_legend_values: list = None,
+    title: str = 'Study Cities \u2014 Nigeria Cluster25 Landscape Classification',
+    legend_title: str = 'Legend',
+    cluster_legend_heading: str = 'Landscape Clusters (Cl25):',
+    legend_ncol: int = 2,
+    legend_fontsize: float = 7,
+    legend_outside: bool = False,
 ) -> plt.Figure:
-    """A4 publication Nigeria overview: Cluster25 fills + proportional circles + cluster legend."""
+    """A4 publication Nigeria overview: Cluster25 fills + proportional circles + cluster legend.
+
+    The optional arguments were added for the SCS rebuild and all default to the original
+    behaviour, so existing callers (NB01) render exactly as before:
+
+    cluster_labels         {cluster_id: text} for the legend, instead of 'Cluster {id}'
+    legend_cluster_ids     which clusters the legend lists (default: the active ones)
+    highlight_cluster_ids  those drawn with a dark outline and a marker in the legend
+    absorbed_points        [(lon, lat, name), ...] drawn as a cross on a white halo
+    pop_legend_values      [(persons, label), ...] for the graduated key, instead of
+                           fractions of the largest city
+    title                  None removes the in-figure title
+    legend_outside         places the legend beside the map instead of inside it, for a
+                           legend too long to sit over the country without covering it
+    """
     import matplotlib.patches as mpatches
 
     nigeria_gdf   = gpd.read_file(nigeria_path).to_crs('EPSG:4326')
@@ -15192,14 +15235,23 @@ def create_publication_nigeria_overview(
     except ImportError:
         pass
 
+    # Candidate cities absorbed into a neighbour: a heavy cross on a white halo, so the
+    # mark stays legible over any landscape-class colour.
+    if absorbed_points:
+        for _lon, _lat, _nm in absorbed_points:
+            ax.plot(_lon, _lat, 'o', markersize=9, markerfacecolor='white',
+                    markeredgecolor='none', alpha=0.95, zorder=7)
+            ax.plot(_lon, _lat, 'x', markersize=6, markeredgewidth=2.0,
+                    color='#B2182B', zorder=8)
+
     bounds = nigeria_gdf.total_bounds
     ax.set_xlim(bounds[0] - 0.5, bounds[2] + 0.5)
     ax.set_ylim(bounds[1] - 1.0, bounds[3] + 0.5)
     ax.set_aspect('equal')
     ax.grid(True, alpha=0.15, linestyle='--', linewidth=0.5, zorder=0)
     ax.set_xlabel('Longitude', fontsize=10); ax.set_ylabel('Latitude', fontsize=10)
-    ax.set_title('Study Cities — Nigeria Cluster25 Landscape Classification',
-                 fontsize=13, fontweight='bold', pad=14)
+    if title:
+        ax.set_title(title, fontsize=13, fontweight='bold', pad=14)
 
     sc_cx = (bounds[0] + bounds[2]) / 2; sc_lat = bounds[1] - 0.7
     ax.plot([sc_cx - 0.45, sc_cx + 0.45], [sc_lat, sc_lat], 'k-', linewidth=3, zorder=8)
@@ -15213,22 +15265,48 @@ def create_publication_nigeria_overview(
 
     _items = [
         plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='black',
-                   markersize=5, label='City location'),
+                   markersize=5, label='Study city'),
         mpatches.Patch(facecolor='none', edgecolor='#333', linewidth=1.5,
                        label='National boundary'),
-        mpatches.Patch(facecolor='none', edgecolor='none', label=''),
-        mpatches.Patch(facecolor='none', edgecolor='none', label='Landscape Clusters (Cl25):'),
     ]
-    _cids = sorted(active_cluster_ids) if active_cluster_ids \
-            else sorted(int(x) for x in land_merged['Cluster25'].unique())
+    if absorbed_points:
+        _items.append(plt.Line2D([0], [0], marker='x', color='#B2182B', linestyle='none',
+                                 markersize=6, markeredgewidth=2.0,
+                                 label=f'Absorbed candidate ({len(absorbed_points)})'))
+    _items += [
+        mpatches.Patch(facecolor='none', edgecolor='none', label=''),
+        mpatches.Patch(facecolor='none', edgecolor='none', label=cluster_legend_heading),
+    ]
+    if legend_cluster_ids is not None:
+        _cids = list(legend_cluster_ids)
+    elif active_cluster_ids:
+        _cids = sorted(active_cluster_ids)
+    else:
+        _cids = sorted(int(x) for x in land_merged['Cluster25'].unique())
+    _hi = set(int(x) for x in (highlight_cluster_ids or []))
     for cid in _cids:
         col = cluster25_colors.get(int(cid))
-        if col:
-            _items.append(mpatches.Patch(facecolor=col, edgecolor='white',
-                                          linewidth=0.5, alpha=0.8, label=f'Cluster {cid}'))
-    leg = ax.legend(handles=_items, loc='lower right', fontsize=7, framealpha=0.93,
-                    edgecolor='#555', title='Legend', title_fontsize=9, ncol=2,
-                    borderpad=0.8, labelspacing=0.35, handlelength=1.2, handletextpad=0.4)
+        if not col:
+            continue
+        _lbl = (cluster_labels or {}).get(int(cid), f'Cluster {cid}')
+        _on = int(cid) in _hi
+        _items.append(mpatches.Patch(facecolor=col,
+                                     edgecolor='#333333' if _on else 'white',
+                                     linewidth=1.1 if _on else 0.5,
+                                     alpha=0.85 if _on else 0.6,
+                                     label=_lbl))
+    if legend_outside:
+        leg = ax.legend(handles=_items, loc='upper left', bbox_to_anchor=(1.015, 1.0),
+                        fontsize=legend_fontsize, framealpha=1.0, edgecolor='#555',
+                        title=legend_title, title_fontsize=9, ncol=legend_ncol,
+                        borderpad=0.8, labelspacing=0.3, handlelength=1.3,
+                        handletextpad=0.45)
+    else:
+        leg = ax.legend(handles=_items, loc='lower right', fontsize=legend_fontsize,
+                        framealpha=0.93, edgecolor='#555', title=legend_title,
+                        title_fontsize=9, ncol=legend_ncol,
+                        borderpad=0.8, labelspacing=0.35, handlelength=1.2,
+                        handletextpad=0.4)
     fig.tight_layout()
 
     # ── Graduated proportional-circle key, drawn just above the legend (no frame) ──
@@ -15236,20 +15314,30 @@ def create_publication_nigeria_overview(
     # read back from the rendered legend box so the key always sits above the legend.
     from matplotlib.patches import Circle as _RefCircle
     fig.canvas.draw()
-    _bb = leg.get_window_extent().transformed(ax.transAxes.inverted())
-    _cx, _by = ax.transData.inverted().transform(
-        ax.transAxes.transform(((_bb.x0 + _bb.x1) / 2, _bb.y1 + 0.012)))
+    if legend_outside:
+        # The legend is no longer over the map, so the key sits in the lower-right
+        # corner of the map itself rather than being stacked above the legend.
+        _cx, _by = ax.transData.inverted().transform(
+            ax.transAxes.transform((0.88, 0.05)))
+    else:
+        _bb = leg.get_window_extent().transformed(ax.transAxes.inverted())
+        _cx, _by = ax.transData.inverted().transform(
+            ax.transAxes.transform(((_bb.x0 + _bb.x1) / 2, _bb.y1 + 0.012)))
     _r_big = pop_scale * np.sqrt(1.0)
-    for _fr in (1.0, 0.4, 0.12):
-        _v = max_pop * _fr
+    # Explicit bands let the key start at the 300,000 selection threshold rather than at
+    # a fraction of the largest city.
+    _bands = ([(float(_v), _lb) for _v, _lb in pop_legend_values] if pop_legend_values
+              else [(max_pop * _fr, None) for _fr in (1.0, 0.4, 0.12)])
+    for _v, _lb in sorted(_bands, key=lambda t: -t[0]):
+        _fr = min(max(_v / max_pop, 1e-9), 1.0)
         _r = pop_scale * np.sqrt(_fr)
         ax.add_patch(_RefCircle((_cx, _by + _r), _r, fill=False, edgecolor='#555',
                                 linewidth=0.9, zorder=9, clip_on=False))
         _top = _by + 2 * _r
         ax.plot([_cx - _r, _cx - _r_big - 0.12], [_top, _top], '-',
                 color='#888', lw=0.5, zorder=9, clip_on=False)
-        ax.text(_cx - _r_big - 0.16, _top, _fmt(_v), ha='right', va='center',
-                fontsize=6.5, zorder=10, clip_on=False)
+        ax.text(_cx - _r_big - 0.16, _top, _lb if _lb else _fmt(_v), ha='right',
+                va='center', fontsize=6.5, zorder=10, clip_on=False)
     ax.text(_cx, _by + 2 * _r_big + 0.06, 'Population', ha='center', va='bottom',
             fontsize=7.5, fontweight='bold', zorder=10, clip_on=False)
 

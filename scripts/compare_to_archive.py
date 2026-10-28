@@ -63,9 +63,11 @@ NEW_FIELDS = {                                                   # A3, A4, A6
 }
 RENAMED = {"stakeholder_perception":                             # A7: same values, new name
            {"years_associated_with_city": "recency_of_contact_with_city"}}
-CHANGED_FIELDS = {                                               # A1, A5
+CHANGED_FIELDS = {                                               # A1, A5, harmonisation
     "hitrate_sensitivity": {"n_hit", "n_total", "hit_rate"},
     "city_year_summary": {"validation_tier"},
+    # the one blank peak-period answer is now stored as "I'd rather not say"
+    "stakeholder_perception": {"perceived_peak_period"},
 }
 # No layer is expected to change row count in v1.0.1. The heat-event catalogue fix (770 ->
 # 807 rows) was made BEFORE v1.0.0 was deposited, so the archive already holds all 807.

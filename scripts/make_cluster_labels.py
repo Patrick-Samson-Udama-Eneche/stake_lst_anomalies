@@ -20,6 +20,10 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
 LOOKUP = ROOT / "Results" / "01_aoi_delineation" / "city_cluster25_lookup.csv"
+# The full national typology, all 24 classes. Fig. 1 draws every class, so every class
+# needs a label, not only the 16 that happen to hold a study city.
+TYPOLOGY = (ROOT / "data" / "inputs" / "geospatial_features"
+            / "landscape_ch_polygons_with_class_metrics.geojson")
 OUT = ROOT / "Results" / "manuscript_outputs" / "cluster_labels.csv"
 
 EN_DASH = "–"
@@ -72,10 +76,18 @@ ELEVATION_RANGE = {
 
 
 def main() -> int:
-    d = pd.read_csv(LOOKUP)
+    import geopandas as gpd
+    cities = pd.read_csv(LOOKUP)
+    typ = gpd.read_file(TYPOLOGY)
+    classes = (typ.drop_duplicates("Cluster25")
+               .sort_values("Cluster25")
+               .set_index("Cluster25"))
+    n_by_cluster = cities.groupby("Cluster25").size()
+    city_names = cities.groupby("Cluster25").city_name.apply(lambda g: ", ".join(sorted(g)))
+
     rows = []
-    for cl, g in d.groupby("Cluster25"):
-        r = g.iloc[0]
+    for cl, r in classes.iterrows():
+        cl = int(cl)
         for name, table in (("Climate_Class", CLIMATE_SHORT), ("Climate_Class", CLIMATE_LONG),
                             ("Geology_Class", GEOLOGY_SHORT), ("Geology_Class", GEOLOGY_LONG),
                             ("Elevation_Class", ELEVATION_SHORT)):
@@ -92,18 +104,20 @@ def main() -> int:
             ELEVATION_SHORT[r.Elevation_Class],
             ELEVATION_RANGE[r.Elevation_Class],
         )
+        n = int(n_by_cluster.get(cl, 0))
         rows.append({
             "cluster25": "C%d" % cl,
             "code": r.land_code25,
             "label_short": short,
             "label_long": long,
-            "n_cities": len(g),
+            "n_cities": n,
+            "has_study_cities": bool(n > 0),
             "climate": r.Climate_Class,
             "geology": r.Geology_Class,
             "elevation": r.Elevation_Class,
             "elevation_range": ELEVATION_RANGE[r.Elevation_Class],
-            "landcover": r.Landcover_Class,       # descriptive only, not a typology axis
-            "cities": ", ".join(sorted(g.city_name)),
+            "landcover": r.Landcover_Class,   # descriptive only, not a typology axis
+            "cities": city_names.get(cl, ""),
         })
 
     out = pd.DataFrame(rows)
@@ -111,28 +125,34 @@ def main() -> int:
     out = out.sort_values("_n").drop(columns="_n").reset_index(drop=True)
 
     # The guarantees this file has to carry.
-    assert len(out) == 16, len(out)
+    assert len(out) == 24, len(out)
+    assert int(out.has_study_cities.sum()) == 16, int(out.has_study_cities.sum())
     assert out.label_short.is_unique, "short labels collide"
     assert out.label_long.is_unique, "long labels collide"
     assert out.code.is_unique, "land codes collide"
     assert out.cluster25.is_unique, "cluster ids collide"
     assert out.n_cities.sum() == 56, out.n_cities.sum()
+    covers = set(out[out.has_study_cities].cluster25)
+    want = {"C%d" % c for c in cities.Cluster25.unique()}
+    assert covers == want, sorted(covers ^ want)
     for col in ("label_short", "label_long"):
         assert not out[col].str.contains("|".join(
-            sorted(set(d.Landcover_Class.astype(str).str.lower()))), case=False).any(), \
-            "land cover leaked into " + col
+            sorted(set(typ.Landcover_Class.astype(str).str.lower()))), case=False).any(),             "land cover leaked into " + col
 
     OUT.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(OUT, index=False, encoding="utf-8")
-    print("wrote %s  (%d clusters, %d cities)"
-          % (OUT.relative_to(ROOT), len(out), out.n_cities.sum()))
-    w = max(len(s) for s in out.label_short)
+    print("wrote %s  (%d classes, %d with study cities, %d cities)"
+          % (OUT.relative_to(ROOT), len(out), int(out.has_study_cities.sum()),
+             out.n_cities.sum()))
+    w = max(len(x) for x in out.label_short)
     print()
-    print("%-5s %-8s %-3s %-*s  %s" % ("clus", "code", "n", w, "label_short (+ code in figures)",
-                                       "label_long"))
+    print("%-5s %-8s %-4s %-*s  %s" % ("clus", "code", "n", w, "label_short", "label_long"))
     for r in out.itertuples():
-        print("%-5s %-8s %-3d %-*s  %s" % (r.cluster25, r.code, r.n_cities, w,
-                                           r.label_short, r.label_long))
+        mark = "*" if r.has_study_cities else " "
+        print("%-5s %-8s %-3d%s %-*s  %s" % (r.cluster25, r.code, r.n_cities, mark, w,
+                                             r.label_short, r.label_long))
+    print()
+    print("* holds at least one study city")
     return 0
 
 
