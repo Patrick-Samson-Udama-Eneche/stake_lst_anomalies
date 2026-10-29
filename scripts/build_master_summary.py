@@ -2,14 +2,27 @@
 """
 Build the master summary dataset for the 56-city diurnal surface thermal anomaly study.
 
-Reads only outputs that already exist under Results/ and writes only into
-Results/05_hotspot_analysis/master_summary/. Re-runnable and deterministic: the
-only value that changes between runs is the build date in `dataset_info`.
+Reads only outputs that already exist under Results/. This module is the one place the build
+logic lives; it has two entry points, the command line below and the last section of NB05,
+and both call build_dataset().
+
+Every build goes into a staging folder first (Results/05_hotspot_analysis/_build_staging/)
+and is then compared with the deposit by its content fingerprint:
+
+    same fingerprint      -> "reproduced": nothing is touched, staging cleared
+    different content     -> QA runs on the staging build. If it passes, the deposit is kept in
+                             _superseded_build_<date>/ and replaced by the staging build with all
+                             its files; if QA fails, the deposit is not touched.
+
+No version is named here: versions are named on Zenodo only. A deposit is identified by its
+content fingerprint, and its CHANGELOG entry is headed by date and fingerprint.
 
 Usage
 -----
-    python scripts/build_master_summary.py
-    python scripts/build_master_summary.py --out /tmp/reproduce_check
+    python scripts/build_master_summary.py                          # build, compare, update
+    python scripts/build_master_summary.py --compare-only           # build and compare only
+    python scripts/build_master_summary.py --out <folder>           # another deposit folder
+    python scripts/build_master_summary.py --normalise-line-endings # LF text files in --out
 
 Excluded by design: association analysis, cluster/national aggregates, and the
 raw questionnaire. See the generated README.md.
@@ -19,8 +32,12 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
+import shutil
 import subprocess
 import sys
+import time
+from dataclasses import asdict, dataclass, field
 from datetime import date
 from pathlib import Path
 
@@ -31,17 +48,25 @@ import pyogrio
 from shapely.geometry import Polygon
 
 # ── constants ───────────────────────────────────────────────────────────────
-VERSION = "1.0.1"
-# Release date of v1.0.0, as published on Zenodo (record 23050560) and recorded in that
-# deposit's own CHANGELOG.md. Verified against Results/05_hotspot_analysis/_archive_v1.0.0/.
+# A deposit is identified by its content fingerprint. The code never names a version: versions
+# are named on Zenodo only. build_dataset() rebinds BUILD_DATE for every build.
+BUILD_DATE = date.today().isoformat()
+# The first public release, as published on Zenodo (record 23050560) and restored, verified
+# against its manifest, in Results/05_hotspot_analysis/_archive_v1.0.0/.
+V100_LABEL = "1.0.0"
 V100_DATE = "2026-09-30"
+V100_DOI = "10.5281/zenodo.23050560"  # the version DOI of v1.0.0, not the concept DOI
+V100_FINGERPRINT = "9d2f24fb8baf147d59bd3d10e9305cf8710d002917108f74919d9ffd4daf3390"      # content_fingerprint() of that archive (checked by QA)
 DATASET_DIR  = "surface_thermal_anomaly_stakeholder_composite"   # published dataset root
 DATASET_STEM = "surface_thermal_anomaly_stakeholder_composite"
 # The Zenodo record title. Deliberately free of counts and years so it stays stable across
 # versions; the scope of each version belongs in the README body and the version notes.
 DATASET_TITLE = ("Dataset associated with the analysis of surface thermal anomalies, "
                  "population exposure and stakeholder insights across Nigerian cities")
-DATASET_DOI = "10.5281/zenodo.23050560"
+# Zenodo concept DOI: it resolves to the latest version and lists every version. Checked
+# against the Zenodo API on 2026-10-29: record 23050560 (v1.0.0) has conceptrecid 23050559.
+# Zenodo assigns each version its own DOI at upload, so no version DOI is stored.
+CONCEPT_DOI = "10.5281/zenodo.23050559"
 # Build records live OUTSIDE the deposit folder. Everything inside the deposit folder is
 # published to Zenodo, so nothing internal may sit there.
 BUILD_DIR_NAME = "dataset_build"
@@ -66,6 +91,17 @@ WUP_CSV = ROOT / "data" / "inputs" / "geospatial_features" / "Major_cities_popul
 # Hand-authored reference input, not a notebook output, so it lives on a TRACKED path:
 # it used to sit under docs/, which .gitignore excludes, and a fresh clone could not build.
 ABBREV_CSV = ROOT / "data" / "reference" / "abbreviations.csv"
+# The published deposit, and the folder every build is written to before any comparison.
+DEPOSIT_DIR = R05 / DATASET_DIR
+STAGING_DIR = R05 / "_build_staging"
+STAGING_MARKER = "_BUILD_STAGING"      # only a folder holding this file is ever cleared
+# Content fingerprint: dataset_info rows that describe the build, not the data. `version` was
+# carried by builds up to the local build of 2026-10-28 and is excluded so those still compare.
+FP_VOLATILE_KEYS = {"build_date", "git_commit", "content_fingerprint", "previous_fingerprint",
+                    "version"}
+# Written last, after the data has been fingerprinted, always in this order.
+IDENTITY_KEYS = ["build_date", "content_fingerprint", "previous_fingerprint"]
+FP_FLOAT = ".12g"                      # 12 significant digits, far below any stored precision
 
 ZONE_MAP = {"urban_core": "uc", "bra": "bra", "city_region": "cr", "delta_uc_bra": "suhii"}
 ZONE_ORDER = ["uc", "bra", "cr", "suhii"]
@@ -434,30 +470,25 @@ def build_city_year_summary(ref, spots, study_year=STUDY_YEAR):
             b = bh[(bh.period == p_) & (bh.spot_type == t)].set_index("city_slug")["n"]
             df[f"n_{t}_{p_}_bh_significant"] = df["city_slug"].map(b).fillna(0).astype(int)
 
-    mcc = pd.read_csv(R05 / "master_city_composite.csv")
-    for c in ("validation_tier", "bh_any"):
-        if c in mcc.columns:
-            df[c] = df["city"].map(mcc.set_index("city")[c])
-
-    # A5: the NB05 roll-up has no row for a city with no spots, leaving validation_tier
-    # empty (Ikare). Fill it with the SAME rule NB05 applies to the other 55 cities, which
-    # is the day and night selected-event tiers joined day-first: 'EXCELLENT/GOOD'. Verified
-    # against master_city_composite.csv for all 55, zero exceptions. An earlier version of
-    # this fallback took the weaker of the two and would have written 'GOOD', a value in a
-    # different vocabulary from every other row.
+    # validation_tier and bh_any are derived here. They used to be read from NB05's
+    # master_city_composite.csv, which no notebook cell writes any more; both rules were
+    # checked against that file for the 55 cities it holds, with zero differences
+    # (docs/scs_rebuild/WORKLOG.md, 2026-10-29). The file has no row for Ikare, the city with
+    # no spots, so Ikare's values come from the same rules here as everyone else's.
+    # validation_tier: the day and night selected-event tiers joined day-first, e.g.
+    # 'EXCELLENT/GOOD'. A pair, not a ranked grade.
     def _tier_pair(a, b):
         a = str(a).strip() if isinstance(a, str) and str(a).strip() else None
         b = str(b).strip() if isinstance(b, str) and str(b).strip() else None
         return f"{a}/{b}" if a and b else np.nan
-    _miss = df["validation_tier"].isna()
-    if _miss.any():
-        df.loc[_miss, "validation_tier"] = [
-            _tier_pair(r.day_selected_event_tier, r.night_selected_event_tier)
-            for r in df[_miss].itertuples()]
-        DEVIATIONS.append(
-            f"city_year_summary.validation_tier: filled for {int(_miss.sum())} city(ies) with no "
-            "NB05 roll-up row (no spots detected) by joining their day and night "
-            "selected-event tiers day-first, the same rule NB05 uses for the other 55.")
+    df["validation_tier"] = [_tier_pair(r.day_selected_event_tier, r.night_selected_event_tier)
+                             for r in df.itertuples()]
+    # bh_any: 1 when any spot group of the city (city x period x spot type) survives BH-FDR
+    # control, 0 when none does. spots.bh_significant is that group-level flag, repeated on
+    # each spot. A city with no spots has no group to test and stays null, as published.
+    _bh_any = (sy.assign(_b=sy["bh_significant"].astype(str).str.lower().isin(["true", "1"]))
+               .groupby("city_slug")["_b"].any())
+    df["bh_any"] = df["city_slug"].map(_bh_any).map({True: 1.0, False: 0.0}).astype(float)
     return df.sort_values(["city_slug", "study_year"]).reset_index(drop=True)
 
 
@@ -827,17 +858,37 @@ def build_perception(ref, key):
             f"stakeholder_perception.perceived_peak_period: {_n_blank} blank answer(s) "
             "stored as \"I'd rather not say\", the same value the other two perception "
             "items use for a blank, so the three share one vocabulary.")
+    # The recency item is harmonised the same way, so no perception item carries a null.
+    _n_blank = int(df["recency_of_contact_with_city"].isna().sum())
+    if _n_blank:
+        df["recency_of_contact_with_city"] = df["recency_of_contact_with_city"].fillna(
+            "I'd rather not say")
+        DEVIATIONS.append(
+            f"stakeholder_perception.recency_of_contact_with_city: {_n_blank} blank answer(s) "
+            "stored as \"I'd rather not say\", as for the other three perception items.")
     out = df[["participant_code", "city_slug", "city", "cluster25",
               "perceived_warming_10yr", "perceived_diurnal_severity",
               "perceived_peak_period", "recency_of_contact_with_city"]]
     return out.sort_values("participant_code").reset_index(drop=True)
 
 
-def build_gps(ref, key, zones=None):
+def _gps_frame(src) -> gpd.GeoDataFrame:
+    """A stakeholder GPS table as NB05 §10 writes it: points from long_spot/lat_spot, EPSG:4326."""
+    if isinstance(src, gpd.GeoDataFrame) and src.geometry.notna().any():
+        return src
+    return gpd.GeoDataFrame(src.copy(), crs=CRS_WGS84,
+                            geometry=gpd.points_from_xy(src["long_spot"], src["lat_spot"]))
+
+
+def build_gps(ref, key, zones=None, sources=None):
+    """The published stakeholder points. `sources` = {"hot": df, "cold": df} supplies NB05's
+    in-memory tables (the ones §10 writes to the working GeoPackage); by default the build
+    reads them back from that GeoPackage."""
     codes = key.set_index("pid")["participant_code"]
     frames = []
     for layer, t in (("stakeholder_hotspot_gps", "hot"), ("stakeholder_coldspot_gps", "cold")):
-        g = gpd.read_file(MASTER_GPKG, layer=layer)
+        g = (_gps_frame(sources[t]) if sources is not None
+             else gpd.read_file(MASTER_GPKG, layer=layer))
         g = g[["pid", "matched_city_y", "geometry"]].copy()
         g["spot_type"] = t
         frames.append(g)
@@ -943,8 +994,7 @@ def git_commit() -> str:
 def build_dataset_info(layers, n_cities, n_clusters, study_years, scenario_id, scen_df):
     rows = [
         ("title", DATASET_TITLE),
-        ("version", VERSION),
-        ("build_date", date.today().isoformat()),
+        ("build_date", BUILD_DATE),
         ("crs_geopackage", CRS_ANALYSIS),
         ("crs_geojson", CRS_WGS84),
         ("spatial_coverage", "Nigeria, approximately 4-14 N and 2-15 E"),
@@ -962,14 +1012,20 @@ def build_dataset_info(layers, n_cities, n_clusters, study_years, scenario_id, s
         ("licence", "CC BY 4.0"),
         ("build_script", "scripts/build_master_summary.py"),
         ("git_commit", git_commit()),
-        ("dataset_doi", DATASET_DOI),
+        ("concept_doi", CONCEPT_DOI),
+        ("content_fingerprint", ""),     # filled once the data is written and read back
+        ("previous_fingerprint", ""),
     ]
     # Package-level totals, so a reader can check a download is complete without opening
-    # every layer. n_fields counts dictionary rows, i.e. columns summed across layers.
-    _live = {n: d for n, d in layers.items() if d is not None}
-    rows += [("n_layers", str(len(_live))),
+    # every layer. The GeoPackage holds the data layers plus this table, so n_layers and
+    # n_fields_total count dataset_info as well (its own two fields, key and value), which
+    # makes them agree with the table list and with the data dictionary. n_records_total
+    # counts the data layers only: this table cannot count its own rows.
+    _live = {n: d for n, d in layers.items() if d is not None and n != "dataset_info"}
+    rows += [("n_layers", str(len(_live) + 1)),
+             ("n_data_layers", str(len(_live))),
              ("n_records_total", str(sum(len(d) for d in _live.values()))),
-             ("n_fields_total", str(sum(len(d.columns) for d in _live.values()))),
+             ("n_fields_total", str(sum(len(d.columns) for d in _live.values()) + 2)),
              ("n_geometry_layers", str(sum(1 for d in _live.values()
                                           if getattr(d, "geometry", None) is not None)))]
     rows += [("scenario_ids_in_package", "see the scenario_config layer")]
@@ -1038,7 +1094,7 @@ DESCR = {
     "perceived_peak_period": ("Months perceived as the city's temperature peak.", "", "stakeholder", "questionnaire item 58", "NB02"),
     "in_city_region": ("True when the marked point falls inside the city region of the city the participant answered for. False when it falls elsewhere, which is not an error: participants were asked about a city, not about where they were standing.", "", "derived", "point-in-polygon", "city_zones (cr) in this package"),
     "containing_city": ("The study city whose city region contains the point, or empty when no study city's does. Equals `city` when in_city_region is true. PRECEDENCE RULE: city regions are bounding boxes and can overlap, so a point can fall in more than one. Where it does, the participant's own city wins; only if the own city is not among them is the single containing city used. Three of the 94 points lie in two city regions - one Abuja point also inside Madalla, and two Port Harcourt points also inside Abonnema - and the own city is one of the two in all three, so the rule resolves every overlap in this release and never has to choose between two foreign cities.", "", "derived", "point-in-polygon", "city_zones (cr) in this package"),
-    "recency_of_contact_with_city": ("How recently the participant was in touch with the city. Blank where the participant left the item unanswered; stored as given, with no imputation.", "", "stakeholder", "questionnaire item 56", "NB02"),
+    "recency_of_contact_with_city": ("How recently the participant was in touch with the city. A participant who did not answer is recorded as \"I'd rather not say\", as for the other three perception items.", "", "stakeholder", "questionnaire item 56", "NB02"),
     "buffer_m": ("Buffer radius applied around stakeholder-marked points.", "m", "derived", "buffer sensitivity", "NB05"),
     "n_hit": ("Rows of the point-to-footprint join that fall inside a spot at this buffer, for the 105-participant cohort. A point inside several footprints contributes several rows.", "count", "derived", "buffer sensitivity", "scripts/compute_hitrate.py"),
     "n_total": ("Rows of the point-to-footprint join at this buffer, for the 105-participant cohort (94 points, 55 hot / 39 cold). A point inside no footprint contributes one row, so n_total is a row count and grows with buffer distance.", "count", "derived", "buffer sensitivity", "scripts/compute_hitrate.py"),
@@ -1136,8 +1192,8 @@ DESCR.update({
     "selection_reason": ("Why this event was chosen for SEVIRI compositing.", "", "ERA5-Land", "event selection", "NB04 event audit"),
     "seviri_scene_available": ("True when a clipped SEVIRI composite exists for the selected window.", "", "MSG-SEVIRI", "scene inventory", "NB04 seviri folder"),
     # city roll-ups
-    "validation_tier": ("Quality tiers of the city's two selected heat events, joined day-first as '<day>/<night>', each one of FAIR, GOOD or EXCELLENT: 'EXCELLENT/GOOD' means the day event was EXCELLENT and the night event GOOD. It is a pair, not a single ranked grade, so do not order these values. Six combinations occur in this release.", "", "ERA5-Land", "event selection", "NB05 master_city_composite.csv"),
-    "bh_any": ("True when any spot in the city survives BH-FDR control.", "", "SEVIRI", "BH-FDR q = 0.05", "NB05 master_city_composite.csv"),
+    "validation_tier": ("Quality tiers of the city's two selected heat events, joined day-first as '<day>/<night>', each one of FAIR, GOOD or EXCELLENT: 'EXCELLENT/GOOD' means the day event was EXCELLENT and the night event GOOD. It is a pair, not a single ranked grade, so do not order these values. Six combinations occur in this release.", "", "ERA5-Land", "event selection", "derived in the build from day_selected_event_tier and night_selected_event_tier"),
+    "bh_any": ("1 when any spot group of the city (city x period x spot type) survives BH-FDR control, 0 when none does.", "", "SEVIRI", "BH-FDR q = 0.05", "derived in the build from spots.bh_significant"),
     # dataset_info
     "key": ("Metadata key.", "", "derived", "packaging", "this script"),
     "value": ("Metadata value.", "", "derived", "packaging", "this script"),
@@ -1265,16 +1321,21 @@ LAYER_DESCR = {
         "Whether the participant marked this location as a hot or a cold place. It is the participant's own label, not a Gi* classification, so it is not expected to coincide with the spots layer; hitrate_sensitivity measures how often the two agree.", "",
         "stakeholder", "participatory mapping", "NB02 workshop mapping exercise"),
     ("stakeholder_spots_gps", "city"): (
-        "The study city the participant answered for, which is the city they registered under. It is not necessarily the city containing the point; see in_city_region and containing_city.", "",
-        "stakeholder", "registration record", "NB02"),
+        "The study city named on the questionnaire row that carries this point (items 54 and 55, "
+        "the cities the participant answered for). It is not the registration city (item 8). It "
+        "equals the participant's city in stakeholder_perception except where the participant "
+        "named several study cities and marked points for a city other than the one kept there "
+        "(3 points of one participant in this release). It is not necessarily the city containing "
+        "the point; see in_city_region and containing_city.", "",
+        "stakeholder", "questionnaire items 54-55", "NB02, NB05"),
     ("stakeholder_perception", "city"): (
-        "The study city the participant answered for, which is the city they registered under.", "",
-        "stakeholder", "registration record", "NB02"),
+        "The study city the participant answered the questionnaire for: the city named in items 54 and 55 (the target and other cities the participant named), restricted to the study cities. It is not the registration city (item 8), which decides only membership of the cohort. Where a participant named several study cities, NB02 keeps one city per participant, the first in its cleaned workshop table; this is not a choice by frequency (the three participants concerned named each of their cities equally often).", "",
+        "stakeholder", "questionnaire items 54-55", "NB02"),
     ("stakeholder_spots_gps", "study_year"): (
         "Year of the workshop series in which the point was marked. Every participant is recorded under 2024, the year of the series; the final workshop itself took place on 22 January 2025.", "year",
         "stakeholder", "workshop series", "NB02"),
     ("stakeholder_perception", "perceived_peak_period"): (
-        "Months the participant perceives as the city's temperature peak. A participant who did not answer is recorded as \"I'd rather not say\", the same value the other two perception items use, so the three items share one vocabulary and no item carries a null.", "",
+        "Months the participant perceives as the city's temperature peak. A participant who did not answer is recorded as \"I'd rather not say\", the same value the other perception items use, so the four items share one vocabulary and none carries a null.", "",
         "stakeholder", "questionnaire item 58", "NB02"),
 }
 
@@ -1292,8 +1353,9 @@ def describe(field: str, layer: str | None = None):
 
 
 NULL_MEANING = {
-    "recency_of_contact_with_city": "The participant left the item blank. Stored as given, with no imputation.",
+    "recency_of_contact_with_city": "none",
     "containing_city": "The point falls in no study city's city region.",
+    "bh_any": "The city has no spots, so there is no spot group to test.",
     "absorbed_cities": "No city was absorbed into this one.",
     "area_l75_km2": "L75 not defined for tier-2 spots.",
     "area_l90_km2": "L90 not defined for tier-2 spots.",
@@ -1316,7 +1378,11 @@ def build_dictionary(layers):
             d, unit, sensor, method, prov = describe(f, lname)
             if d.startswith("[CHECK]"):
                 CHECKS.append(f"{lname}.{f}")
-            if f == "geometry":
+            if lname == "dataset_info" and f == "value":
+                # values restate the build (dates, fingerprints, labels); listing them
+                # would make the dictionary differ from one build to the next
+                rng = "free text, one value per key"
+            elif f == "geometry":
                 rng = str(df.geom_type.dropna().unique().tolist()) if hasattr(df, "geom_type") else ""
             elif pd.api.types.is_numeric_dtype(s):
                 v = pd.to_numeric(s, errors="coerce").dropna()
@@ -1333,7 +1399,7 @@ def build_dictionary(layers):
 
 def dictionary_md(dd: pd.DataFrame) -> str:
     out = ["# Data dictionary", "",
-           f"Version {VERSION}. One table per layer. Generated from `data_dictionary.csv`.", ""]
+           f"Built {BUILD_DATE}. One table per layer. Generated from `data_dictionary.csv`.", ""]
     for lname, g in dd.groupby("layer", sort=False):
         out += [f"## {lname}", "",
                 "| field | dtype | unit | description | values / range | null means | source | method | provenance |",
@@ -1406,7 +1472,7 @@ LAYER_ONE_LINER = {
 }
 
 
-def write_readme(layers, out_dir: Path, gpkg: Path):
+def write_readme(layers, out_dir: Path, gpkg: Path, fp: str = ""):
     def size(p):
         n = p.stat().st_size
         return f"{n/1e6:.1f} MB" if n >= 1e6 else f"{n/1e3:.0f} kB"
@@ -1420,7 +1486,7 @@ def write_readme(layers, out_dir: Path, gpkg: Path):
     # stale. Zenodo and the Data in Brief article carry the sizes.
     _manifest = [
         (DATASET_STEM + ".gpkg", "All " + str(sum(1 for d in layers.values() if d is not None))
-                                 + " data layers (" + CRS_ANALYSIS + ")"),
+                                 + " layers (" + CRS_ANALYSIS + ")"),
         ("data_dictionary.csv", "Field-level data dictionary (machine-readable)"),
         ("data_dictionary.md", "The same dictionary, for reading"),
         ("CHANGELOG.md", "Changes by version"),
@@ -1432,6 +1498,10 @@ def write_readme(layers, out_dir: Path, gpkg: Path):
                                 for _nm, _what in _manifest)
 
     n_part = len(layers["stakeholder_perception"])
+    _data = {n: d for n, d in layers.items() if d is not None and n != "dataset_info"}
+    _n_all = len(_data) + 1
+    _n_fields = sum(len(d.columns) for d in _data.values()) + 2
+    _n_rec = sum(len(d) for d in _data.values())
 
     # Geometry-bearing layers are counted, not stated, so the split cannot go stale when a
     # layer is added. GeoDataFrame is the test: an attribute-only layer is a plain frame.
@@ -1455,7 +1525,8 @@ def write_readme(layers, out_dir: Path, gpkg: Path):
 
     txt = f"""# {DATASET_TITLE}
 
-Version {VERSION}. Built {date.today().isoformat()}.
+Built {BUILD_DATE}. Content fingerprint `sha256:{fp}`: it identifies the data (see CHANGELOG.md).
+Versions are named on Zenodo; the concept DOI in section 9 resolves to all of them.
 
 This version covers the 56 Nigerian cities that remain after spatial deduplication of the 67
 UN World Urbanization Prospects 2024 candidates with a population of at least 300,000. The
@@ -1464,9 +1535,11 @@ spots, population exposure and stakeholder evidence are for 2024.
 
 ## 1. What this dataset contains
 
-**One GeoPackage, {sum(1 for d in layers.values() if d is not None)} layers.** Spatial and attribute-only layers live side by side in the same
-file, so there is a single data artefact to cite, download and checksum. Any layer can be read
-with GDAL/OGR, geopandas, QGIS, R (sf) or any GeoPackage-aware tool.
+**One GeoPackage, {_n_all} layers: {_n_all - 1} data layers plus `dataset_info`.** Spatial and attribute-only
+layers live side by side in the same file, so there is a single data artefact to cite, download
+and checksum. The data layers hold {_n_rec:,} records. The data dictionary describes {_n_fields} fields:
+{_n_fields - 2} in the data layers and the two (`key`, `value`) of `dataset_info`. Any layer can be
+read with GDAL/OGR, geopandas, QGIS, R (sf) or any GeoPackage-aware tool.
 
 | layer | rows | contents |
 |---|---|---|
@@ -1544,11 +1617,17 @@ recorded as attending a workshop but holding no registration entry is excluded: 
 cannot be verified independently, as no per-person attendance register exists. One respondent falls
 in that category and is excluded from every layer, along with the spots they marked. The rule is
 deliberate and conservative — it omits an unverifiable record rather than admitting one.
+
+Registration decides who is in the cohort; it does not decide a participant's `city`. That is the
+study city the participant answered the questionnaire for (items 54 and 55). The data dictionary
+gives the rule for participants who named several cities.
+
 ## 9. Licence and citation
 
 Licence: **CC BY 4.0**.
 
-- Dataset: https://doi.org/{DATASET_DOI}
+- Dataset, all versions (concept DOI): https://doi.org/{CONCEPT_DOI}. Each version also has its
+  own DOI, assigned by Zenodo and shown on the record page.
 
 Related publications and the code record are listed on the Zenodo record page.
 
@@ -1564,7 +1643,7 @@ The full licence text accompanies this dataset in `LICENSE.txt`.
 
 Map lines delineate study areas and do not necessarily depict accepted national boundaries. The boundaries are only for academic and research purposes.
 """
-    (out_dir / "README.md").write_text(txt, encoding="utf-8")
+    (out_dir / "README.md").write_text(txt, encoding="utf-8", newline="\n")
 
 
 def write_licence(out_dir: Path):
@@ -1596,104 +1675,119 @@ Human-readable summary:  https://creativecommons.org/licenses/by/4.0/
 Map disclaimer: map lines delineate study areas and do not necessarily depict accepted
 national boundaries.
 """
-    (out_dir / "LICENSE.txt").write_text(text, encoding="utf-8")
+    (out_dir / "LICENSE.txt").write_text(text, encoding="utf-8", newline="\n")
 
 
-def write_changelog(out_dir: Path, n_layers: int, n_cities: int, n_comp: int):
-    """Public changelog: what a holder of the previous version needs to know.
+# ── CHANGELOG ────────────────────────────────────────────────────────────────
+# Assembled, not written whole: the header, the entry for this deposit, then every earlier entry
+# carried forward from the deposit it replaces. Entries carry no version name: versions are named
+# on Zenodo only. Each is headed by its date and the content fingerprint of the data it describes,
+# and says which earlier deposit it is compared with. Prose only: the field-by-field detail of a
+# build is in dataset_build/CHANGES_REPORT_<date>.md.
+CHANGELOG_HEADER = """# Changelog
 
-    The v1.0.0 section describes the release; the v1.0.1 section describes what changed
-    since it. Internal correction history stays in the build report, which is not
-    published. n_layers and n_cities describe the CURRENT build, so the v1.0.0 section
-    states its own counts literally rather than reusing them.
-    """
-    (out_dir / "CHANGELOG.md").write_text(f"""# Changelog
+All notable changes to this dataset are recorded here, newest first, in the sections of Keep a
+Changelog (https://keepachangelog.com/en/1.1.0/). Entries carry no version name: versions are named
+on Zenodo. Each entry is headed by its date and the content fingerprint of the data it describes, a
+SHA-256 over every layer, the scenario configuration and the data dictionary that excludes the build
+date, commit and checksums, so it identifies the data rather than the build.
+"""
 
-All notable changes to this dataset are recorded here. Versions follow the deposit, not the
-software that produced it.
+# The entry for the first deposit after v1.0.0: what changed between v1.0.0 and this build.
+NOTES_SINCE_1_0_0 = """### Changed values
 
-## v{VERSION} - {date.today().isoformat()}
+Three published values change: the hit rates, and the one blank peak-period answer and the one
+blank recency answer, both now stored as "I'd rather not say". Nothing was re-observed and no
+geometry changed: every polygon, contour and coordinate is identical to v1.0.0.
 
-A corrective release. Nothing was re-observed and no geometry changed: every polygon,
-contour and coordinate is byte-identical to v1.0.0. One published set of values changed,
-stated first below.
-
-### Changed values
-
-- **`hitrate_sensitivity` now rests on the participant cohort.** In v1.0.0 this layer
-  selected stakeholder points by the city of workshop ATTENDANCE, so it was computed on 57
-  hot and 40 cold points, while `stakeholder_spots_gps` carried 55 and 39 under the
-  registration rule documented in the README. The two no longer disagree: the layer is now
-  derived from the released `spots` and `stakeholder_spots_gps` layers, using the published
-  coordinates as they are stored, so the hit rates can be recomputed from this dataset
-  alone. At a 500 m buffer: hot day 4/55 and hot night 3/55 (were 4/57 and 3/57), cold day
-  4/39 (was 5/40), cold night 0/39 (was 0/40). Every changed count traces to the three
-  points marked by the one respondent the cohort rule excludes. The counting rule itself is
-  unchanged. This is the only published value that moves between v1.0.0 and v1.0.1.
+- **`hitrate_sensitivity` now rests on the participant cohort.** In v1.0.0 this layer selected
+  stakeholder points by the city of workshop ATTENDANCE, so it was computed on 57 hot and 40 cold
+  points, while `stakeholder_spots_gps` carried 55 and 39 under the registration rule documented
+  in the README. The two no longer disagree: the layer is now derived from the released `spots`
+  and `stakeholder_spots_gps` layers, using the published coordinates as they are stored, so the
+  hit rates can be recomputed from this dataset alone. At a 500 m buffer: hot day 4/55 and hot
+  night 3/55 (were 4/57 and 3/57), cold day 4/39 (was 5/40), cold night 0/39 (was 0/40). Every
+  changed count traces to the three points marked by the one respondent the cohort rule excludes.
+  The counting rule itself is unchanged.
+- **`stakeholder_perception.perceived_peak_period`**: the one blank answer is stored as "I'd rather
+  not say", the value the warming and diurnal items already use for a blank.
+- **`stakeholder_perception.recency_of_contact_with_city`**: likewise, its one blank answer is
+  stored as "I'd rather not say", so none of the four perception items carries a null.
 
 ### Added
 
-- **`composite_trend_statistics`** ({n_comp} rows) - Cluster25 and national composites of the
-  annual series, by zone and period. Each row is the unweighted mean of its member cities
-  per year, then the same Mann-Kendall and Sen protocol used for `trend_statistics`.
-  Previously a reader had to build these from the city-level records; publishing them fixes
+- **`composite_trend_statistics`** ({n_comp} rows): Cluster25 and national composites of the annual
+  series, by zone and period. Each row is the unweighted mean of its member cities per year,
+  then the same Mann-Kendall and Sen protocol used for `trend_statistics`. Publishing them fixes
   the aggregation and the trend test to one definition.
-- **Event-scale sensor fields in `city_year_summary`** - per-city ERA5-Land event means for
-  the selected event window, and the MSG-SEVIRI three-zone event composites, so the
+- **Event-scale sensor fields in `city_year_summary`**: per-city ERA5-Land event means for the
+  selected event window, and the MSG-SEVIRI three-zone event composites, so the
   SEVIRI-against-ERA5-Land comparison can be reproduced from the package.
-- **`stakeholder_spots_gps.in_city_region` and `.containing_city`** - whether a marked point
-  falls inside the city region of the city the participant answered for, and which study
-  city's region does contain it. Points outside are not errors: participants were asked
-  about a city, not about where they were standing.
-- **`city_profile.pct_assigned_class_cr`** - the share of the CITY REGION held by the
-  cluster assigned to the city. The assignment is made on the city region, so this is the
-  figure that justifies it; the existing `pct_dominant_class` measures the urban core and
-  can be much smaller.
-- **Abbreviations** - the README now carries the full abbreviation list.
+- **`stakeholder_spots_gps.in_city_region` and `.containing_city`**: whether a marked point falls
+  inside the city region of the city the participant answered for, and which study city's
+  region does contain it. Points outside are not errors: participants were asked about a city,
+  not about where they were standing.
+- **`city_profile.pct_assigned_class_cr`**: the share of the CITY REGION held by the cluster
+  assigned to the city. The assignment is made on the city region, so this is the figure that
+  justifies it; the existing `pct_dominant_class` measures the urban core and can be much smaller.
+- **Identity in `dataset_info`**: `content_fingerprint` (the fingerprint heading this entry),
+  `previous_fingerprint` (the deposit this entry is compared with) and `concept_doi`, the DOI
+  that resolves to every version.
+- **Package totals in `dataset_info`**: `n_layers` (all 18 tables: 17 data layers plus
+  `dataset_info`), `n_data_layers`, `n_records_total` (records in the data layers),
+  `n_fields_total` (327, every field the data dictionary describes, including the two of
+  `dataset_info`), `n_geometry_layers` and one `rows_<layer>` per data layer.
+- **Abbreviations**: the README now carries the full abbreviation list.
 
 ### Fixed
 
-- **`city_year_summary.validation_tier` no longer null for a city with no spots.** Ikare
-  produced no spots, so it had no row in the source roll-up and the field was empty. It now
-  carries `EXCELLENT/GOOD`, built by the same rule as the other 55 cities: the day and night
-  selected-event tiers joined day-first. Note that this field is a PAIR of tiers, not a single
-  ranked grade, so its values should not be ordered.
-- **`recency_of_contact_with_city`** replaces a field that was published as
-  `years_associated_with_city`. The questionnaire item records how recently the participant
-  was in touch with the city, not a duration in years.
-- **Harmonised:** the one blank answer to the peak-period item is stored as
-  "I'd rather not say", as for the other items.
-- **The v1.0.0 `checksums_md5.txt` recorded the digest of a generated README that was
-  replaced before upload,** so the README failed verification in v1.0.0. In v1.0.1 every file
-  is generated by the build, and the manifest verifies all files.
-- **`checksums_md5.txt` now uses LF line endings;** the v1.0.0 manifest used CRLF, so
-  `md5sum -c` failed on Linux and macOS.
-- **Water masking is attributed correctly.** v1.0.0 listed OpenStreetMap water features as
-  a source. No OpenStreetMap data is used anywhere: the MSG-SEVIRI water mask is built from
-  JRC Global Surface Water bodies of at least 3 km2, the same source already credited for
-  the zone delineation. The OpenStreetMap row and its attribution are removed.
+- **`city_year_summary.validation_tier` no longer null for a city with no spots.** Ikare produced
+  no spots, so it had no row in the source roll-up and the field was empty. It now carries
+  `EXCELLENT/GOOD`, built by the same rule as the other 55 cities: the day and night
+  selected-event tiers joined day-first. The field is a PAIR of tiers, not a single ranked
+  grade, so its values should not be ordered.
+- **`recency_of_contact_with_city`** replaces a field published as `years_associated_with_city`.
+  The questionnaire item records how recently the participant was in touch with the city, not a
+  duration in years.
+- **`dataset_info.dataset_doi` held the v1.0.0 version DOI.** It is replaced by `concept_doi`;
+  each version's own DOI is assigned by Zenodo. The generated `version` field is removed:
+  versions are named on Zenodo, and a deposit is identified by its `content_fingerprint`.
+- **The v1.0.0 `checksums_md5.txt` recorded the digest of a generated README that was replaced
+  before upload,** so the README failed verification in v1.0.0. Every file is now generated by
+  the build, and the manifest verifies all files.
+- **Every text file uses LF line endings.** The v1.0.0 manifest used CRLF, so `md5sum -c` failed
+  on Linux and macOS.
+- **Water masking is attributed correctly.** v1.0.0 listed OpenStreetMap water features as a
+  source. No OpenStreetMap data is used anywhere: the MSG-SEVIRI water mask is built from JRC
+  Global Surface Water bodies of at least 3 km2, the same source already credited for the zone
+  delineation.
 
 ### Documentation
 
-- Tier-2 spot geometry is described correctly: a 500 m buffer around each of the spot's
-  pixels, simplified at a 50 m tolerance, about 0.71 km2 per isolated pixel. v1.0.0 called
-  it a 1 km buffer.
-- `n_obs` and `n_strict` are documented as counts of IMAGES with at least one valid pixel in
-  the city region, not counts of pixel observations, which is why six zone-months carry a
-  value where `n_obs` is 0.
-- `spots.n_pixels`, `bh_significant` and `spot_contours.n_pixels_level` at L50 are
-  documented as values for the whole city-period-type group, repeated on each spot, not
-  per-spot values.
-- `city_exposure_by_contour` areas and populations are documented as sums over all of the
-  city's spots of that type and period; the contours do not overlap, so nothing is counted
-  twice.
-- `stakeholder_spots_gps.spot_type` is documented as the participant's own hot/cold label,
-  not a Gi* classification, and `study_year` as the year of the workshop series.
-- Blank questionnaire answers are documented as stored exactly as given, with no imputation.
+- Tier-2 spot geometry is described correctly: a 500 m buffer around each of the spot's pixels,
+  simplified at a 50 m tolerance, about 0.71 km2 per isolated pixel. v1.0.0 called it a 1 km
+  buffer.
+- `n_obs` and `n_strict` are documented as counts of IMAGES with at least one valid pixel in the
+  city region, not counts of pixel observations, which is why six zone-months carry a value where
+  `n_obs` is 0.
+- `spots.n_pixels`, `bh_significant` and `spot_contours.n_pixels_level` at L50 are documented as
+  values for the whole city-period-type group, repeated on each spot, not per-spot values.
+- `city_exposure_by_contour` areas and populations are documented as sums over all of the city's
+  spots of that type and period; the contours do not overlap, so nothing is counted twice.
+- `stakeholder_spots_gps.spot_type` is documented as the participant's own hot/cold label, not a
+  Gi* classification, and `study_year` as the year of the workshop series.
+- `city` in both stakeholder layers is documented as the study city the participant answered the
+  questionnaire for (items 54 and 55), not the city they registered under, with the rule used
+  where a participant named several cities.
+- `city_year_summary.validation_tier` and `bh_any` are documented as derived from this dataset's
+  own fields (the selected-event tiers, and `spots.bh_significant`); `bh_any` is null only for a
+  city with no spots, which has no spot group to test.
+"""
 
-## v1.0.0 - {V100_DATE}
-
-First public release.
+# v1.0.0's own entry, prose exactly as published.
+ENTRY_1_0_0 = ("## [1.0.0] - " + V100_DATE + "\n\nfingerprint: sha256:" + V100_FINGERPRINT
+               + " · first public release (version DOI " + V100_DOI + ")\n\n"
+               + """First public release.
 
 ### Contents
 
@@ -1725,7 +1819,74 @@ One GeoPackage of 17 layers covering 56 Nigerian cities, grouped as:
 - Every layer carries a `scenario_id` recording the configuration behind the run, so results
   produced under different settings or for another study year can coexist in one file and be
   told apart from the data alone.
-""", encoding="utf-8")
+""")
+
+
+V100_RELATIVE = ("Changes relative to the deposit published on Zenodo as v1.0.0 (fingerprint "
+                 "sha256:" + V100_FINGERPRINT + ").")
+# An entry heading this module writes, or the v1.0.0 entry: "## 2026-10-29 · fingerprint
+# sha256:<64 hex>" or "## [1.0.0] - 2026-09-30". Headings of the old local format ("## v1.0.1
+# - 2026-10-28", never published) are not carried forward.
+_ENTRY_HEAD = re.compile(r"^## (\[1\.0\.0\]|\d{4}-\d{2}-\d{2} · fingerprint sha256:[0-9a-f]{64})")
+
+
+def changelog_history(deposit_dir: Path) -> list[str]:
+    """Entries carried forward from the deposit, newest first; v1.0.0's when it has none."""
+    cl = Path(deposit_dir) / "CHANGELOG.md"
+    if cl.exists():
+        txt = cl.read_text(encoding="utf-8").replace("\r\n", "\n")
+        got = [p.rstrip("\n") + "\n" for p in re.split(r"(?m)^(?=## )", txt)
+               if _ENTRY_HEAD.match(p)]
+        if got:
+            return got
+    return [ENTRY_1_0_0]
+
+
+def previous_entry(history: list[str]) -> dict:
+    """What a new entry is compared with: the newest entry carried forward."""
+    first = history[0]
+    fp = re.search(r"sha256:([0-9a-f]{64})", first).group(1)
+    if fp == V100_FINGERPRINT:
+        return {"fingerprint": fp, "line": V100_RELATIVE}
+    day = re.search(r"\d{4}-\d{2}-\d{2}", first.split("\n", 1)[0]).group(0)
+    return {"fingerprint": fp,
+            "line": f"Changes relative to the previous deposit, of {day} (fingerprint sha256:{fp})."}
+
+
+def draft_from_changes(table: pd.DataFrame) -> str:
+    """Prose sections from the changes report, for an entry after the v1.0.1 one."""
+    meta = {"dataset_info", "data_dictionary.csv"}
+    t = table.fillna("") if len(table) else pd.DataFrame(columns=["layer"])
+    data = t[~t["layer"].isin(meta)] if len(t) else t
+    changed, added, docs = [], [], []
+    for r in data.itertuples():
+        if getattr(r, "rows_deposit", 1) == 0:
+            added.append(f"- New layer `{r.layer}`.")
+            continue
+        if getattr(r, "fields_changed", ""):
+            changed.append(f"- Values change in `{r.layer}`: "
+                           + ", ".join(f"`{f.strip()}`" for f in str(r.fields_changed).split(","))
+                           + ".")
+        if getattr(r, "rows_added", 0) or getattr(r, "rows_removed", 0):
+            changed.append(f"- `{r.layer}` gains {int(r.rows_added or 0)} and loses "
+                           f"{int(r.rows_removed or 0)} records.")
+        if getattr(r, "fields_added", ""):
+            added.append(f"- New fields in `{r.layer}`: {r.fields_added}.")
+        if getattr(r, "fields_removed", ""):
+            changed.append(f"- Fields removed from `{r.layer}`: {r.fields_removed}.")
+    for r in (t[t["layer"].isin(meta)].itertuples() if len(t) else []):
+        docs.append(f"- `{r.layer}` changes ({r.fields_changed or 'rows added or removed'}).")
+    sec = lambda h, xs: [f"### {h}", ""] + (xs or ["- None."]) + [""]
+    return "\n".join(sec("Changed values", changed) + sec("Added", added)
+                     + sec("Fixed", []) + sec("Documentation", docs))
+
+
+def assemble_changelog(entry_date: str, fp: str, prev: dict, body: str,
+                       history: list[str]) -> str:
+    parts = [CHANGELOG_HEADER, f"## {entry_date} · fingerprint sha256:{fp}", "",
+             prev["line"], "", body.strip("\n"), ""]
+    parts += [t.rstrip("\n") + "\n" for t in history]
+    return "\n".join(parts).rstrip("\n") + "\n"
 
 
 # Decisions taken during the build that a reader of the code cannot infer from it.
@@ -1831,7 +1992,7 @@ DECISIONS = [
 
 def write_build_report(layers, dd, out_dir: Path, sources: dict):
     """Single build report. The QA script fills the marked block; nothing else writes here."""
-    lines = [f"# Build report — {DATASET_STEM} v{VERSION}", "",
+    lines = [f"# Build report — {DATASET_STEM}, built {BUILD_DATE}", "",
              f"Built {date.today().isoformat()} by `scripts/build_master_summary.py`. "
              f"Validated by `scripts/qa_master_summary.py`.", "",
              "This folder is a build record and is **not** part of the published dataset. The "
@@ -1855,7 +2016,8 @@ def write_build_report(layers, dd, out_dir: Path, sources: dict):
               "_Not yet run for this build. Run `python scripts/qa_master_summary.py`._", QA_END, ""]
     _bd = out_dir.parent / BUILD_DIR_NAME
     _bd.mkdir(parents=True, exist_ok=True)
-    (_bd / "build_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (_bd / "build_report.md").write_text("\n".join(lines) + "\n", encoding="utf-8",
+                                         newline="\n")
 
 
 def write_checksums(out_dir: Path):
@@ -1874,18 +2036,448 @@ def write_checksums(out_dir: Path):
     return len(lines)
 
 
-# ── main ────────────────────────────────────────────────────────────────────
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default=str(R05 / DATASET_DIR))
-    ap.add_argument("--with-csv", action="store_true", help="also write csv/ copies")
-    ap.add_argument("--with-geojson", action="store_true", help="also write geojson/ copies")
-    args = ap.parse_args()
-    out_dir = Path(args.out)
-    out_dir.mkdir(parents=True, exist_ok=True)               # the deposit folder itself
-    (out_dir.parent / BUILD_DIR_NAME).mkdir(parents=True, exist_ok=True)   # build records
+# ── pre-flight: every input exists before anything is built ─────────────────
+_NB01 = "NB01 (Notebook/01_AOI_delineation.ipynb)"
+_NB02 = "NB02 (Notebook/02_stakeholder_analysis.ipynb)"
+_NB03 = "NB03 (Notebook/03_temporal_analysis_months_annual.ipynb)"
+_NB04 = "NB04 (Notebook/04_temporal_analysis_daily.ipynb)"
+_NB05 = "NB05 (Notebook/05_hotspot_analysis.ipynb)"
+_POP = "scripts/extract_population_100m.py"
 
-    log(f"Building master summary v{VERSION} -> {out_dir}")
+
+def required_inputs() -> list[tuple[Path, str]]:
+    """Every file the build reads that does not depend on the city list, with its producer."""
+    return [
+        (WUP_CSV, "the UN WUP input table (config.AOI_DATA_PATHS['cities_csv'])"),
+        (ABBREV_CSV, "hand-authored reference input (tracked in git)"),
+        (R01 / "city_cluster25_lookup.csv", _NB01),
+        (R01 / "zone_area_summary_with_pop.csv", _NB01),
+        (R01 / "absorbed_cities.csv", _NB01),
+        (R01 / "cluster25_uc_distribution.csv", _NB01),
+        (R01 / "cluster25_cr_distribution.csv", _NB01),
+        (R02 / "Data" / "Cities_Stakeholder_Points_2024.geojson", _NB02),
+        (R02 / "Data" / "Stakeholder_Perception_Data_2024.csv", _NB02),
+        (R02 / "Data" / "workshop_attendees_clean.csv", _NB02),
+        (R03 / "all_cities_temporal_annual.csv", _NB03),
+        (R03 / "all_cities_delta_annual.csv", _NB03),
+        (R03 / "all_cities_temporal_monthly.csv", _NB03),
+        (R03 / "all_cities_delta_monthly.csv", _NB03),
+        (R04 / "city_heat_event_summary.csv", _NB04),
+        (R04 / "seviri" / "City_SEVIRI_3zone_SUHII.csv", _NB04),
+        (R04 / "correlation" / "SEVIRI_vs_ERA5_target_metrics.csv", _NB04),
+        (R05 / "spot_comprehensive_summary.csv", _NB05),
+        (R05 / "all_cities_spots.geojson", _NB05),
+        (R05 / "halfdonut_city_summary.csv", _NB05),
+        (MASTER_GPKG, _NB05),
+        (R05 / "population_100m" / "zones", _POP),
+    ]
+
+
+def preflight() -> list[str]:
+    """Names every missing input and what produces it. An empty list means the build may run.
+
+    A partial dataset is never built: several builders fall back to nulls when a source is
+    absent, which would publish a hole as if it were data.
+    """
+    missing = [f"{p.relative_to(ROOT).as_posix()}  <- run {who}"
+               for p, who in required_inputs() if not p.exists()]
+    if MASTER_GPKG.exists():
+        have = {n for n, _ in pyogrio.list_layers(MASTER_GPKG)}
+        for lyr in ("hotspot_contours", "stakeholder_hotspot_gps", "stakeholder_coldspot_gps"):
+            if lyr not in have:
+                missing.append(f"{MASTER_GPKG.relative_to(ROOT).as_posix()}::{lyr}  <- run {_NB05}")
+    ce = R04 / "city_heat_event_summary.csv"
+    if not ce.exists():
+        return missing
+    cities = sorted(pd.read_csv(ce)["city"].astype(str).unique())
+    for c in cities:
+        s = slugify(c)
+        for z in ("urban_core", "bra", "city_region"):
+            f = R01 / s / f"{s}_{z}_102022_v5.geojson"
+            if not f.exists():
+                missing.append(f"{f.relative_to(ROOT).as_posix()}  <- run {_NB01}")
+        f = R04 / "events" / f"{s}_event_audit.json"
+        if not f.exists():
+            missing.append(f"{f.relative_to(ROOT).as_posix()}  <- run {_NB04}")
+        raw = R04 / "raw_extractions"
+        if not any((raw / f"{n}_ERA5_UC_daily_{STUDY_YEAR}.csv").exists() for n in (c, s)):
+            missing.append(f"{(raw / f'{s}_ERA5_UC_daily_{STUDY_YEAR}.csv').relative_to(ROOT).as_posix()}"
+                           f"  <- run {_NB04}")
+    zdir = R05 / "population_100m" / "zones"
+    if zdir.exists():
+        files = sorted(zdir.glob("*.csv"))
+        have = (set(pd.concat([pd.read_csv(f, usecols=["city"]) for f in files])["city"].astype(str))
+                if files else set())
+        for c in sorted(set(cities) - have):
+            missing.append(f"population_100m/zones: no zone totals for {c}  <- run {_POP}")
+    return missing
+
+
+# ── content fingerprint: what "the same version" means ──────────────────────
+# A GeoPackage can differ byte-wise while holding identical data (SQLite page layout,
+# timestamps, R-tree order), so MD5s verify a download and the fingerprint decides whether
+# two builds hold the same dataset. It is computed from the written files, never from the
+# frames in memory, so both sides of a comparison pass through the same reader.
+def _canon(v) -> str:
+    """One value as text: the same datum always serialises the same way."""
+    if v is None or v is pd.NA or v is pd.NaT:
+        return ""
+    if isinstance(v, (bool, np.bool_)):
+        return "true" if v else "false"
+    if isinstance(v, (float, np.floating)):
+        return "" if np.isnan(v) else format(float(v), FP_FLOAT)
+    if isinstance(v, (int, np.integer)):
+        return str(int(v))
+    if isinstance(v, (bytes, bytearray)):
+        return bytes(v).hex()
+    if hasattr(v, "isoformat"):
+        return v.isoformat()
+    return str(v)
+
+
+def _canon_column(s: pd.Series) -> list[str]:
+    if isinstance(s, gpd.GeoSeries) or str(getattr(s, "dtype", "")) == "geometry":
+        import shapely
+        arr = np.array(list(s), dtype=object)
+        wkb = shapely.to_wkb(arr, hex=True, output_dimension=2, byte_order=1)
+        return ["" if w is None else w for w in wkb]
+    return [_canon(v) for v in s.tolist()]
+
+
+def _canon_rows(df: pd.DataFrame) -> list[str]:
+    """Rows in canonical form, sorted, so row order never changes the digest."""
+    cols = list(df.columns)
+    if not cols or not len(df):
+        return []
+    rows = ["\x1f".join(t) for t in zip(*[_canon_column(df[c]) for c in cols])]
+    rows.sort()
+    return rows
+
+
+def _read_layer(gpkg: Path, name: str, spatial: bool) -> pd.DataFrame:
+    return (pyogrio.read_dataframe(gpkg, layer=name) if spatial
+            else pyogrio.read_dataframe(gpkg, layer=name, read_geometry=False))
+
+
+def _layers_of(gpkg: Path) -> dict[str, str | None]:
+    return {str(n): (None if t is None else str(t)) for n, t in pyogrio.list_layers(gpkg)}
+
+
+def _stable_info(df: pd.DataFrame) -> pd.DataFrame:
+    return df[~df["key"].astype(str).isin(FP_VOLATILE_KEYS)].reset_index(drop=True)
+
+
+def _canon_dictionary(path: Path) -> pd.DataFrame:
+    """The data dictionary as published, minus the one cell that restates dataset_info.
+
+    The dataset_info value range lists build-specific values (version, DOI, commit), so it
+    is blanked; every other description, unit, range and provenance cell counts.
+    """
+    dd = pd.read_csv(path, dtype=str, keep_default_na=False)
+    dd.loc[dd["layer"] == "dataset_info", "allowed_values_or_range"] = ""
+    return dd
+
+
+def _digest(name: str, df: pd.DataFrame, extra: str = "") -> str:
+    h = hashlib.sha256()
+    h.update(f"layer:{name}\n{extra}columns:{json.dumps(list(df.columns))}\n"
+             f"rows:{len(df)}\n".encode("utf-8"))
+    for r in _canon_rows(df):
+        h.update(r.encode("utf-8"))
+        h.update(b"\n")
+    return h.hexdigest()
+
+
+def layer_digests(package_dir: Path) -> dict[str, str]:
+    """One SHA-256 per layer and one for the data dictionary."""
+    package_dir = Path(package_dir)
+    gpkg = package_dir / f"{DATASET_STEM}.gpkg"
+    out = {}
+    for name, gtype in sorted(_layers_of(gpkg).items()):
+        df = _read_layer(gpkg, name, gtype is not None)
+        if name == "dataset_info":
+            df = _stable_info(df)
+        crs = pyogrio.read_info(gpkg, layer=name).get("crs") or ""
+        out[name] = _digest(name, df, f"crs:{crs}\ngeometry:{gtype}\n")
+    dd = package_dir / "data_dictionary.csv"
+    if dd.exists():
+        out["data_dictionary.csv"] = _digest("data_dictionary.csv", _canon_dictionary(dd))
+    return out
+
+
+def _combine(digests: dict[str, str]) -> str:
+    h = hashlib.sha256()
+    for k in sorted(digests):
+        h.update(f"{k}:{digests[k]}\n".encode("utf-8"))
+    return h.hexdigest()
+
+
+def content_fingerprint(package_dir) -> str:
+    """SHA-256 over the canonical data: every layer (rows sorted, columns in schema order,
+    floats to 12 significant digits, geometry as little-endian 2-D WKB), scenario_config
+    and the data dictionary. Build date, commit, checksums and the fingerprint itself are
+    excluded, so the same inputs and settings always give the same value."""
+    return _combine(layer_digests(Path(package_dir)))
+
+
+# ── comparing two packages: the CHANGES_REPORT ──────────────────────────────
+_EXTRA_KEYS = {"composite_trend_statistics": ["composite_type", "composite_key", "zone", "period"]}
+
+
+def _diff_keys() -> dict[str, list[str]]:
+    import warnings as _w
+    with _w.catch_warnings():               # compare_to_archive silences warnings on import
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from compare_to_archive import KEYS
+    return {**KEYS, **_EXTRA_KEYS}
+
+
+def _key_for(layer: str, cols: set, keys: dict) -> list[str]:
+    k = list(keys.get(layer, []))
+    for extra in ("scenario_id", "study_year"):
+        if extra in cols and extra not in k:
+            k.append(extra)
+    return k if k and all(c in cols for c in k) else []
+
+
+def _plain(k):
+    """A key value as it reads in a report: numpy scalars as plain numbers."""
+    if isinstance(k, tuple):
+        return "(" + ", ".join(str(x.item() if hasattr(x, "item") else x) for x in k) + ")"
+    return str(k.item() if hasattr(k, "item") else k)
+
+
+def _compare_frames(name: str, new: pd.DataFrame, old: pd.DataFrame, key: list[str]):
+    """(summary row, detail lines) for one layer present in both packages."""
+    nf, of = list(new.columns), list(old.columns)
+    gained = [c for c in nf if c not in of]
+    lost = [c for c in of if c not in nf]
+    row = {"layer": name, "rows_deposit": len(old), "rows_staging": len(new),
+           "fields_added": ", ".join(gained), "fields_removed": ", ".join(lost),
+           "fields_changed": "", "rows_added": 0, "rows_removed": 0}
+    lines = [f"- `{name}`: field added `{c}`" for c in gained]
+    lines += [f"- `{name}`: field removed `{c}`" for c in lost]
+    shared = [c for c in nf if c in of and c not in key]
+    if key and not new.duplicated(key).any() and not old.duplicated(key).any():
+        nm, om = new.set_index(key), old.set_index(key)
+        add, rem = nm.index.difference(om.index), om.index.difference(nm.index)
+        row["rows_added"], row["rows_removed"] = len(add), len(rem)
+        if len(add):
+            lines.append(f"- `{name}`: {len(add)} row(s) added, e.g. {key} = {_plain(add[0])}")
+        if len(rem):
+            lines.append(f"- `{name}`: {len(rem)} row(s) removed, e.g. {key} = {_plain(rem[0])}")
+        common = nm.index.intersection(om.index)
+        nm, om = nm.loc[common], om.loc[common]
+        changed = []
+        for c in shared:
+            a, b = _canon_column(nm[c]), _canon_column(om[c])
+            bad = [i for i, (x, y) in enumerate(zip(a, b)) if x != y]
+            if not bad:
+                continue
+            changed.append(c)
+            i = bad[0]
+            if c == "geometry":
+                ex = "geometry differs"
+            else:
+                ex = f"{b[i] or 'null'} -> {a[i] or 'null'}"
+            worst = ""
+            if c != "geometry" and pd.api.types.is_numeric_dtype(nm[c]) \
+                    and pd.api.types.is_numeric_dtype(om[c]) \
+                    and not pd.api.types.is_bool_dtype(nm[c]):
+                d = (pd.to_numeric(nm[c], errors="coerce")
+                     - pd.to_numeric(om[c], errors="coerce")).abs()
+                if d.notna().any():
+                    worst = f"; worst |difference| {d.max():.6g}"
+            lines.append(f"- `{name}.{c}`: {len(bad)} value(s) differ{worst}; "
+                         f"e.g. {key} = {_plain(common[i])}: {ex}")
+        row["fields_changed"] = ", ".join(changed)
+    else:
+        a, b = set(_canon_rows(new[shared])), set(_canon_rows(old[shared]))
+        row["rows_added"], row["rows_removed"] = len(a - b), len(b - a)
+        if a != b:
+            lines.append(f"- `{name}`: {len(a - b)} row(s) only in staging, {len(b - a)} only "
+                         f"in the deposit (no unique key; compared as whole rows)")
+    return row, lines
+
+
+def diff_packages(new_dir: Path, old_dir: Path) -> tuple[pd.DataFrame, list[str]]:
+    """Every layer, field and dictionary entry that differs between two package folders."""
+    ng, og = new_dir / f"{DATASET_STEM}.gpkg", old_dir / f"{DATASET_STEM}.gpkg"
+    nl, ol = _layers_of(ng), _layers_of(og)
+    nd, od = layer_digests(new_dir), layer_digests(old_dir)
+    keys = _diff_keys()
+    rows, lines = [], []
+    for name in sorted(set(nl) | set(ol)):
+        if name not in ol:
+            n = len(_read_layer(ng, name, nl[name] is not None))
+            rows.append({"layer": name, "rows_deposit": 0, "rows_staging": n, "rows_added": n})
+            lines.append(f"- `{name}`: new layer ({n:,} rows)")
+            continue
+        if name not in nl:
+            rows.append({"layer": name, "rows_deposit": len(_read_layer(og, name, False)),
+                         "rows_staging": 0})
+            lines.append(f"- `{name}`: layer removed")
+            continue
+        if nd.get(name) == od.get(name):
+            continue
+        new = _read_layer(ng, name, nl[name] is not None)
+        old = _read_layer(og, name, ol[name] is not None)
+        if name == "dataset_info":
+            new, old = _stable_info(new), _stable_info(old)
+        r, ls = _compare_frames(name, new, old,
+                                _key_for(name, set(new.columns) & set(old.columns), keys))
+        rows.append(r)
+        lines += ls or [f"- `{name}`: digest differs (CRS or geometry type)"]
+    if nd.get("data_dictionary.csv") != od.get("data_dictionary.csv"):
+        n_dd = _canon_dictionary(new_dir / "data_dictionary.csv")
+        o_dd = _canon_dictionary(old_dir / "data_dictionary.csv")
+        r, ls = _compare_frames("data_dictionary.csv", n_dd, o_dd, ["layer", "field"])
+        rows.append(r)
+        lines += ls
+    return pd.DataFrame(rows), lines
+
+
+
+META_LAYERS = {"dataset_info", "data_dictionary.csv"}
+
+
+def write_changes_report(path: Path, table: pd.DataFrame, lines: list[str], header: list[str]):
+    """Field-by-field record of a build against the deposit: data layers first, then the
+    metadata (dataset_info and the data dictionary), so a value change is never buried."""
+    def _tab(t):
+        if not len(t):
+            return ["None."]
+        t = t.fillna("")
+        cols = list(t.columns)
+        return (["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
+                + ["| " + " | ".join(str(v) for v in r) + " |" for r in t.itertuples(index=False)])
+    is_meta = table["layer"].isin(META_LAYERS) if len(table) else pd.Series(dtype=bool)
+    data_t = table[~is_meta] if len(table) else table
+    meta_t = table[is_meta] if len(table) else table
+    meta_names = tuple(f"`{m}" for m in META_LAYERS)
+    data_l = [l for l in lines if not l[2:].startswith(meta_names)]
+    meta_l = [l for l in lines if l[2:].startswith(meta_names)]
+    out = list(header)
+    out += ["", "## Data layers that differ", ""] + _tab(data_t)
+    out += ["", "## Metadata that differs (dataset_info, data dictionary)", ""] + _tab(meta_t)
+    out += ["", "## Every difference: data layers", ""] + (data_l or ["None."])
+    out += ["", "## Every difference: metadata", ""] + (meta_l or ["None."]) + [""]
+    path.write_text("\n".join(out), encoding="utf-8", newline="\n")
+
+
+# ── deterministic writing helpers ───────────────────────────────────────────
+def _gpkg_timestamp(build_date: str) -> str:
+    return f"{build_date}T00:00:00.000Z"
+
+
+def _stamp_gpkg(gpkg: Path, build_date: str) -> None:
+    """Pin gpkg_contents.last_change to the version's build date, whatever wrote last."""
+    import sqlite3
+    con = sqlite3.connect(str(gpkg))
+    try:
+        con.execute("UPDATE gpkg_contents SET last_change = ?", (_gpkg_timestamp(build_date),))
+        con.commit()
+    finally:
+        con.close()
+
+
+def _set_info(gpkg: Path, key: str, value: str) -> None:
+    import sqlite3
+    con = sqlite3.connect(str(gpkg))
+    try:
+        cur = con.execute('UPDATE "dataset_info" SET "value" = ? WHERE "key" = ?', (value, key))
+        if cur.rowcount == 0:
+            con.execute('INSERT INTO "dataset_info" ("key", "value") VALUES (?, ?)', (key, value))
+        con.commit()
+    finally:
+        con.close()
+
+
+def read_info(package_dir: Path) -> dict:
+    """dataset_info of a package folder as a dict; empty when there is no package."""
+    gpkg = Path(package_dir) / f"{DATASET_STEM}.gpkg"
+    if not gpkg.exists():
+        return {}
+    d = pyogrio.read_dataframe(gpkg, layer="dataset_info", read_geometry=False)
+    return dict(zip(d["key"].astype(str), d["value"].astype(str)))
+
+
+def _md5_listing(folder: Path) -> dict[str, str]:
+    if not folder.exists():
+        return {}
+    return {p.relative_to(folder).as_posix(): md5(p)
+            for p in sorted(folder.rglob("*")) if p.is_file()}
+
+
+
+def _remove(p: Path, tries: int = 6) -> None:
+    """Remove a file, or a folder's contents and then the folder, retrying.
+
+    OneDrive and virus scanners hold fresh files and folders briefly. A file that stays
+    locked is an error; an EMPTY folder that stays locked is left in place, because it holds
+    nothing (a synced folder can keep a just-emptied directory locked for many seconds).
+    """
+    if p.is_dir():
+        for q in sorted(p.iterdir()):
+            _remove(q, tries)
+        for i in range(tries):
+            try:
+                p.rmdir()
+                return
+            except FileNotFoundError:
+                return
+            except OSError:
+                if i == tries - 1:
+                    return                 # empty and still locked: harmless
+                time.sleep(0.5 * (i + 1))
+        return
+    for i in range(tries):
+        try:
+            p.unlink()
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            time.sleep(0.5 * (i + 1))
+
+
+def _holds_files(root: Path) -> bool:
+    return any(q.is_file() for q in root.rglob("*"))
+
+
+def _clear_staging(root: Path) -> None:
+    """Empty a staging folder this build created (it holds the marker); nothing else."""
+    if not (root.exists() and (root / STAGING_MARKER).exists()):
+        return
+    for p in list(root.iterdir()):
+        if p.name != STAGING_MARKER:
+            _remove(p)
+    _remove(root / STAGING_MARKER)
+    try:
+        root.rmdir()
+    except OSError:
+        pass          # a synced folder can keep the empty directory locked; empty is clear
+
+
+def _prepare_staging(root: Path) -> Path:
+    """Fresh staging folder. Only a folder this build created (it holds the marker) is cleared."""
+    if root.exists():
+        if (root / STAGING_MARKER).exists():
+            _clear_staging(root)
+        elif _holds_files(root):            # empty folders left by a locked clear are fine
+            raise SystemExit(f"{root} holds files this build did not create; "
+                             f"move it aside first")
+    root.mkdir(parents=True, exist_ok=True)
+    (root / STAGING_MARKER).write_text("created by scripts/build_master_summary.py\n",
+                                       encoding="utf-8", newline="\n")
+    return root
+
+
+# ── the build itself ────────────────────────────────────────────────────────
+def _assemble(deposit_gpkg: Path):
+    """Every layer from the caches, merged with any other scenario already in the deposit."""
     scenario_id, scen_df = capture_scenario()
     log(f"  scenario_id {scenario_id}  "
         f"({scen_df.set_index('parameter').loc['city_selection_mode', 'value']}, "
@@ -1919,29 +2511,93 @@ def main():
     layers["monthly_series"], layers["monthly_climatology"] = build_monthly(ref)
     layers["composite_trend_statistics"] = build_composite_trends(layers["annual_series"])
 
-    # stamp the scenario on every data layer, then accumulate rather than overwrite
+    # stamp the scenario on every data layer, then accumulate rather than overwrite: the
+    # other scenarios and years come from the DEPOSIT, never from an earlier staging build
     for _n, _d in layers.items():
         if _d is None or "scenario_id" in getattr(_d, "columns", []):
             continue
         _d["scenario_id"] = scenario_id
         layers[_n] = _d[["scenario_id"] + [c for c in _d.columns if c != "scenario_id"]]
     study_years = {int(y) for y in layers["spots"]["study_year"].dropna().unique()}
-    _gpkg_path = out_dir / f"{DATASET_STEM}.gpkg"
-    layers = merge_with_existing(layers, _gpkg_path, scenario_id, study_years)
+    layers = merge_with_existing(layers, deposit_gpkg, scenario_id, study_years)
     layers["scenario_config"] = scen_df
+    return layers, ref, key, scenario_id, scen_df
+
+
+SOURCES = {
+    "city_zones": "NB01 `{slug}_{zone}_102022_v5.geojson` + `zone_area_summary_with_pop.csv`",
+    "city_profile": "NB01 `city_cluster25_lookup.csv`, `zone_area_summary_with_pop.csv`, `cluster25_uc_distribution.csv`; NB04 `city_heat_event_summary.csv`; NB02 `Cities_Stakeholder_Points_2024.geojson`; spot counts from the `spots` layer",
+    "city_year_summary": "NB04 `city_heat_event_summary.csv` (ERA5-Land persistence, selected events, MODIS<->ERA5-Land comparison); validation_tier and bh_any derived in-build; spot counts from the `spots` layer",
+    "trend_statistics": "NB03 `all_cities_temporal_annual.csv` (uc/bra/cr) + `all_cities_delta_annual.csv` (suhii)",
+    "composite_trend_statistics": "derived in-build from the `annual_series` layer by src/temporal_analysis.run_trend_analysis",
+    "annual_series": "NB03 `all_cities_temporal_annual.csv` + `all_cities_delta_annual.csv`",
+    "monthly_series": "NB03 `all_cities_temporal_monthly.csv` + `all_cities_delta_monthly.csv`",
+    "monthly_climatology": "derived from `monthly_series` (calendar-month mean)",
+    "heat_event_catalogue": "NB04 `events/{city}_event_audit.json` (56 files)",
+    "spot_occurrence": "NB05 `spot_comprehensive_summary.csv` on a full 56x2x2 grid + counts from `spots`",
+    "spots": "NB05 `all_cities_spots.geojson`",
+    "spot_contours": "NB05 `master_thermal_spots.gpkg::hotspot_contours` (hot and cold)",
+    "stakeholder_spots_gps": "NB05 `master_thermal_spots.gpkg::stakeholder_{hot,cold}spot_gps`, keys only",
+    "stakeholder_perception": "NB02 `Stakeholder_Perception_Data_2024.csv` + `workshop_attendees_clean.csv`",
+    "hitrate_sensitivity": "derived in-build by scripts/compute_hitrate.py from the published `spots` and `stakeholder_spots_gps` layers",
+    "city_exposure_by_contour": "NB05 `halfdonut_city_summary.csv`",
+    "dataset_info": "generated by this script",
+    "scenario_config": "config.py, src/daily_analysis_utils.py and NB05 constants, captured at build time",
+}
+
+_FIXED_DEVIATIONS = [
+    "`spots`: geom_75_wkt and geom_90_wkt were dropped. They averaged ~1.9 kB per row and "
+    "the L75/L90 outlines are real geometries in `spot_contours`.",
+    "`pct_dominant_class` is taken from NB01 cluster25_uc_distribution.csv (percent of the "
+    "urban core in the assigned Cluster25). The like-named field in master_thermal_spots holds "
+    "a different, much smaller quantity and was not carried over.",
+    "`heat_event_catalogue` covers every city that recorded at least one ERA5-Land "
+    "persistent event, which in this release is all 56. A city with none would not be "
+    "given placeholder event rows; its zero state is carried in "
+    "city_year_summary.era5_*_n_persistent_events.",
+    "Vector sources are stored in EPSG:4326; they are reprojected to " + CRS_ANALYSIS +
+    " for the GeoPackage. Recorded area_km2 values are the originals computed in the "
+    "analysis CRS and were not recomputed.",
+]
+
+
+
+def _write_data(layers, ref, scenario_id, scen_df, pkg_dir: Path, with_csv=False,
+                with_geojson=False):
+    """Data layers, dataset_info (identity rows still empty) and the data dictionary.
+
+    Returns the layers with dataset_info, the dictionary and the content fingerprint, which
+    is computed from the files as written. The identity rows are filled afterwards; they are
+    excluded from the fingerprint, so filling them cannot change it.
+    """
+    pkg_dir.mkdir(parents=True, exist_ok=True)
+    layers = dict(layers)
     layers["dataset_info"] = build_dataset_info(
         layers, n_cities=len(ref), n_clusters=int(ref["cluster25"].nunique()),
         study_years=sorted({int(y) for y in layers["spots"]["study_year"].dropna().unique()}),
         scenario_id=scenario_id, scen_df=scen_df)
-
     log("Layers:")
-    gpkg = write_package(layers, out_dir, with_csv=args.with_csv,
-                         with_geojson=args.with_geojson)
-
+    # a fixed write timestamp; gpkg_contents.last_change is pinned to the build date at the end
+    pyogrio.set_gdal_config_options({"OGR_CURRENT_DATE": _gpkg_timestamp("2000-01-01")})
+    try:
+        write_package(layers, pkg_dir, with_csv=with_csv, with_geojson=with_geojson)
+    finally:
+        pyogrio.set_gdal_config_options({"OGR_CURRENT_DATE": None})
     dd = build_dictionary(layers)
-    dd.to_csv(out_dir / "data_dictionary.csv", index=False, encoding="utf-8")
-    (out_dir / "data_dictionary.md").write_text(dictionary_md(dd), encoding="utf-8")
+    dd.to_csv(pkg_dir / "data_dictionary.csv", index=False, encoding="utf-8", lineterminator="\n")
     log(f"  data dictionary: {len(dd)} field rows, {len(set(CHECKS))} [CHECK] items")
+    fp = content_fingerprint(pkg_dir)
+    log(f"  content fingerprint: sha256:{fp}")
+    return layers, dd, fp
+
+
+def _finish_staging(layers, dd, key, pkg_dir: Path, identity: dict, changelog: str):
+    """Identity rows, documents, checksums and the build report, once the case is decided."""
+    gpkg = pkg_dir / f"{DATASET_STEM}.gpkg"
+    for k in IDENTITY_KEYS:                       # always all five, always in this order
+        _set_info(gpkg, k, identity[k])
+    _stamp_gpkg(gpkg, identity["build_date"])
+    (pkg_dir / "data_dictionary.md").write_text(dictionary_md(dd), encoding="utf-8", newline="\n")
 
     # private key, outside the package
     PRIV = ROOT / "private"
@@ -1955,53 +2611,407 @@ def main():
                       encoding="utf-8")
         log("  added 'private/' to .gitignore")
 
-    SOURCES = {
-        "city_zones": "NB01 `{slug}_{zone}_102022_v5.geojson` + `zone_area_summary_with_pop.csv`",
-        "city_profile": "NB01 `city_cluster25_lookup.csv`, `zone_area_summary_with_pop.csv`, `cluster25_uc_distribution.csv`; NB04 `city_heat_event_summary.csv`; NB05 `master_city_composite.csv`; NB02 `Cities_Stakeholder_Points_2024.geojson`; spot counts from the `spots` layer",
-        "city_year_summary": "NB04 `city_heat_event_summary.csv` (ERA5-Land persistence, selected events, MODIS<->ERA5-Land comparison); NB05 `master_city_composite.csv`; spot counts from the `spots` layer",
-        "trend_statistics": "NB03 `all_cities_temporal_annual.csv` (uc/bra/cr) + `all_cities_delta_annual.csv` (suhii)",
-        "composite_trend_statistics": "derived in-build from the `annual_series` layer by src/temporal_analysis.run_trend_analysis",
-        "annual_series": "NB03 `all_cities_temporal_annual.csv` + `all_cities_delta_annual.csv`",
-        "monthly_series": "NB03 `all_cities_temporal_monthly.csv` + `all_cities_delta_monthly.csv`",
-        "monthly_climatology": "derived from `monthly_series` (calendar-month mean)",
-        "heat_event_catalogue": "NB04 `events/{city}_event_audit.json` (56 files)",
-        "spot_occurrence": "NB05 `spot_comprehensive_summary.csv` on a full 56x2x2 grid + counts from `spots`",
-        "spots": "NB05 `all_cities_spots.geojson`",
-        "spot_contours": "NB05 `master_thermal_spots.gpkg::hotspot_contours` (hot and cold)",
-        "stakeholder_spots_gps": "NB05 `master_thermal_spots.gpkg::stakeholder_{hot,cold}spot_gps`, keys only",
-        "stakeholder_perception": "NB02 `Stakeholder_Perception_Data_2024.csv` + `workshop_attendees_clean.csv`",
-        "hitrate_sensitivity": "derived in-build by scripts/compute_hitrate.py from the published `spots` and `stakeholder_spots_gps` layers",
-        "city_exposure_by_contour": "NB05 `halfdonut_city_summary.csv`",
-        "dataset_info": "generated by this script",
-        "scenario_config": "config.py, src/daily_analysis_utils.py and NB05 constants, captured at build time",
-    }
-    DEVIATIONS.extend([
-        "`spots`: geom_75_wkt and geom_90_wkt were dropped. They averaged ~1.9 kB per row and "
-        "the L75/L90 outlines are real geometries in `spot_contours`.",
-        "`pct_dominant_class` is taken from NB01 cluster25_uc_distribution.csv (percent of the "
-        "urban core in the assigned Cluster25). The like-named field in master_thermal_spots holds "
-        "a different, much smaller quantity and was not carried over.",
-        "`heat_event_catalogue` covers every city that recorded at least one ERA5-Land "
-        "persistent event, which in this release is all 56. A city with none would not be "
-        "given placeholder event rows; its zero state is carried in "
-        "city_year_summary.era5_*_n_persistent_events.",
-        "Vector sources are stored in EPSG:4326; they are reprojected to " + CRS_ANALYSIS +
-        " for the GeoPackage. Recorded area_km2 values are the originals computed in the "
-        "analysis CRS and were not recomputed.",
-    ])
-    write_changelog(out_dir,
-                    n_layers=sum(1 for d in layers.values() if d is not None),
-                    n_cities=len(layers['city_profile']),
-                    n_comp=len(layers['composite_trend_statistics']))
-    write_licence(out_dir)
+    DEVIATIONS.extend(d for d in _FIXED_DEVIATIONS if d not in DEVIATIONS)
+    (pkg_dir / "CHANGELOG.md").write_text(changelog, encoding="utf-8", newline="\n")
+    write_licence(pkg_dir)
     # README last of the documents, so its layer table sees the final layer set.
-    write_readme(layers, out_dir, gpkg)
-    n = write_checksums(out_dir)
+    write_readme(layers, pkg_dir, gpkg, fp=identity["content_fingerprint"].replace("sha256:", ""))
+    n = write_checksums(pkg_dir)
     log(f"  checksums: {n} files")
-    write_build_report(layers, dd, out_dir, SOURCES)
+    write_build_report(layers, dd, pkg_dir, SOURCES)
     log(f"  deviations: {len(DEVIATIONS)} | [CHECK] items: {len(set(CHECKS))}")
-    return layers, dd, out_dir
+
+
+# ── the deposit being replaced is kept; staging becomes the deposit ────────
+def _free(path: Path) -> Path:
+    n, p = 2, path
+    while p.exists():
+        p, n = path.with_name(f"{path.name}_{n}"), n + 1
+    return p
+
+
+def _promote(pkg_dir: Path, staging_root: Path, deposit_dir: Path, dep_info: dict) -> str | None:
+    """Keep the current deposit whole in _superseded_build_<its build date>/, then make the
+    staging build the deposit: GeoPackage, dictionary, README, CHANGELOG, LICENSE, and the
+    checksums, written last. Returns the folder the old deposit was moved to."""
+    keep = None
+    if (deposit_dir / f"{DATASET_STEM}.gpkg").exists():
+        keep = _free(deposit_dir.parent / f"_superseded_build_{dep_info.get('build_date', 'undated')}")
+        shutil.copytree(deposit_dir, keep)
+        log(f"  kept the replaced deposit in {keep}")
+        for p in list(deposit_dir.iterdir()):        # copied above, so this is a move
+            _remove(p)
+        old_rep = deposit_dir.parent / BUILD_DIR_NAME / "build_report.md"
+        if old_rep.exists():
+            shutil.copy2(old_rep, _free(old_rep.with_name(f"build_report{keep.name}.md")))
+    deposit_dir.mkdir(parents=True, exist_ok=True)
+    for p in pkg_dir.iterdir():
+        if p.name == "checksums_md5.txt":
+            continue
+        (shutil.copytree(p, deposit_dir / p.name) if p.is_dir()
+         else shutil.copy2(p, deposit_dir / p.name))
+    write_checksums(deposit_dir)                     # last, LF
+    rep = staging_root / BUILD_DIR_NAME / "build_report.md"
+    if rep.exists():
+        (deposit_dir.parent / BUILD_DIR_NAME).mkdir(parents=True, exist_ok=True)
+        shutil.copy2(rep, deposit_dir.parent / BUILD_DIR_NAME / "build_report.md")
+    return str(keep) if keep else None
+
+
+def _manifest_ok(package_dir: Path) -> tuple[int, int]:
+    """(files verified, files listed) for checksums_md5.txt, as `md5sum -c` would count them."""
+    lines = (package_dir / "checksums_md5.txt").read_text(encoding="utf-8").splitlines()
+    ok = sum(1 for l in lines if "  " in l
+             and md5(package_dir / l.split("  ", 1)[1]) == l.split("  ", 1)[0])
+    return ok, len(lines)
+
+
+@dataclass
+class BuildReport:
+    """What one build did. `case`: reproduced, values_changed, new_scenario or no_deposit.
+    `deposit_changed` says whether the deposit was updated (only after QA passed)."""
+    case: str
+    message: str
+    build_date: str
+    scenario_id: str
+    fingerprint: str
+    deposit_dir: str
+    compared_with: str = ""
+    previous_fingerprint: str | None = None
+    deposit_fingerprint: str | None = None
+    deposit_fingerprint_stored: str | None = None
+    staging_dir: str | None = None
+    changes_report: str | None = None
+    deposit_changed: bool = False
+    superseded_to: str | None = None
+    qa: dict = field(default_factory=dict)
+    manifest: str = ""
+    n_layers: int = 0
+    n_records: int = 0
+    n_fields: int = 0
+    data_changes: list = field(default_factory=list)
+    metadata_changes: list = field(default_factory=list)
+    changes_table: list = field(default_factory=list)
+    records_added: dict = field(default_factory=dict)
+    md5_before: dict = field(default_factory=dict)
+    md5_after: dict = field(default_factory=dict)
+    seconds: float = 0.0
+
+    @property
+    def changes(self) -> list:
+        return self.data_changes + self.metadata_changes
+
+    def summary(self) -> pd.DataFrame:
+        rows = [("case", self.case), ("message", self.message),
+                ("build date", self.build_date), ("scenario_id", self.scenario_id),
+                ("fingerprint (this build)", f"sha256:{self.fingerprint}"),
+                ("fingerprint (deposit before the build)",
+                 f"sha256:{self.deposit_fingerprint}" if self.deposit_fingerprint else "-"),
+                ("CHANGELOG compares with", self.compared_with or "-"),
+                ("layers / records / fields",
+                 f"{self.n_layers} / {self.n_records:,} / {self.n_fields}"),
+                ("QA on the staging build",
+                 f"{self.qa['passed']}/{self.qa['total']} passed" if self.qa else "not run"),
+                ("deposit updated", "yes" if self.deposit_changed else "no"),
+                ("old deposit kept in", self.superseded_to or "-"),
+                ("checksums_md5.txt", self.manifest or "-"),
+                ("changes in data layers", f"{len(self.data_changes)} line(s)"),
+                ("changes in metadata", f"{len(self.metadata_changes)} line(s)"),
+                ("changes report", self.changes_report or "-"),
+                ("staging", self.staging_dir or "cleared"),
+                ("run time", f"{self.seconds:.0f} s")]
+        if self.records_added:
+            rows.append(("records added (new scenario)",
+                         ", ".join(f"{k} {v}" for k, v in self.records_added.items())))
+        return pd.DataFrame(rows, columns=["item", "value"])
+
+    def __str__(self) -> str:
+        return self.summary().to_string(index=False)
+
+
+def build_dataset(out_dir=DEPOSIT_DIR, build_date=None, *, staging_dir=None, compare_only=False,
+                  keep_staging=False, with_csv=False, with_geojson=False) -> BuildReport:
+    """Build the dataset into staging, compare it with the deposit, and act on the result.
+
+    - identical content (same fingerprint): nothing is touched;
+    - different content: QA runs on the staging build; if it passes, the deposit is kept in
+      _superseded_build_<date>/ and replaced by the staging build with all its files; if QA
+      fails, the deposit is not touched and staging is kept for inspection.
+
+    No version is named here: versions are named on Zenodo. `compare_only` builds and compares
+    but never runs QA or updates the deposit (QA's own rebuild uses it).
+    """
+    global BUILD_DATE
+    t0 = time.time()
+    LOG.clear(); DEVIATIONS.clear(); CHECKS.clear()
+    deposit_dir = Path(out_dir).resolve()
+    staging_root = Path(staging_dir).resolve() if staging_dir else STAGING_DIR
+    pkg_dir = staging_root / DATASET_DIR
+    today = date.today().isoformat()
+
+    missing = preflight()
+    if missing:
+        raise SystemExit("Pre-flight failed: these inputs are missing, so no dataset was built.\n  "
+                         + "\n  ".join(missing))
+    dep_gpkg = deposit_dir / f"{DATASET_STEM}.gpkg"
+    dep_info = read_info(deposit_dir)
+    md5_before = _md5_listing(deposit_dir)
+    history = changelog_history(deposit_dir)
+    prev = previous_entry(history)
+
+    log(f"Building -> staging {pkg_dir}")
+    _prepare_staging(staging_root)
+    layers, ref, key, scenario_id, scen_df = _assemble(dep_gpkg)
+    layers, dd, fp = _write_data(layers, ref, scenario_id, scen_df, pkg_dir,
+                                 with_csv, with_geojson)
+
+    have_deposit = dep_gpkg.exists()
+    fp_dep = content_fingerprint(deposit_dir) if have_deposit else None
+    stored = dep_info.get("content_fingerprint", "")
+    dep_sids = (set(pyogrio.read_dataframe(dep_gpkg, layer="scenario_config",
+                                           read_geometry=False)["scenario_id"].astype(str))
+                if have_deposit else set())
+    same = have_deposit and fp == fp_dep
+    table, lines = (diff_packages(pkg_dir, deposit_dir) if have_deposit and not same
+                    else (pd.DataFrame(), []))
+
+    # ── identity and CHANGELOG, decided now that the content is known ──
+    if same:
+        case = "reproduced"
+        BUILD_DATE = dep_info.get("build_date") or today
+        prev_fp = dep_info.get("previous_fingerprint", "")
+        changelog = ((deposit_dir / "CHANGELOG.md").read_text(encoding="utf-8")
+                     .replace("\r\n", "\n") if (deposit_dir / "CHANGELOG.md").exists() else "")
+    else:
+        case = ("no_deposit" if not have_deposit
+                else "values_changed" if scenario_id in dep_sids else "new_scenario")
+        BUILD_DATE = build_date or today
+        prev_fp = f"sha256:{prev['fingerprint']}"
+        body = (NOTES_SINCE_1_0_0.replace("{n_comp}",
+                                          str(len(layers["composite_trend_statistics"])))
+                if prev["fingerprint"] == V100_FINGERPRINT else draft_from_changes(table))
+        changelog = assemble_changelog(BUILD_DATE, fp, prev, body, history)
+    identity = {"build_date": BUILD_DATE, "content_fingerprint": f"sha256:{fp}",
+                "previous_fingerprint": prev_fp}
+    _finish_staging(layers, dd, key, pkg_dir, identity, changelog)
+
+    info = read_info(pkg_dir)
+    meta_names = tuple(f"`{m}" for m in META_LAYERS)
+    rep = BuildReport(case=case, message="", build_date=BUILD_DATE, scenario_id=scenario_id,
+                      fingerprint=fp, deposit_dir=str(deposit_dir), compared_with=prev["line"],
+                      previous_fingerprint=prev_fp or None, deposit_fingerprint=fp_dep,
+                      deposit_fingerprint_stored=stored or None, staging_dir=str(staging_root),
+                      n_layers=int(info.get("n_layers", 0)),
+                      n_records=int(info.get("n_records_total", 0)),
+                      n_fields=int(info.get("n_fields_total", 0)), md5_before=md5_before,
+                      data_changes=[l for l in lines if not l[2:].startswith(meta_names)],
+                      metadata_changes=[l for l in lines if l[2:].startswith(meta_names)],
+                      changes_table=table.fillna("").to_dict("records") if len(table) else [])
+    if stored and fp_dep and stored.replace("sha256:", "") != fp_dep:
+        log(f"  [WARN] the deposit's stored fingerprint {stored} does not match its content "
+            f"(sha256:{fp_dep})")
+    if case == "new_scenario":
+        g = pkg_dir / f"{DATASET_STEM}.gpkg"
+        for name in _layers_of(g):
+            d = _read_layer(g, name, False)
+            if "scenario_id" in d.columns:
+                n = int((d["scenario_id"].astype(str) == scenario_id).sum())
+                if n:
+                    rep.records_added[name] = n
+    if len(table):
+        write_changes_report(staging_root / "CHANGES_REPORT.md", table, lines, [
+            "# Changes report — staging build against the deposit", "",
+            f"- deposit: `{deposit_dir}` (built {dep_info.get('build_date', '?')}, sha256:{fp_dep})",
+            f"- staging: `{pkg_dir}` (sha256:{fp})",
+            f"- scenario_id: staging `{scenario_id}`; deposit {sorted(dep_sids)}",
+            f"- case: **{case}**",
+            f"- written {today} by `scripts/build_master_summary.py`"])
+        rep.changes_report = str(staging_root / "CHANGES_REPORT.md")
+
+    what = {"values_changed": "Values changed under the same settings",
+            "new_scenario": f"New scenario_id {scenario_id} (a setting changed; "
+                            f"{sum(rep.records_added.values()):,} records added)",
+            "no_deposit": f"No deposit at {deposit_dir}"}.get(case, "")
+    if same:
+        rep.message = "Dataset reproduced (fingerprint identical); the deposit is not touched"
+        if not keep_staging:
+            _clear_staging(staging_root)
+            rep.staging_dir = None
+    elif compare_only:
+        rep.message = f"{what}; compare only: QA not run and the deposit not touched"
+    else:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from qa_master_summary import run_qa
+        log("QA on the staging build:")
+        q = run_qa(pkg_dir, write_report=True)
+        rep.qa = {"ok": q["ok"], "passed": q["passed"], "total": q["total"],
+                  "failed": [n for n, o, _ in q["checks"] if not o]}
+        if not q["ok"]:
+            rep.message = (f"{what}; QA FAILED on the staging build ({q['passed']}/{q['total']}): "
+                           f"the deposit is not touched; staging kept for inspection")
+        else:
+            rep.superseded_to = _promote(pkg_dir, staging_root, deposit_dir, dep_info)
+            after = content_fingerprint(deposit_dir)
+            if after != fp:
+                raise SystemExit(f"update check failed: deposit fingerprint {after} != {fp}")
+            ok, n = _manifest_ok(deposit_dir)
+            rep.manifest = f"{ok}/{n} files verify"
+            if ok != n:
+                raise SystemExit(f"update check failed: checksums_md5.txt verifies {ok}/{n}")
+            if len(table):
+                dst = _free(deposit_dir.parent / BUILD_DIR_NAME / f"CHANGES_REPORT_{BUILD_DATE}.md")
+                shutil.copy2(staging_root / "CHANGES_REPORT.md", dst)
+                rep.changes_report = str(dst)
+            rep.deposit_changed = True
+            rep.message = (f"{what}; QA passed on the staging build ({q['passed']}/{q['total']}); "
+                           f"deposit updated (sha256:{fp})"
+                           + (f"; the previous deposit is kept in {Path(rep.superseded_to).name}/"
+                              if rep.superseded_to else ""))
+            _clear_staging(staging_root)
+            rep.staging_dir = None
+
+    rep.md5_after = _md5_listing(deposit_dir)
+    if not rep.deposit_changed and rep.md5_after != md5_before:
+        raise SystemExit("the deposit changed during a build that did not update it")
+    rep.seconds = time.time() - t0
+    log(rep.message)
+    return rep
+
+
+# ── the inputs NB05 §9 shares with the build ────────────────────────────────
+def prepare_spot_footprints() -> gpd.GeoDataFrame:
+    """NB05's L50 spot footprints exactly as the build publishes them (`spots`)."""
+    return build_spots(load_reference())
+
+
+def prepare_cohort_points(sources=None) -> gpd.GeoDataFrame:
+    """The cohort points exactly as the build publishes them (`stakeholder_spots_gps`): the
+    cohort filter, the city and the rounding to GPS_DECIMALS are this module's own.
+
+    `sources` = {"hot": df, "cold": df} passes NB05's in-memory tables, which §10 later writes
+    to the working GeoPackage; without it the points are read from that GeoPackage.
+    """
+    ref = load_reference()
+    return build_gps(ref, build_participant_key(ref), build_city_zones(ref), sources=sources)
+
+
+# ── a whole-dataset summary, for NB05 §14b ──────────────────────────────────
+def summarise_package(package_dir=DEPOSIT_DIR) -> dict:
+    """Identity, one row per layer, key counts and the MD5 table of a package folder."""
+    package_dir = Path(package_dir)
+    gpkg = package_dir / f"{DATASET_STEM}.gpkg"
+    info = read_info(package_dir)
+    sid = info.get("scenario_id")
+    keys = _diff_keys()
+    rows, frames = [], {}
+    for name, gtype in _layers_of(gpkg).items():
+        df = _read_layer(gpkg, name, False)
+        sub = (df[df["scenario_id"].astype(str) == str(sid)]
+               if sid and "scenario_id" in df.columns else df)
+        frames[name] = sub
+        cols = set(df.columns) | ({"geometry"} if gtype else set())
+        k = _key_for(name, cols, keys)
+        rows.append({"layer": name, "rows": len(df),
+                     "fields": len(df.columns) + (1 if gtype else 0),
+                     "geometry": gtype or "no",
+                     "crs": pyogrio.read_info(gpkg, layer=name).get("crs") or "-",
+                     "key fields": ", ".join(k) or "-",
+                     "cities": sub["city_slug"].nunique() if "city_slug" in sub else "",
+                     "periods": sub["period"].nunique() if "period" in sub else "",
+                     "spot types": sub["spot_type"].nunique() if "spot_type" in sub else ""})
+    prof, gps = frames["city_profile"], frames["stakeholder_spots_gps"]
+    absorbed = sorted({n.strip() for s_ in prof["absorbed_cities"].dropna()
+                       for n in str(s_).split(";") if n.strip()})
+    counts = {"layers": len(rows), "cities": len(prof),
+              "clusters": int(prof["cluster25"].nunique()),
+              "candidates": int(info.get("n_candidate_cities", 0) or 0),
+              "absorbed": len(absorbed), "spots": len(frames["spots"]),
+              "contours": len(frames["spot_contours"]),
+              "heat_events": len(frames["heat_event_catalogue"]),
+              "participants": len(frames["stakeholder_perception"]),
+              "points": len(gps), "points_hot": int((gps["spot_type"] == "hot").sum()),
+              "points_cold": int((gps["spot_type"] == "cold").sum()),
+              "composite_trend_rows": len(frames["composite_trend_statistics"]),
+              "hitrate_rows": len(frames["hitrate_sensitivity"])}
+    stored = info.get("content_fingerprint", "")
+    identity = pd.DataFrame(
+        [("content fingerprint", stored or
+          f"sha256:{content_fingerprint(package_dir)} (computed; this deposit does not store it)"),
+         ("previous fingerprint", info.get("previous_fingerprint") or "-"),
+         ("build date", info.get("build_date", "")),
+         ("scenario_id", sid or "")], columns=["item", "value"])
+    man = {}
+    cm = package_dir / "checksums_md5.txt"
+    if cm.exists():
+        for ln in cm.read_text(encoding="utf-8").splitlines():
+            if "  " in ln:
+                d_, n_ = ln.split("  ", 1)
+                man[n_.strip()] = d_
+    md5_t = pd.DataFrame([{"file": f, "md5": h, "matches manifest":
+                           ("(the manifest)" if f == "checksums_md5.txt" else man.get(f) == h)}
+                          for f, h in _md5_listing(package_dir).items()])
+    return {"identity": identity, "layers": pd.DataFrame(rows), "counts": counts,
+            "md5": md5_t, "frames": frames, "info": info}
+
+
+def normalise_text_files(package_dir) -> dict:
+    """Rewrite every text file of a package with LF line endings, then the checksums, last.
+
+    The GeoPackage is not touched and the content fingerprint must not move; both are
+    checked. Returns the fingerprint and {file: (md5 before, md5 after)}.
+    """
+    package_dir = Path(package_dir)
+    gpkg = package_dir / f"{DATASET_STEM}.gpkg"
+    before, fp0, g0 = _md5_listing(package_dir), content_fingerprint(package_dir), md5(gpkg)
+    for p in sorted(package_dir.iterdir()):
+        if p.is_file() and p.suffix in {".md", ".txt", ".csv"} and p.name != "checksums_md5.txt":
+            b = p.read_bytes()
+            if b"\r\n" in b:
+                p.write_bytes(b.replace(b"\r\n", b"\n"))
+    write_checksums(package_dir)
+    fp1 = content_fingerprint(package_dir)
+    if fp1 != fp0 or md5(gpkg) != g0:
+        raise SystemExit("line-ending rewrite changed the data; investigate before publishing")
+    after = _md5_listing(package_dir)
+    return {"fingerprint": fp1,
+            "md5": {f: (before.get(f), after.get(f)) for f in sorted(set(before) | set(after))}}
+
+
+# ── command line ────────────────────────────────────────────────────────────
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--out", default=str(DEPOSIT_DIR),
+                    help="the deposit folder: compared against, and updated when the content "
+                         "differs and QA passes")
+    ap.add_argument("--compare-only", action="store_true",
+                    help="build and compare only: never run QA, never update the deposit")
+    ap.add_argument("--with-csv", action="store_true", help="also write csv/ copies")
+    ap.add_argument("--with-geojson", action="store_true", help="also write geojson/ copies")
+    ap.add_argument("--staging", default=None,
+                    help=f"staging folder (default {STAGING_DIR.relative_to(ROOT)})")
+    ap.add_argument("--keep-staging", action="store_true",
+                    help="keep staging even when the build reproduces the deposit")
+    ap.add_argument("--build-date", default=None, help="override the build date (YYYY-MM-DD)")
+    ap.add_argument("--report-json", default=None, help="also write the build report as JSON")
+    ap.add_argument("--normalise-line-endings", action="store_true",
+                    help="only rewrite the text files of --out with LF, then the checksums")
+    a = ap.parse_args(argv)
+    if a.normalise_line_endings:
+        r = normalise_text_files(Path(a.out))
+        print(f"fingerprint unchanged: sha256:{r['fingerprint']}")
+        for f, (o, n) in r["md5"].items():
+            print(f"  {f:55} {o}  ->  {n}{'' if o != n else '  (unchanged)'}")
+        return 0
+    rep = build_dataset(out_dir=a.out, build_date=a.build_date, staging_dir=a.staging,
+                        compare_only=a.compare_only, keep_staging=a.keep_staging,
+                        with_csv=a.with_csv, with_geojson=a.with_geojson)
+    print("\n" + str(rep))
+    if a.report_json:
+        Path(a.report_json).write_text(json.dumps(asdict(rep), indent=1, default=str),
+                                       encoding="utf-8", newline="\n")
+    return 1 if rep.qa and not rep.qa["ok"] else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -1,12 +1,18 @@
 #!/usr/bin/env python
 """QA for the published composite package. Read-only apart from the marked validation block
-it fills in _build/build_report.md."""
+it fills in dataset_build/build_report.md.
+
+    python scripts/qa_master_summary.py [--package <deposit folder>] [--no-report]
+
+From Python (NB05 section 14): run_qa(package_dir) returns {"ok", "passed", "total", "checks"}.
+"""
 from __future__ import annotations
 import argparse, hashlib, json, re, shutil, subprocess, sys, tempfile, warnings
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from build_master_summary import QA_BEGIN, QA_END  # the markers are defined once, with the writer
+from build_master_summary import DATASET_DIR, V100_FINGERPRINT, content_fingerprint
 
 import geopandas as gpd
 import numpy as np
@@ -36,7 +42,7 @@ def L(name, geom=False):
         GPKG, layer=name, read_geometry=False)
 
 
-def main():
+def main(write_report: bool = True):
     print("Phase 3 QA\n")
     lay = {n: t for n, t in pyogrio.list_layers(GPKG)}
     SPATIAL = {n for n, t in lay.items() if t is not None}
@@ -544,27 +550,80 @@ def main():
     check("every layer opens in both GDAL/pyogrio and geopandas", not _fails,
           f"{len(list(pyogrio.list_layers(GPKG)))} layers read" + ("" if not _fails else f"; {_fails}"))
 
+    # ── 8c. counts and stakeholder fields agree with what they describe ─────
+    _gl = len(pyogrio.list_layers(GPKG))
+    _dd_rows = len(pd.read_csv(PKG / "data_dictionary.csv"))
+    check("dataset_info counts agree with the file (n_layers = tables, n_fields_total = "
+          "dictionary rows)",
+          str(_info.get("n_layers")) == str(_gl) and str(_info.get("n_fields_total")) == str(_dd_rows),
+          f"n_layers {_info.get('n_layers')} vs {_gl} tables; n_fields_total "
+          f"{_info.get('n_fields_total')} vs {_dd_rows} dictionary rows")
+    _pi = ["perceived_warming_10yr", "perceived_diurnal_severity", "perceived_peak_period",
+           "recency_of_contact_with_city"]
+    _pn = {c: int(d["stakeholder_perception"][c].isna().sum()) for c in _pi}
+    check("no perception item carries a null (blanks stored as \"I'd rather not say\")",
+          not any(_pn.values()), f"nulls per item: {_pn}")
+    # The dictionary states that stakeholder_spots_gps.city equals the participant's city in
+    # stakeholder_perception except for 3 points of one participant who named two cities.
+    _pc = d["stakeholder_perception"].set_index("participant_code")["city"]
+    _g = d["stakeholder_spots_gps"]
+    _mm = _g[_g["city"] != _g["participant_code"].map(_pc)]
+    check("stakeholder city differs between the two layers only where documented (3 points, "
+          "1 participant)", len(_mm) == 3 and _mm["participant_code"].nunique() == 1,
+          f"{len(_mm)} point(s), {_mm['participant_code'].nunique()} participant(s)")
+
     # ── 9. reproducibility ──────────────────────────────────────────────────
+    # The content fingerprint decides whether two builds hold the same dataset; MD5s only
+    # verify a download. A stored fingerprint must match the content it describes. The local
+    # v1.0.1 build of 2026-10-28 predates the stored fingerprint, so for it (no
+    # content_fingerprint in dataset_info) the value is reported only.
     print("\n9. Reproducibility")
-    tmp = Path(tempfile.mkdtemp()) / "repro"
+    _fp_now = content_fingerprint(PKG)
+    _fp_stored = str(_info.get("content_fingerprint") or "")
+    _legacy = "content_fingerprint" not in _info.index
+    check("content fingerprint recomputes and matches dataset_info.content_fingerprint",
+          (_fp_stored == f"sha256:{_fp_now}") if not _legacy else True,
+          f"computed sha256:{_fp_now}; stored "
+          + (_fp_stored or "none (legacy build, predates the stored fingerprint)"))
+    _arc = ROOT / "Results" / "05_hotspot_analysis" / "_archive_v1.0.0"
+    if _arc.exists():
+        _fa = content_fingerprint(_arc)
+        check("v1.0.0 archive fingerprint equals the one recorded for it in the build and CHANGELOG",
+              _fa == V100_FINGERPRINT, f"sha256:{_fa}")
+
+    # The rebuild runs the build's own decision rule against this package, into a scratch
+    # staging folder, so QA and the build can never disagree about what "reproduced" means.
+    # The package itself is never written to.
+    tmp = Path(tempfile.mkdtemp()) / "staging"
+    _js = tmp.parent / "build.json"
     r = subprocess.run([sys.executable, str(ROOT / "scripts" / "build_master_summary.py"),
-                        "--out", str(tmp)], capture_output=True, text=True, cwd=ROOT)
-    if r.returncode != 0:
-        check("rebuild succeeds", False, r.stderr[-200:])
+                        "--out", str(PKG), "--staging", str(tmp), "--keep-staging",
+                        "--report-json", str(_js), "--compare-only"],
+                       capture_output=True, text=True, cwd=ROOT)
+    if r.returncode != 0 or not _js.exists():
+        check("rebuild succeeds", False, (r.stderr or r.stdout)[-200:])
     else:
-        a = {l.split("  ", 1)[1]: l.split("  ", 1)[0]
-             for l in (PKG / "checksums_md5.txt").read_text().strip().splitlines()}
-        b = {l.split("  ", 1)[1]: l.split("  ", 1)[0]
-             for l in (tmp / "checksums_md5.txt").read_text().strip().splitlines()}
-        same = [k for k in a if k in b and a[k] == b[k]]
-        diff = [k for k in a if k in b and a[k] != b[k]]
-        check("rebuild reproduces the same files", set(a) == set(b), f"{sorted(set(a) ^ set(b))}")
-        check("checksums identical except date-bearing files",
+        _rep = json.loads(_js.read_text(encoding="utf-8"))
+        check("rebuild reproduces the package content (fingerprint identical)",
+              _rep["case"] == "reproduced",
+              f"case {_rep['case']}; rebuild sha256:{_rep['fingerprint'][:16]}..., "
+              f"package sha256:{_fp_now[:16]}...")
+        _new = tmp / DATASET_DIR
+        a = {p.relative_to(PKG).as_posix() for p in PKG.rglob("*") if p.is_file()}
+        b = {p.relative_to(_new).as_posix() for p in _new.rglob("*") if p.is_file()}
+        check("rebuild reproduces the same files", a == b, f"{sorted(a ^ b)}")
+        same, diff = [], []
+        for _n in sorted((a & b) - {"checksums_md5.txt"}):
+            _x, _y = (PKG / _n).read_bytes(), (_new / _n).read_bytes()
+            if not _n.endswith(".gpkg"):      # text: line endings are not content
+                _x, _y = _x.replace(b"\r\n", b"\n"), _y.replace(b"\r\n", b"\n")
+            (same if _x == _y else diff).append(_n)
+        check("files identical to the rebuild except date-bearing ones (text ignoring line endings)",
               set(diff) <= {"surface_thermal_anomaly_stakeholder_composite.gpkg",
                             "data_dictionary.csv", "data_dictionary.md",
                             "README.md", "CHANGELOG.md"},
               f"identical: {len(same)}; differ: {sorted(diff)}")
-        shutil.rmtree(tmp.parent, ignore_errors=True)
+    shutil.rmtree(tmp.parent, ignore_errors=True)
 
     # ── report: fill the marked block in the single build report ────────────
     npass = sum(1 for _, o, _ in RES if o)
@@ -588,12 +647,15 @@ def main():
     out += ["", QA_END]
 
     report = PKG.parent / "dataset_build" / "build_report.md"
-    if report.exists():
+    if not write_report:
+        print("\n  validation not written (write_report=False)")
+    elif report.exists():
         txt = report.read_text(encoding="utf-8")
         i, j = txt.find(QA_BEGIN), txt.find(QA_END)
         if i != -1 and j != -1:
-            report.write_text(txt[:i] + "\n".join(out) + txt[j + len(QA_END):], encoding="utf-8")
-            print(f"\n  validation written into {report.relative_to(ROOT)}")
+            report.write_text(txt[:i] + "\n".join(out) + txt[j + len(QA_END):], encoding="utf-8",
+                              newline="\n")
+            print(f"\n  validation written into {report}")
         else:
             print(f"\n  [WARN] markers missing in {report.name}; validation not written")
     else:
@@ -603,19 +665,29 @@ def main():
     return 0 if npass == len(RES) else 1
 
 
+def run_qa(package_dir=DEFAULT_PKG, write_report: bool = True) -> dict:
+    """Run every check on one package folder. Callable from NB05 and from the build."""
+    global PKG, GPKG
+    PKG = Path(package_dir).resolve()
+    GPKG = PKG / "surface_thermal_anomaly_stakeholder_composite.gpkg"
+    RES.clear()
+    if not GPKG.exists():
+        print(f"no package at {GPKG}")
+        return {"ok": False, "passed": 0, "total": 0, "checks": []}
+    print(f"Package: {PKG}")
+    rc = main(write_report=write_report)
+    return {"ok": rc == 0, "passed": sum(1 for _, o, _ in RES if o), "total": len(RES),
+            "checks": list(RES)}
+
+
 def _cli(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--package", type=Path, default=DEFAULT_PKG,
                     help="deposit folder to validate (default: the published deposit folder)")
+    ap.add_argument("--no-report", action="store_true",
+                    help="do not write the validation block into dataset_build/build_report.md")
     a = ap.parse_args(argv)
-    global PKG, GPKG
-    PKG = a.package.resolve()
-    GPKG = PKG / "surface_thermal_anomaly_stakeholder_composite.gpkg"
-    if not GPKG.exists():
-        print(f"no package at {GPKG}")
-        return 2
-    print(f"Package: {PKG}")
-    return main()
+    return 0 if run_qa(a.package, write_report=not a.no_report)["ok"] else 1
 
 
 if __name__ == "__main__":

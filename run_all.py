@@ -16,8 +16,10 @@ Usage:
   # Choose what to generate (prompted automatically if omitted):
   #   manuscript = assemble figures/tables/appendices from cached Results/
   #   analytic   = run the analysis notebooks 01-06 only
-  #   all        = run the analysis pipeline, then assemble manuscript outputs
+  #   dataset    = build the published dataset from cached Results/ (no notebooks run)
+  #   all        = NB01 -> NB05 (whose last section builds the dataset) -> NB06 -> 07
   python run_all.py --scope manuscript
+  python run_all.py --scope dataset
   python run_all.py --scope all
 
   # Run for specific cities only, see readme for valid names:
@@ -155,10 +157,11 @@ NOTEBOOK_REGISTRY = [
         "script": "scripts/build_master_summary.py",
         "file": "build_master_summary.py",
         "name": "Master Summary Dataset",
-        "description": "Assemble the publication dataset (GeoPackage + data dictionary) from "
-                       "cached Results/, then run its QA suite",
+        "description": "Build the publication dataset from cached Results/ by calling "
+                       "build_dataset() directly; QA runs if the deposit changed",
         "requires_gee": False,
         "requires_eumetsat": False,
+        "accepts_cities": False,
         "category": "dataset",          # packaged from cache, like the manuscript scope
         "depends_on": ["01", "02", "03", "04", "05"],
     },
@@ -177,7 +180,8 @@ SCOPE_CATEGORIES = {
     "analytic":   {"analytic"},                          # only the analysis notebooks (01–06)
     "manuscript": {"manuscript"},                        # only 07_publication_outputs (from cache)
     "dataset":    {"dataset"},                           # only the published dataset build
-    "all":        {"analytic", "manuscript", "dataset"}, # pipeline, artwork, then dataset
+    # NB05's last section (§14) builds the dataset, so `all` does not build it a second time
+    "all":        {"analytic", "manuscript"},            # NB01 -> NB05 (+ dataset) -> NB06 -> 07
 }
 
 
@@ -349,45 +353,32 @@ print(f"[run_all.py] Processing {{len(_INJECTED_CITIES)}} cities: {{', '.join(_I
 
 
 def execute_script(nb_info: dict, timeout: int = 7200) -> dict:
-    """Run a registry entry that points at a Python script rather than a notebook.
+    """Run the `dataset` scope: build_dataset() called directly, without running notebooks.
 
-    Used by the `dataset` scope: the packaging step is a re-runnable script so it can
-    ship with the code repository. The dataset build is followed by its QA suite; a QA
-    failure is reported but does not fail the step, since the dataset is already written.
+    The build compares its staging copy with the deposit by content fingerprint. Identical
+    content leaves everything untouched; different content is checked by QA on the staging
+    build and replaces the deposit only if QA passes (the old one is kept in
+    _superseded_build_<date>/). No version is named: versions are named on Zenodo.
     """
-    import subprocess
-
-    script = PROJECT_ROOT / nb_info["script"]
     print("\n" + "=" * 70)
     print(f"  Step {nb_info['id']}: {nb_info['name']}")
-    print(f"  Script: {nb_info['script']}")
+    print(f"  Calls: {nb_info['script']} :: build_dataset()")
     print(f"{'='*70}")
-    if not script.exists():
-        return {"success": False, "duration": 0,
-                "error": f"Script not found: {script}", "output_path": None}
-
     start_time = time.time()
     try:
-        r = subprocess.run([sys.executable, str(script)], cwd=PROJECT_ROOT,
-                           timeout=timeout, capture_output=True, text=True)
-        if r.returncode != 0:
+        from scripts.build_master_summary import build_dataset
+        report = build_dataset()
+        print(report)
+        if report.qa and not report.qa["ok"]:
             return {"success": False, "duration": time.time() - start_time,
-                    "error": (r.stderr or r.stdout)[-800:], "output_path": None}
-        print(r.stdout.rstrip())
-        qa = PROJECT_ROOT / "scripts" / "qa_master_summary.py"
-        if qa.exists():
-            q = subprocess.run([sys.executable, str(qa)], cwd=PROJECT_ROOT,
-                               timeout=timeout, capture_output=True, text=True)
-            tail = (q.stdout or "").strip().splitlines()[-1:] or ["(no QA output)"]
-            print(f"  QA: {tail[0]}")
-            if q.returncode != 0:
-                print("  [WARNING] QA reported at least one failing check — see "
-                      "the dataset's _build/03_qa_report.md")
+                    "error": f"QA failed on the staging build: {report.qa['passed']}/"
+                             f"{report.qa['total']}; the deposit is not touched",
+                    "output_path": report.staging_dir}
         return {"success": True, "duration": time.time() - start_time,
-                "error": None, "output_path": str(script)}
-    except subprocess.TimeoutExpired:
-        return {"success": False, "duration": timeout,
-                "error": f"Timed out after {timeout}s", "output_path": None}
+                "error": None, "output_path": report.staging_dir or report.deposit_dir}
+    except SystemExit as e:             # pre-flight or update check: the message says why
+        return {"success": False, "duration": time.time() - start_time,
+                "error": str(e)[-800:], "output_path": None}
 
 
 def execute_notebook(
@@ -532,7 +523,7 @@ def resolve_notebook_order(requested_ids: Optional[list] = None, start_from: Opt
 def prompt_output_scope() -> str:
     """
     Ask the user which outputs to generate. Returns one of
-    'manuscript' | 'all' | 'analytic'. Falls back to 'all' when the session is
+    'manuscript' | 'all' | 'analytic' | 'dataset'. Falls back to 'all' when the session is
     non-interactive (no TTY), so automated/CI runs are unaffected.
     """
     try:
@@ -542,18 +533,19 @@ def prompt_output_scope() -> str:
         return "all"
     print("\nWhich outputs would you like to generate?")
     print("  [1] Manuscript outputs only  — assemble figures, tables & appendices from cached Results/")
-    print("  [2] All project outputs      — run the full analysis pipeline, then assemble manuscript outputs")
+    print("  [2] All project outputs      — NB01 -> NB05 (builds the dataset) -> NB06, then manuscript outputs")
     print("  [3] Analytic outputs only    — run the analysis notebooks (01-06); skip manuscript assembly")
-    choices = {"1": "manuscript", "2": "all", "3": "analytic"}
+    print("  [4] Published dataset only  — build_dataset() from cached Results/; no notebooks run")
+    choices = {"1": "manuscript", "2": "all", "3": "analytic", "4": "dataset"}
     while True:
         try:
-            choice = input("Enter 1, 2 or 3 [2]: ").strip() or "2"
+            choice = input("Enter 1, 2, 3 or 4 [2]: ").strip() or "2"
         except (EOFError, KeyboardInterrupt):
             print("\n  No input received — defaulting to 'all'.")
             return "all"
         if choice in choices:
             return choices[choice]
-        print("  Please enter 1, 2 or 3.")
+        print("  Please enter 1, 2, 3 or 4.")
 
 
 def main():
@@ -600,10 +592,12 @@ def main():
     )
     parser.add_argument(
         "--scope",
-        choices=["manuscript", "all", "analytic"],
+        choices=["manuscript", "all", "analytic", "dataset"],
         default=None,
         help="Which outputs to generate: 'manuscript' (assemble figures/tables from cached "
-             "Results/), 'analytic' (run analysis notebooks 01-06 only), or 'all' (both). "
+             "Results/), 'analytic' (run analysis notebooks 01-06 only), 'dataset' (build the "
+             "published dataset from cached Results/, no notebooks), or 'all' (NB01 -> NB05, "
+             "whose last section builds the dataset, -> NB06 -> 07). "
              "If omitted and no --notebooks given, you will be prompted.",
     )
     parser.add_argument(
