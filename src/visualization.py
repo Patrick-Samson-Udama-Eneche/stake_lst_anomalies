@@ -7074,6 +7074,7 @@ def create_cluster_perception_chart(
     peak_by_cluster=None,
     peak_total=None,
     suptitle=True,
+    stacked=False,
 ):
     """
     Cluster-level perception analysis: warming (Q61) + diurnal heat (Q60) stacked bars
@@ -7146,10 +7147,18 @@ def create_cluster_perception_chart(
     # =========================================================================
     fig = plt.figure(figsize=figsize)
     _ncol = 3 if _three else 2
-    gs = GridSpec(1, _ncol, figure=fig, width_ratios=[1] * _ncol, wspace=0.08)
-    ax1 = fig.add_subplot(gs[0, 0])
-    ax2 = fig.add_subplot(gs[0, 1])
-    ax3 = fig.add_subplot(gs[0, 2]) if _three else None
+    # stacked=True puts the panels in rows instead of columns, so the figure can be
+    # built at a single-page print width without squeezing three panels across it.
+    # Added for the SCS rebuild; default False is the original side-by-side layout.
+    if stacked:
+        gs = GridSpec(_ncol, 1, figure=fig, height_ratios=[1] * _ncol, hspace=0.42)
+        _slots = [gs[i, 0] for i in range(_ncol)]
+    else:
+        gs = GridSpec(1, _ncol, figure=fig, width_ratios=[1] * _ncol, wspace=0.08)
+        _slots = [gs[0, i] for i in range(_ncol)]
+    ax1 = fig.add_subplot(_slots[0])
+    ax2 = fig.add_subplot(_slots[1])
+    ax3 = fig.add_subplot(_slots[2]) if _three else None
 
     # --- LEFT: Warming ---
     left = np.zeros(len(warming_data))
@@ -15177,6 +15186,8 @@ def create_publication_nigeria_overview(
     legend_fontsize: float = 7,
     legend_outside: bool = False,
     legend_below: bool = False,
+    label_min_pop: float = None,
+    label_min_pop_bbox: tuple = None,
 ) -> plt.Figure:
     """A4 publication Nigeria overview: Cluster25 fills + proportional circles + cluster legend.
 
@@ -15193,6 +15204,9 @@ def create_publication_nigeria_overview(
     legend_outside         places the legend beside the map instead of inside it, for a
                            legend too long to sit over the country without covering it
     legend_below           places it under the map instead, which keeps the map width
+    label_min_pop          inside label_min_pop_bbox, name only cities at or above
+                           this population; used where names would overlap
+    label_min_pop_bbox     (lon_min, lat_min, lon_max, lat_max) the rule applies in
     """
     import matplotlib.patches as mpatches
 
@@ -15252,6 +15266,13 @@ def create_publication_nigeria_overview(
             ax.add_patch(plt.Circle((lon, lat), radius, facecolor='#555555',
                                     edgecolor='white', linewidth=0.8, alpha=0.75, zorder=4))
         ax.plot(lon, lat, 'ko', markersize=3, zorder=6)
+        # Where names collide, name only the larger cities inside the given box. The
+        # city itself is still drawn; only its label is dropped, and every name is in
+        # Supp. Fig. S2.
+        if label_min_pop and label_min_pop_bbox:
+            _x0, _y0, _x1, _y1 = label_min_pop_bbox
+            if _x0 <= lon <= _x1 and _y0 <= lat <= _y1 and pop < label_min_pop:
+                continue
         txt = ax.text(lon, lat - radius - 0.12, f'{city}\n({_fmt(pop)})',
                       ha='center', va='top', fontsize=6.5, fontweight='bold',
                       color='#111', zorder=7, linespacing=0.85)
@@ -15650,7 +15671,7 @@ def create_publication_city_grid(
         for _xx in [_x0, _x0 + _sdeg]:
             ax.plot([_xx, _xx], [_y0 - _dh, _y0 + _dh], 'k-', linewidth=1.3, zorder=15)
         ax.text(_x0 + _sdeg / 2, _y0 + _dh * 1.5, f'{_scale_km} km',
-                ha='center', va='bottom', fontsize=5.0, fontweight='bold', zorder=15,
+                ha='center', va='bottom', fontsize=6.5, fontweight='bold', zorder=15,
                 bbox=dict(boxstyle='round,pad=0.12', facecolor='white',
                           alpha=0.75, edgecolor='none'))
 
