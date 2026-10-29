@@ -7073,6 +7073,7 @@ def create_cluster_perception_chart(
     legend_scale=1.0,
     peak_by_cluster=None,
     peak_total=None,
+    suptitle=True,
 ):
     """
     Cluster-level perception analysis: warming (Q61) + diurnal heat (Q60) stacked bars
@@ -7288,11 +7289,15 @@ def create_cluster_perception_chart(
                    title_fontsize=9 * legend_scale, framealpha=0.95,
                    bbox_to_anchor=(0.99, 0.01))
 
-    _suptitle = ('Stakeholder Perception by Climate Cluster: '
-                 'Warming, Diurnal Heating & Peak Season' if _three else
-                 'Stakeholder Perception by Climate Cluster: Warming & Diurnal Heating')
-    fig.suptitle(_suptitle, fontsize=13, fontweight='bold', y=0.98)
-    plt.tight_layout(rect=[0, 0, 1, 0.94])
+    # suptitle=False added for the SCS rebuild, where captions carry the title.
+    if suptitle:
+        _suptitle = ('Stakeholder Perception by Climate Cluster: '
+                     'Warming, Diurnal Heating & Peak Season' if _three else
+                     'Stakeholder Perception by Climate Cluster: Warming & Diurnal Heating')
+        fig.suptitle(_suptitle, fontsize=13, fontweight='bold', y=0.98)
+        plt.tight_layout(rect=[0, 0, 1, 0.94])
+    else:
+        plt.tight_layout()
 
     # =========================================================================
     # SEPARATE DONUTS FIGURE (standalone)
@@ -14839,6 +14844,10 @@ def create_suhii_city_chart(
     figsize=(8.27, 11.69),
     dpi: int = 300,
     cl_legend_ncol: int = 3,
+    axes=None,
+    title: str = ('City-Level SEVIRI SUHII\n'
+                  '(fill = cluster colour  |  sorted by daytime \u2193)'),
+    show_national_box: bool = True,
 ):
     """
     Publication-quality city-level SUHII chart (portrait A4).
@@ -14857,6 +14866,15 @@ def create_suhii_city_chart(
     output_stem : str
     figsize : tuple  — default portrait A4
     dpi : int
+    axes : (ax_day, ax_night) or None
+        Draw into axes the caller already made, instead of creating a figure. Nothing
+        is saved and the figure is not laid out or closed, so the panel can be one part
+        of a larger figure. Added for the SCS rebuild; default None is the old
+        behaviour.
+    title : str or None
+        None removes the in-figure title.
+    show_national_box : bool
+        The national mean/range box in the lower left.
 
     Returns
     -------
@@ -14901,8 +14919,13 @@ def create_suhii_city_chart(
     bar_h = 0.55
 
     # sharex=True enforces a uniform x-axis (SUHII) scale across both panels
-    fig, axes = _plt.subplots(1, 2, figsize=figsize, sharey=True, sharex=True,
-                               gridspec_kw={'wspace': 0.06})
+    _embedded = axes is not None
+    if _embedded:
+        axes = list(axes)
+        fig = axes[0].figure
+    else:
+        fig, axes = _plt.subplots(1, 2, figsize=figsize, sharey=True, sharex=True,
+                                  gridspec_kw={'wspace': 0.06})
 
     for period, ax in [('day', axes[0]), ('night', axes[1])]:
         _pdata = _day_df if period == 'day' else _night_df
@@ -14937,28 +14960,38 @@ def create_suhii_city_chart(
         for n in _used_cl
     ]
 
-    fig.legend(handles=_cl_handles,
-               title='Cluster (fill)', title_fontsize=7, fontsize=6.5,
-               loc='lower right', bbox_to_anchor=(0.98, 0.01),
-               ncol=cl_legend_ncol, framealpha=0.9)
+    if _embedded:
+        axes[1].legend(handles=_cl_handles, title='Cluster (fill)', title_fontsize=6.5,
+                       fontsize=6, loc='lower right', ncol=cl_legend_ncol,
+                       framealpha=0.9)
+    else:
+        fig.legend(handles=_cl_handles,
+                   title='Cluster (fill)', title_fontsize=7, fontsize=6.5,
+                   loc='lower right', bbox_to_anchor=(0.98, 0.01),
+                   ncol=cl_legend_ncol, framealpha=0.9)
 
     _d_vals = _day_df.dropna()
     _n_vals = _night_df.dropna()
-    if len(_d_vals) > 0 or len(_n_vals) > 0:
+    if show_national_box and (len(_d_vals) > 0 or len(_n_vals) > 0):
         _nat_txt = (
             f"National  Day: μ={_d_vals.mean():.2f}°C  "
             f"[{_d_vals.min():.2f}–{_d_vals.max():.2f}]\n"
             f"          Night: μ={_n_vals.mean():.2f}°C  "
             f"[{_n_vals.min():.2f}–{_n_vals.max():.2f}]"
         )
-        fig.text(0.02, 0.01, _nat_txt, ha='left', va='bottom', fontsize=7,
-                 bbox=dict(boxstyle='round,pad=0.4', fc='#f7f7f7', alpha=0.9))
+        if _embedded:
+            axes[0].text(0.02, 0.012, _nat_txt, transform=axes[0].transAxes,
+                         ha='left', va='bottom', fontsize=6.2,
+                         bbox=dict(boxstyle='round,pad=0.35', fc='#f7f7f7', alpha=0.9))
+        else:
+            fig.text(0.02, 0.01, _nat_txt, ha='left', va='bottom', fontsize=7,
+                     bbox=dict(boxstyle='round,pad=0.4', fc='#f7f7f7', alpha=0.9))
 
-    fig.suptitle(
-        'City-Level SEVIRI SUHII\n'
-        '(fill = cluster colour  |  sorted by daytime ↓)',
-        fontsize=10, y=0.998,
-    )
+    if _embedded:
+        return fig
+
+    if title:
+        fig.suptitle(title, fontsize=10, y=0.998)
     fig.tight_layout(rect=[0, 0.08, 1, 0.975])
 
     if output_dir is not None:
@@ -15143,6 +15176,7 @@ def create_publication_nigeria_overview(
     legend_ncol: int = 2,
     legend_fontsize: float = 7,
     legend_outside: bool = False,
+    legend_below: bool = False,
 ) -> plt.Figure:
     """A4 publication Nigeria overview: Cluster25 fills + proportional circles + cluster legend.
 
@@ -15158,6 +15192,7 @@ def create_publication_nigeria_overview(
     title                  None removes the in-figure title
     legend_outside         places the legend beside the map instead of inside it, for a
                            legend too long to sit over the country without covering it
+    legend_below           places it under the map instead, which keeps the map width
     """
     import matplotlib.patches as mpatches
 
@@ -15295,7 +15330,13 @@ def create_publication_nigeria_overview(
                                      linewidth=1.1 if _on else 0.5,
                                      alpha=0.85 if _on else 0.6,
                                      label=_lbl))
-    if legend_outside:
+    if legend_below:
+        leg = ax.legend(handles=_items, loc='upper center', bbox_to_anchor=(0.5, -0.085),
+                        fontsize=legend_fontsize, framealpha=1.0, edgecolor='#555',
+                        title=legend_title, title_fontsize=9, ncol=legend_ncol,
+                        borderpad=0.7, labelspacing=0.28, handlelength=1.3,
+                        handletextpad=0.45, columnspacing=1.1)
+    elif legend_outside:
         leg = ax.legend(handles=_items, loc='upper left', bbox_to_anchor=(1.015, 1.0),
                         fontsize=legend_fontsize, framealpha=1.0, edgecolor='#555',
                         title=legend_title, title_fontsize=9, ncol=legend_ncol,
@@ -15314,7 +15355,7 @@ def create_publication_nigeria_overview(
     # read back from the rendered legend box so the key always sits above the legend.
     from matplotlib.patches import Circle as _RefCircle
     fig.canvas.draw()
-    if legend_outside:
+    if legend_outside or legend_below:
         # The legend is no longer over the map, so the key sits in the lower-right
         # corner of the map itself rather than being stacked above the legend.
         _cx, _by = ax.transData.inverted().transform(
