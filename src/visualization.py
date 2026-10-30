@@ -5955,7 +5955,8 @@ def create_city_classification_donut(cities_gdf, survey_df, workshop_total,
 def create_city_stakeholder_donut(cluster_summary, study_gdf=None,
                                   cluster25_colors=None,
                                   total_pids=None, attended_pids=None,
-                                  figsize=(14, 8)):
+                                  figsize=(14, 8), show_title=True,
+                                  legend_count_label='att.'):
     """
     Single top-semicircle half-donut chart (horizontal cut, upper half active).
 
@@ -5996,6 +5997,10 @@ def create_city_stakeholder_donut(cluster_summary, study_gdf=None,
         Falls back to sum of 'Attended Workshop' column when None.
     figsize : tuple
         Figure size in inches.  Default (12, 11) suits portrait half-donut.
+    show_title : bool
+        False leaves the figure without its title.
+    legend_count_label : str
+        The word after each cluster's attendance count in the legend.
 
     Returns
     -------
@@ -6242,16 +6247,17 @@ def create_city_stakeholder_donut(cluster_summary, study_gdf=None,
         d    = cluster_data[cl]
         n_aw = int(row['Attended Workshop'])
         leg_handles.append(_circ(_cl_color(cl), d['n_att'] > 0))
-        leg_labels.append(f"{cl}  ({d['n_cities']} cities | {n_aw} att.)")
+        leg_labels.append(f"{cl}  ({d['n_cities']} cities | {n_aw} {legend_count_label})")
 
     ax_leg.legend(leg_handles, leg_labels, loc='center left',
                   fontsize=8.5, title='LEGEND', title_fontsize=11,
                   frameon=False, handlelength=1.0, handletextpad=0.6,
                   labelspacing=0.75, borderpad=0.5, bbox_to_anchor=(-0.02, 0.5))
 
-    fig.suptitle(
-        f'City & Stakeholder Classification by Physiographic Cluster (56 Cities, 16 Clusters) — {config.PROJECT_STUDY_YEAR}',
-        fontsize=12, fontweight='bold', y=0.98)
+    if show_title:
+        fig.suptitle(
+            f'City & Stakeholder Classification by Physiographic Cluster (56 Cities, 16 Clusters) — {config.PROJECT_STUDY_YEAR}',
+            fontsize=12, fontweight='bold', y=0.98)
     plt.tight_layout()
     return fig
 
