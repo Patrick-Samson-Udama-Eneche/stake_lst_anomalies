@@ -15188,6 +15188,8 @@ def create_publication_nigeria_overview(
     legend_below: bool = False,
     label_min_pop: float = None,
     label_min_pop_bbox: tuple = None,
+    unlabelled_cities: list = None,
+    city_legend_label: str = 'Study city',
 ) -> plt.Figure:
     """A4 publication Nigeria overview: Cluster25 fills + proportional circles + cluster legend.
 
@@ -15207,6 +15209,9 @@ def create_publication_nigeria_overview(
     label_min_pop          inside label_min_pop_bbox, name only cities at or above
                            this population; used where names would overlap
     label_min_pop_bbox     (lon_min, lat_min, lon_max, lat_max) the rule applies in
+    unlabelled_cities      further cities drawn with the same symbol, sized from the
+                           cities table, but not named
+    city_legend_label      the legend entry for the city symbol
     """
     import matplotlib.patches as mpatches
 
@@ -15248,7 +15253,8 @@ def create_publication_nigeria_overview(
     nigeria_gdf.plot(ax=ax, facecolor='none', edgecolor='#333333',
                      linewidth=1.5, zorder=2)
 
-    max_pop = max((pop_lookup.get(c, 0) for c in cities), default=1) or 1
+    _unl = sorted(set(unlabelled_cities or []) - set(cities))
+    max_pop = max((pop_lookup.get(c, 0) for c in cities + _unl), default=1) or 1
     label_texts, label_x, label_y = [], [], []
 
     def _fmt(p):
@@ -15256,7 +15262,7 @@ def create_publication_nigeria_overview(
         if p >= 1_000:     return f'{p/1_000:.0f}k'
         return f'{p:.0f}'
 
-    for city in cities:
+    for city in cities + _unl:
         lon, lat = coord_lookup.get(city, (None, None))
         if lon is None:
             continue
@@ -15266,6 +15272,8 @@ def create_publication_nigeria_overview(
             ax.add_patch(plt.Circle((lon, lat), radius, facecolor='#555555',
                                     edgecolor='white', linewidth=0.8, alpha=0.75, zorder=4))
         ax.plot(lon, lat, 'ko', markersize=3, zorder=6)
+        if city in _unl:
+            continue
         # Where names collide, name only the larger cities inside the given box. The
         # city itself is still drawn; only its label is dropped, and every name is in
         # Supp. Fig. S2.
@@ -15321,7 +15329,7 @@ def create_publication_nigeria_overview(
 
     _items = [
         plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='black',
-                   markersize=5, label='Study city'),
+                   markersize=5, label=city_legend_label),
         mpatches.Patch(facecolor='none', edgecolor='#333', linewidth=1.5,
                        label='National boundary'),
     ]
@@ -15352,6 +15360,9 @@ def create_publication_nigeria_overview(
                                      alpha=0.85 if _on else 0.6,
                                      label=_lbl))
     if legend_below:
+        # The map is laid out before the legend exists, so a legend wider than the map
+        # hangs below it rather than shrinking it: the map body keeps its size.
+        fig.tight_layout()
         leg = ax.legend(handles=_items, loc='upper center', bbox_to_anchor=(0.5, -0.085),
                         fontsize=legend_fontsize, framealpha=1.0, edgecolor='#555',
                         title=legend_title, title_fontsize=9, ncol=legend_ncol,
@@ -15369,7 +15380,8 @@ def create_publication_nigeria_overview(
                         title_fontsize=9, ncol=legend_ncol,
                         borderpad=0.8, labelspacing=0.35, handlelength=1.2,
                         handletextpad=0.4)
-    fig.tight_layout()
+    if not legend_below:
+        fig.tight_layout()
 
     # ── Graduated proportional-circle key, drawn just above the legend (no frame) ──
     # Circles are in data coordinates (true circles under aspect='equal'); the anchor is
