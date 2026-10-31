@@ -85,7 +85,7 @@ def _stats_box(ax, rows, header, y, va):
             dec = ''
         lines.append(f'  {label}: {" ".join(p for p in [sym, sig, dec, hr] if p)}')
     if any_d:
-        ax.text(0.02, y, '\n'.join(lines), transform=ax.transAxes, fontsize=6.5,
+        ax.text(0.02, y, '\n'.join(lines), transform=ax.transAxes, fontsize=5.0,
                 va=va, ha='left', zorder=12, linespacing=1.25,
                 bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8,
                           lw=0.4, edgecolor='#bbb'))
@@ -100,7 +100,7 @@ def _peak_trough(ax, x, y_raw, col, is_monthly):
         ax.plot(xi, yi, marker='o', mfc='none', mec=col, ms=5, mew=1.0, zorder=6)
         tag = f"{MON_ABBR[int(xi) - 1]} {yi:.1f}°C" if is_monthly else f"{int(xi)}: {yi:.1f}°C"
         ax.annotate(tag, xy=(xi, yi), xytext=(0, dy), textcoords='offset points',
-                    fontsize=6.5, color=col, ha='center', zorder=7,
+                    fontsize=4.6, color=col, ha='center', zorder=7,
                     bbox=dict(boxstyle='round,pad=0.15', facecolor='white',
                               edgecolor=col, alpha=0.85, lw=0.4))
 
@@ -168,17 +168,17 @@ def draw_temporal_panel(ax, ax2, kind, df, ddf, stats, dstats,
     ax2.axhline(0, color='#888', lw=0.6, ls=':', alpha=0.7, zorder=2)
     if kind == 'monthly':
         ax.axvspan(5.5, 10.5, color='#AADDFF', alpha=0.12, zorder=0)
-        ax.set_xticks(range(1, 13)); ax.set_xticklabels(MON_ABBR, fontsize=6.5, rotation=90)
+        ax.set_xticks(range(1, 13)); ax.set_xticklabels(MON_ABBR, fontsize=5, rotation=90)
         ax.set_xlabel('Month', fontsize=6.5)
     else:
         yrs = sorted({int(y) for y in df['year'].unique()})
         tks = [y for y in yrs if (y - yrs[0]) % 4 == 0]
-        ax.set_xticks(tks); ax.set_xticklabels([str(y) for y in tks], fontsize=6.5, rotation=45, ha='right')
+        ax.set_xticks(tks); ax.set_xticklabels([str(y) for y in tks], fontsize=5, rotation=45, ha='right')
         ax.set_xlabel('Year', fontsize=6.5)
     ax.tick_params(labelsize=5.5); ax2.tick_params(labelsize=5.5, colors='#555')
     ax.set_ylabel(('Annual' if kind == 'annual' else 'Monthly') + ' median LST (°C)', fontsize=6.5)
     if suhii_ylabel:
-        ax2.set_ylabel('SUHII — UC−BRA (°C)', fontsize=6.5, color='#555')
+        ax2.set_ylabel('SUHII — UC−BRA (°C)', fontsize=6.0, color='#555')
     if stat_boxes:
         _stats_box(ax, [('UC', _row(stats, 'urban_core', 'day')), ('BRA', _row(stats, 'bra', 'day')),
                         ('SUHII', _row(dstats, 'delta_uc_bra', 'day'))], 'Day (- - Sen)', 0.985, 'top')
