@@ -14863,6 +14863,7 @@ def create_suhii_city_chart(
     title: str = ('City-Level SEVIRI SUHII\n'
                   '(fill = cluster colour  |  sorted by daytime \u2193)'),
     show_national_box: bool = True,
+    cl_label: str = 'Cl {}',
 ):
     """
     Publication-quality city-level SUHII chart (portrait A4).
@@ -14890,6 +14891,8 @@ def create_suhii_city_chart(
         None removes the in-figure title.
     show_national_box : bool
         The national mean/range box in the lower left.
+    cl_label : str
+        Legend label for a cluster number, e.g. 'C{}' for "C13".
 
     Returns
     -------
@@ -14971,7 +14974,7 @@ def create_suhii_city_chart(
     _used_cl = sorted({cluster_lookup.get(c) for c in _all_cities
                        if cluster_lookup.get(c) is not None})
     _cl_handles = [
-        _mpatches.Patch(facecolor=_CL_COL.get(n, _FALLBACK_CLR), label=f'Cl {n}')
+        _mpatches.Patch(facecolor=_CL_COL.get(n, _FALLBACK_CLR), label=cl_label.format(n))
         for n in _used_cl
     ]
 
