@@ -52,9 +52,18 @@ _T5_GROUPS = [('day', 'hot', 'Day · Sig. Hotspots'),
 _T5_METRICS = ['No. of spots', 'No. of cities', 'Area (sq.km)']
 
 
-def build_table5(results_05: Path) -> pd.DataFrame:
-    ch = pd.read_csv(results_05 / 'cluster_hotspot_summary.csv')
-    nat = pd.read_csv(results_05 / 'national_hotspot_summary.csv')
+def build_table5(results_05: Path, spots: pd.DataFrame = None,
+                 cluster_fmt: str = 'Cl-{}') -> pd.DataFrame:
+    """spots, when given (the published `spots` layer), replaces the NB05 summaries: the
+    same counts, cities and L50 areas are taken from it. cluster_fmt labels the rows."""
+    if spots is None:
+        ch = pd.read_csv(results_05 / 'cluster_hotspot_summary.csv')
+        nat = pd.read_csv(results_05 / 'national_hotspot_summary.csv')
+    else:
+        _agg = dict(n_spots=('spot_uid', 'size'), n_cities=('city', 'nunique'),
+                    total_area_50_km2=('area_l50_km2', 'sum'))
+        ch = spots.groupby(['cluster25', 'period', 'spot_type']).agg(**_agg).reset_index()
+        nat = spots.groupby(['period', 'spot_type']).agg(**_agg).reset_index()
 
     def cell(df, cl, period, spot):
         r = df[(df['cluster25'] == cl) & (df['period'] == period) & (df['spot_type'] == spot)]
@@ -65,7 +74,7 @@ def build_table5(results_05: Path) -> pd.DataFrame:
 
     rows = []
     for cl in sorted(ch['cluster25'].unique()):
-        d = {'Cluster': f'Cl-{cl}'}
+        d = {'Cluster': cluster_fmt.format(cl)}
         for period, spot, grp in _T5_GROUPS:
             ns, nc, ar = cell(ch, cl, period, spot)
             d[f'{grp}|No. of spots'] = ns
@@ -338,23 +347,27 @@ def _simple_xlsx(df, path, title, footnote='', bold_sig_cols=None, caption_itali
 # ═══════════════════════════════════════════════════════════════════════════
 # top-level driver
 # ═══════════════════════════════════════════════════════════════════════════
-def build_hotspot_tables(results_05: Path, results_06: Path, out_dir: Path) -> dict:
-    """Build every §3.3–§3.4 table; write .csv + styled .xlsx; return the DataFrames."""
+def build_hotspot_tables(results_05: Path, results_06: Path, out_dir: Path,
+                         table5: bool = True) -> dict:
+    """Build every §3.3–§3.4 table; write .csv + styled .xlsx; return the DataFrames.
+
+    table5=False leaves Table 5 to the caller (Notebook 07 builds it from the package)."""
     results_05, results_06, out_dir = Path(results_05), Path(results_06), Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     made = {}
 
     # ── Table 5 ──
-    t5 = build_table5(results_05)
-    t5.columns = [c.split('|')[-1] if '|' in c else c for c in t5.columns]  # flat for csv
-    t5.to_csv(out_dir / 'Table_5_cluster_spot_occurrence.csv', index=False)
-    t5g = build_table5(results_05)
-    t5g['_group'] = t5g['Cluster'].eq('Total')
-    _grouped_xlsx(t5g, out_dir / 'Table_5_cluster_spot_occurrence.xlsx',
-                  id_cols=['Cluster'], groups=[g for _, _, g in _T5_GROUPS], subs=_T5_METRICS,
-                  title='Table 5: Summary of significant spots occurrence across PLT clusters (56 cities)',
-                  footnote='Area = total L50 footprint (sq.km). Total row = national aggregate.')
-    made['Table_5'] = t5
+    if table5:
+        t5 = build_table5(results_05)
+        t5.columns = [c.split('|')[-1] if '|' in c else c for c in t5.columns]  # flat for csv
+        t5.to_csv(out_dir / 'Table_5_cluster_spot_occurrence.csv', index=False)
+        t5g = build_table5(results_05)
+        t5g['_group'] = t5g['Cluster'].eq('Total')
+        _grouped_xlsx(t5g, out_dir / 'Table_5_cluster_spot_occurrence.xlsx',
+                      id_cols=['Cluster'], groups=[g for _, _, g in _T5_GROUPS], subs=_T5_METRICS,
+                      title='Table 5: Summary of significant spots occurrence across PLT clusters (56 cities)',
+                      footnote='Area = total L50 footprint (sq.km). Total row = national aggregate.')
+        made['Table_5'] = t5
 
     # ── Supp Table 6 ──
     s6 = build_supp6(results_05)
