@@ -7081,6 +7081,8 @@ def create_cluster_perception_chart(
     peak_total=None,
     suptitle=True,
     stacked=False,
+    row_label='Cluster {}',
+    panel_letters=('A)', 'B)', 'C)'),
 ):
     """
     Cluster-level perception analysis: warming (Q61) + diurnal heat (Q60) stacked bars
@@ -7102,6 +7104,10 @@ def create_cluster_perception_chart(
         {cluster_id: hex_color}; used for y-tick label colouring
     figsize : tuple
     legend_scale : float
+    row_label : str
+        Row label for a cluster index, e.g. 'C{}' for "C13".
+    panel_letters : tuple of str
+        The letters before the three panel titles, e.g. ('(a)', '(b)', '(c)').
 
     Returns
     -------
@@ -7146,7 +7152,7 @@ def create_cluster_perception_chart(
         peak_cols = [c for c in peak_order if c in peak_by_cluster.columns]
         peak_data = peak_by_cluster[peak_cols].fillna(0)
 
-    cluster_labels = [f'Cluster {c}' for c in warming_data.index]
+    cluster_labels = [row_label.format(c) for c in warming_data.index]
 
     # =========================================================================
     # MAIN FIGURE
@@ -7177,7 +7183,7 @@ def create_cluster_perception_chart(
     ax1.set_yticks(range(len(warming_data)))
     ax1.set_yticklabels(cluster_labels, fontsize=9)
     ax1.set_xlabel('Number of Participants', fontsize=10)
-    ax1.set_title('A) City Warming Over 10 Years (by Cluster)',
+    ax1.set_title(f'{panel_letters[0]} City Warming Over 10 Years (by Cluster)',
                   fontsize=11, fontweight='bold', loc='left')
     ax1.invert_yaxis()
     max_w = int(warming_data.sum(axis=1).max()) + 5
@@ -7223,7 +7229,7 @@ def create_cluster_perception_chart(
     ax2.set_yticks(range(len(diurnal_data)))
     ax2.set_yticklabels([])
     ax2.set_xlabel('Number of Participants', fontsize=10)
-    ax2.set_title('B) Timing of Most Severe Heat (by Cluster)',
+    ax2.set_title(f'{panel_letters[1]} Timing of Most Severe Heat (by Cluster)',
                   fontsize=11, fontweight='bold', loc='left')
     ax2.invert_yaxis()
     max_d = int(diurnal_data.sum(axis=1).max()) + 5
@@ -7270,7 +7276,7 @@ def create_cluster_perception_chart(
         ax3.set_yticks(range(len(peak_data)))
         ax3.set_yticklabels([])
         ax3.set_xlabel('Number of Participants', fontsize=10)
-        ax3.set_title('C) Peak Heat Season (by Cluster)',
+        ax3.set_title(f'{panel_letters[2]} Peak Heat Season (by Cluster)',
                       fontsize=11, fontweight='bold', loc='left')
         ax3.invert_yaxis()
         max_p = int(peak_data.sum(axis=1).max()) + 5
