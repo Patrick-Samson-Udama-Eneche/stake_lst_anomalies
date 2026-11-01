@@ -5442,7 +5442,9 @@ def create_stakeholder_map_with_bar_chart(cities_gdf, boundary_gdf, workshop_pro
                                           profession_colors, survey_df, workshop_total,
                                           global_registered=None, global_attendees=None,
                                           cluster_workshop_prof=None,
-                                          figsize=(11.7, 5.85)):
+                                          figsize=(11.7, 5.85),
+                                          registered_by=None, bar_labels=None,
+                                          panel_letters=('A', 'B'), bar_legend_title=None):
     """
     Create stakeholder distribution map with component bar chart and nested donut.
     Designed to fit upper half of A4 page (11.7" x 5.85")
@@ -5467,11 +5469,22 @@ def create_stakeholder_map_with_bar_chart(cities_gdf, boundary_gdf, workshop_pro
         Total unique workshop attendees (if None, sum from cities_gdf)
     figsize : tuple
         Figure size (width, height) in inches
-    
+    registered_by : dict, optional
+        Registrations per bar (city name, or Cluster25 id in the cluster panel); when
+        given, each bar ends "attended/registered" instead of "attended"
+    bar_labels : dict, optional
+        Axis label per bar (city name, or Cluster25 id in the cluster panel); default
+        'Cluster {id}' for clusters and the city name for cities
+    panel_letters : tuple
+        Letters of the map and bar panels
+    bar_legend_title : str, optional
+        Title of the profession legend (default: 'Profession' for clusters,
+        'Profession/Discipline (Mix)' for cities)
+
     Returns:
     --------
     fig : matplotlib.figure.Figure
-    
+
     Example:
     --------
     >>> fig = create_stakeholder_map_with_bar_chart(
@@ -5645,7 +5658,7 @@ def create_stakeholder_map_with_bar_chart(cities_gdf, boundary_gdf, workshop_pro
                           edgecolor='black', title='Legend', title_fontsize=7,
                           framealpha=0.9)
     
-    ax_map.set_title('A', fontsize=10, fontweight='bold', pad=10)
+    ax_map.set_title(panel_letters[0], fontsize=10, fontweight='bold', pad=10)
     ax_map.set_xlabel('Longitude (°E)', fontsize=8)
     ax_map.set_ylabel('Latitude (°N)', fontsize=8)
     ax_map.tick_params(labelsize=7)
@@ -5657,6 +5670,12 @@ def create_stakeholder_map_with_bar_chart(cities_gdf, boundary_gdf, workshop_pro
     # When cluster_workshop_prof is provided → cluster-level bars (§5B)
     # Otherwise → city-level bars (§5A default)
     # =========================================================================
+
+    def _bar_end(n, key):
+        """The label at a bar's end: attended, or attended/registered."""
+        if registered_by is None:
+            return f'{int(n)}'
+        return f'{int(n)}/{int(registered_by.get(key, 0))}'
 
     if cluster_workshop_prof is not None:
         # ── Cluster-level stacked bars ────────────────────────────────────────
@@ -5676,24 +5695,27 @@ def create_stakeholder_map_with_bar_chart(cities_gdf, boundary_gdf, workshop_pro
             vals = dm_b[prof].values
             if vals.sum() > 0:
                 color = profession_colors.get(prof, '#888888')
-                ax_bar.barh([f'Cluster {c}' for c in cluster_list_b], vals, left=left_b,
+                ax_bar.barh([(bar_labels or {}).get(c, f'Cluster {c}') for c in cluster_list_b],
+                            vals, left=left_b,
                             color=color, edgecolor='white', linewidth=0.5, label=prof)
                 left_b += vals
 
         for i, cl in enumerate(cluster_list_b):
             total = cluster_totals[cl]
             if total > 0:
-                ax_bar.text(total + 0.2, i, f'{int(total)}',
+                ax_bar.text(total + 0.2, i, _bar_end(total, cl),
                             va='center', ha='left', fontsize=6.5, fontweight='bold')
+        if registered_by is not None:              # room for the longer labels
+            ax_bar.set_xlim(right=ax_bar.get_xlim()[1] * 1.12)
 
         ax_bar.set_xlabel('Workshop Attendees', fontsize=8)
-        ax_bar.set_title('B', fontsize=10, fontweight='bold', pad=10)
+        ax_bar.set_title(panel_letters[1], fontsize=10, fontweight='bold', pad=10)
         ax_bar.tick_params(axis='both', labelsize=7)
         ax_bar.grid(axis='x', alpha=0.3, linestyle='--', linewidth=0.5)
         handles_b, labels_b = ax_bar.get_legend_handles_labels()
         if handles_b:
             ax_bar.legend(handles_b, labels_b, loc='lower right', fontsize=5,
-                          title='Profession', title_fontsize=6,
+                          title=bar_legend_title or 'Profession', title_fontsize=6,
                           framealpha=0.95, edgecolor='black', ncol=1)
 
         fig.suptitle(
@@ -5720,25 +5742,27 @@ def create_stakeholder_map_with_bar_chart(cities_gdf, boundary_gdf, workshop_pro
                 color = profession_colors[prof]
                 values = data_matrix[prof].values
                 if values.sum() > 0:
-                    ax_bar.barh(city_list, values, left=left,
+                    ax_bar.barh([(bar_labels or {}).get(c, c) for c in city_list], values, left=left,
                                color=color, edgecolor='white', linewidth=0.5, label=prof)
                     left += values
 
         ax_bar.set_xlabel('Number of Workshop Attendees', fontsize=8)
-        ax_bar.set_title('B', fontsize=10, fontweight='bold', pad=10)
+        ax_bar.set_title(panel_letters[1], fontsize=10, fontweight='bold', pad=10)
         ax_bar.tick_params(axis='both', labelsize=6)
         ax_bar.grid(axis='x', alpha=0.3, linestyle='--', linewidth=0.5)
 
         handles, labels = ax_bar.get_legend_handles_labels()
         ax_bar.legend(handles, labels, loc='lower right',
                      fontsize=5.5, frameon=True, facecolor='white', edgecolor='black',
-                     title='Profession/Discipline (Mix)', title_fontsize=6,
+                     title=bar_legend_title or 'Profession/Discipline (Mix)', title_fontsize=6,
                      framealpha=0.95, ncol=1)
 
         for i, city in enumerate(city_list):
             total = workshop_cities[city]
-            ax_bar.text(total + 0.5, i, f'{total}',
+            ax_bar.text(total + 0.5, i, _bar_end(total, city),
                        va='center', ha='left', fontsize=5.5, fontweight='bold')
+        if registered_by is not None:              # room for the longer labels
+            ax_bar.set_xlim(right=ax_bar.get_xlim()[1] * 1.12)
 
         fig.suptitle(f'Stakeholder Distribution & Composition ({config.PROJECT_STUDY_YEAR})',
                     fontsize=11, fontweight='bold', y=0.98)
