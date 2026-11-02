@@ -14495,6 +14495,10 @@ def create_cluster_event_frequency_chart(
     output_path=None,
     figsize=None,
     dpi: int = 300,
+    cluster_fmt: str = 'C{:02d}',
+    ax=None,
+    show_legend: bool = True,
+    title=None,
 ):
     """
     Grouped barplot: number of ERA5 persistent events per city, grouped by
@@ -14514,6 +14518,14 @@ def create_cluster_event_frequency_chart(
     figsize : tuple or None
         Auto-scaled from number of cities if None.
     dpi : int
+    cluster_fmt : str
+        Cluster code under each city name, formatted with the cluster number.
+    ax : matplotlib.axes.Axes or None
+        Draw into this panel of an existing figure (its layout is the caller's).
+    show_legend : bool
+        False leaves out the tier legend (e.g. when the caller draws one for several panels).
+    title : str or None
+        The panel title; None gives the default two-line title.
 
     Returns
     -------
@@ -14550,7 +14562,11 @@ def create_cluster_event_frequency_chart(
     if figsize is None:
         figsize = (max(8, n * 0.45), 5)
 
-    fig, ax = _plt.subplots(figsize=figsize)
+    own = ax is None
+    if own:
+        fig, ax = _plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
 
     bar_colors = [_TIER_COLORS.get(t, '#cccccc') for t in df_plot['tier']]
     bars = ax.bar(range(n), df_plot['n_events'], color=bar_colors,
@@ -14565,7 +14581,7 @@ def create_cluster_event_frequency_chart(
                     fontsize=6.5, color='#333333')
 
     # ── x-axis city labels with cluster numbers ───────────────────────────────
-    x_labels = [f"{r['city']}\n[C{r['cluster']:02d}]" for _, r in df_plot.iterrows()]
+    x_labels = [f"{r['city']}\n[{cluster_fmt.format(r['cluster'])}]" for _, r in df_plot.iterrows()]
     ax.set_xticks(range(n))
     ax.set_xticklabels(x_labels, fontsize=7, rotation=45, ha='right')
 
@@ -14578,12 +14594,14 @@ def create_cluster_event_frequency_chart(
 
     # ── legend ───────────────────────────────────────────────────────────────
     patches = [mpatches.Patch(color=_TIER_COLORS[t], label=t) for t in _TIER_ORDER]
-    ax.legend(handles=patches, title='Selected event tier',
-              loc='upper right', fontsize=8, title_fontsize=8)
+    if show_legend:
+        ax.legend(handles=patches, title='Selected event tier',
+                  loc='upper right', fontsize=8, title_fontsize=8)
 
     ax.set_ylabel('ERA5 persistent hot events (count)', fontsize=9)
     ax.set_xlabel('City [Cluster]', fontsize=9)
     ax.set_title(
+        title if title is not None else
         f'ERA5 Persistent Hot-Event Count per City — {period.capitalize()}\n'
         'Bar colour = tier of selected SEVIRI event  |  Label = selected duration (days)',
         fontsize=9,
@@ -14591,7 +14609,8 @@ def create_cluster_event_frequency_chart(
     ax.yaxis.set_major_locator(_plt.MaxNLocator(integer=True))
     ax.grid(axis='y', linestyle=':', linewidth=0.5, alpha=0.5)
 
-    fig.tight_layout()
+    if own:
+        fig.tight_layout()
 
     if output_path is not None:
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)
