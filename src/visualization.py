@@ -8798,6 +8798,101 @@ def create_gi_star_distribution_plots(city_name, output_dir, skip_if_exists=True
     }
 
 
+def create_gistar_distribution(city, z_grids, periods=('day', 'night')):
+    """
+    Gi★ Z-score distribution of one city, day and night side by side (NB05 §11b).
+
+    Each panel: density histogram of the city's Gi★ z-scores against N(0,1), the
+    ±1.96 and ±2.58 thresholds, the shaded hot and cold tails, and a statistics
+    box (mean, std, skew, kurtosis, hot / cold pixels at 95 % and 99 %).
+
+    Parameters
+    ----------
+    city : str
+        City name, for the title.
+    z_grids : dict
+        ``{period: z_grid}``, each a 2-D array of Gi★ z-scores (NaN outside the
+        grid), or None when the period has no data.
+    periods : tuple
+        Panel order.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Not saved and not shown: the caller does both.
+    """
+    from scipy import stats as _sp_stats
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
+    fig.suptitle(f'{city}: Gi★ Z-Score Distributions',
+                 fontsize=13, fontweight='bold', y=0.98)
+
+    for idx, (ax, period) in enumerate(zip(axes, periods)):
+        z_grid = z_grids.get(period)
+        if z_grid is None:
+            ax.text(0.5, 0.5, 'No Data', ha='center', va='center',
+                    fontsize=13, transform=ax.transAxes)
+            ax.set_title(period.capitalize(), fontsize=12, fontweight='bold')
+            continue
+        z_scores = z_grid[np.isfinite(z_grid)].ravel()
+        if not len(z_scores): ax.axis('off'); continue
+
+        n        = len(z_scores)
+        mean_z   = float(np.mean(z_scores))
+        std_z    = float(np.std(z_scores))
+        skewness = float(_sp_stats.skew(z_scores))
+        kurtosis = float(_sp_stats.kurtosis(z_scores))
+        hot_95   = int(np.sum(z_scores >  1.96)); hot_99  = int(np.sum(z_scores >  2.58))
+        cold_95  = int(np.sum(z_scores < -1.96)); cold_99 = int(np.sum(z_scores < -2.58))
+
+        # Density histogram
+        ax.hist(z_scores, bins=50, density=True,
+                alpha=0.65, color='#C8D8E8', edgecolor='#4a4a4a',
+                linewidth=0.5, label='Observed distribution')
+
+        # Theoretical N(0,1) curve
+        x_norm = np.linspace(z_scores.min(), z_scores.max(), 300)
+        ax.plot(x_norm, _sp_stats.norm.pdf(x_norm, 0, 1),
+                'k--', lw=2, label='N(0,1) Theoretical')
+
+        # Threshold lines ±1.96 and ±2.58
+        ax.axvline( 1.96, color='#FF8C00', ls='--', lw=2.0, alpha=0.95, label='±1.96 (95% CI)')
+        ax.axvline(-1.96, color='#FF8C00', ls='--', lw=2.0, alpha=0.95)
+        ax.axvline( 2.58, color='#CC0000', ls=':',  lw=2.0, alpha=0.95, label='±2.58 (99% CI)')
+        ax.axvline(-2.58, color='#0000CC', ls=':',  lw=2.0, alpha=0.95)
+
+        # Shaded tails
+        ax.axvspan( 1.96, float(z_scores.max()), alpha=0.22, color='#FF4500', label='Hot spots (Z > 1.96)')
+        ax.axvspan(float(z_scores.min()), -1.96, alpha=0.22, color='#1565C0', label='Cold spots (Z < −1.96)')
+
+        ax.set_xlabel('Gi★ Z-Score', fontsize=11)
+        if idx == 0:
+            ax.set_ylabel('Probability Density', fontsize=11)
+        ax.set_title(period.capitalize(), fontsize=12, fontweight='bold', pad=8)
+        ax.grid(True, alpha=0.25, ls='--')
+        ax.legend(loc='upper right', fontsize=7.5)
+
+        stats_txt = (
+            f'Mean:  {mean_z:.3f}\n'
+            f'Std:   {std_z:.3f}\n'
+            f'Skew:  {skewness:.3f}\n'
+            f'Kurt:  {kurtosis:.3f}\n\n'
+            f'Hot spots:\n'
+            f'  Z > 1.96 : {100*hot_95/n:.1f}% ({hot_95:,})\n'
+            f'  Z > 2.58 : {100*hot_99/n:.1f}% ({hot_99:,})\n\n'
+            f'Cold spots:\n'
+            f'  Z < −1.96 : {100*cold_95/n:.1f}% ({cold_95:,})\n'
+            f'  Z < −2.58 : {100*cold_99/n:.1f}% ({cold_99:,})'
+        )
+        ax.text(0.02, 0.98, stats_txt, transform=ax.transAxes,
+                fontsize=7.5, va='top', ha='left',
+                bbox=dict(boxstyle='round,pad=0.4', facecolor='white',
+                          alpha=0.88, edgecolor='gray'))
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    return fig
+
+
 def create_hotspot_area_by_contour_plots(hotspot_polygons_enriched, landscape_gdf_4326,
                                          output_dir: Path, skip_if_exists: bool = True,
                                          cities_per_page: int = 10):
