@@ -97,9 +97,45 @@ def build_table5(results_05: Path, spots: pd.DataFrame = None,
 _S6_COMBOS = [('hot', 'day', 'Hot · Day'), ('hot', 'night', 'Hot · Night'),
               ('cold', 'day', 'Cold · Day'), ('cold', 'night', 'Cold · Night')]
 _S6_SUB = ['n', 'L50', 'L75', 'L90', 'BH']
+_S6_POP = ['Pop L50', 'Pop L75', 'Pop L90']
+_S6_COLS = {'L50': 'area_l50_km2', 'L75': 'area_l75_km2', 'L90': 'area_l90_km2',
+            'Pop L50': 'population_persons', 'Pop L75': 'pop_l75_persons', 'Pop L90': 'pop_l90_persons'}
 
 
-def build_supp6(results_05: Path) -> pd.DataFrame:
+def _supp6_from_spots(spots, city_cluster, cluster_fmt):
+    """One row per study city under its cluster row: n spots, the L50 / L75 / L90 areas and the
+    residents within them summed over the city's spots; a population is blank only where its
+    zone is; BH = the city-period-type group survives BH-FDR. Cluster rows sum their cities."""
+    def cells(sub):
+        d = {}
+        for spot, period, grp in _S6_COMBOS:
+            g = sub[(sub['spot_type'] == spot) & (sub['period'] == period)]
+            d[f'{grp}|n'] = len(g) or ''
+            for lvl in ('L50', 'L75', 'L90'):
+                a = g[_S6_COLS[lvl]].sum(min_count=1)
+                d[f'{grp}|{lvl}'] = round(float(a), 2) if pd.notna(a) and a else ''
+                p = g[_S6_COLS[f'Pop {lvl}']].sum(min_count=1)
+                d[f'{grp}|Pop {lvl}'] = int(round(p)) if d[f'{grp}|{lvl}'] != '' and pd.notna(p) else ''
+            d[f'{grp}|BH'] = 'Yes' if g['bh_significant'].any() else ''
+        return d
+
+    rows = []
+    for cl in sorted(set(city_cluster.values())):
+        cities = sorted(c for c, k in city_cluster.items() if k == cl)
+        rows.append({'Cluster/Entity': f'{cluster_fmt.format(cl)} (n={len(cities)})', '_group': True,
+                     **cells(spots[spots['city'].isin(cities)])})
+        rows += [{'Cluster/Entity': c, '_group': False, **cells(spots[spots['city'] == c])}
+                 for c in cities]
+    return pd.DataFrame(rows, columns=['Cluster/Entity', '_group']
+                        + [f'{g}|{s}' for _, _, g in _S6_COMBOS for s in _S6_SUB + _S6_POP])
+
+
+def build_supp6(results_05: Path, spots: pd.DataFrame = None, city_cluster: dict = None,
+                cluster_fmt: str = 'Cluster {}') -> pd.DataFrame:
+    """spots, when given (the published `spots` layer) with city_cluster (every study city ->
+    its cluster), replaces NB05's summary and adds the population within each zone."""
+    if spots is not None:
+        return _supp6_from_spots(spots, city_cluster, cluster_fmt)
     sc = pd.read_csv(results_05 / 'spot_comprehensive_summary.csv')
 
     def blank():
@@ -156,14 +192,16 @@ def _bkm(m):
     return f'{m/1000:g}km'
 
 
-def build_supp7(results_05: Path):
+def build_supp7(results_05: Path, hs: pd.DataFrame = None):
     # Read the published layer, not a notebook CSV. The hit rates are on the
     # 105-participant cohort (94 points, 55 hot / 39 cold) and are computed from the
     # released, 3-decimal-degree coordinates, so this table matches the dataset exactly.
-    import geopandas as _gpd
-    _pkg = (results_05 / 'surface_thermal_anomaly_stakeholder_composite'
-            / 'surface_thermal_anomaly_stakeholder_composite.gpkg')
-    hs = _gpd.read_file(_pkg, layer='hitrate_sensitivity')
+    # hs, when given, is that layer already read.
+    if hs is None:
+        import geopandas as _gpd
+        _pkg = (results_05 / 'surface_thermal_anomaly_stakeholder_composite'
+                / 'surface_thermal_anomaly_stakeholder_composite.gpkg')
+        hs = _gpd.read_file(_pkg, layer='hitrate_sensitivity')
     buffers = sorted(hs['buffer_m'].unique())
 
     def spot_rows(sub, entity, is_group=False):
@@ -173,7 +211,8 @@ def build_supp7(results_05: Path):
                 g = sub[(sub['spot_type'] == spot) & (sub['period'] == period)]
                 if g.empty:
                     continue
-                npts = int(g.groupby('buffer_m')['n_total'].first().iloc[0])
+                # the points of every city in the group, at the smallest buffer (one row each)
+                npts = int(g[g['buffer_m'] == buffers[0]]['n_total'].sum())
                 d = {'Cluster/Entity': entity, '_group': is_group,
                      'Spot': spot.capitalize(), 'Period': period.capitalize(),
                      'No. of points': npts}
@@ -262,7 +301,7 @@ def build_supp8_and_table7(results_06: Path):
 # XLSX writers (styled, manuscript-like)
 # ═══════════════════════════════════════════════════════════════════════════
 def _grouped_xlsx(df, path, id_cols, groups, subs, title, footnote='',
-                  group_mask_col='_group', pct=False):
+                  group_mask_col='_group', pct=False, col_width=7.5):
     """Two-row banded header (merged group over its sub-columns) + optional group shading."""
     import xlsxwriter
     show = df.drop(columns=[group_mask_col], errors='ignore')
@@ -306,7 +345,7 @@ def _grouped_xlsx(df, path, id_cols, groups, subs, title, footnote='',
             else:
                 ws.write(rr, cidx, v, f_grow_c if is_g else f_val)
     ws.set_column(0, 0, 22)
-    ws.set_column(1, ncol - 1, 7.5)
+    ws.set_column(1, ncol - 1, col_width)
     if footnote:
         ws.write(r0 + 2 + len(show) + 1, 0, footnote, f_foot)
     ws.freeze_panes(r0 + 2, len(id_cols))

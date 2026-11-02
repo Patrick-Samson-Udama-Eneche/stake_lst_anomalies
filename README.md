@@ -412,8 +412,7 @@ Outputs, under `Results/manuscript_outputs/`:
 Results/manuscript_outputs/
 ├── main_figures/            Fig_01_study_area … Fig_15_association_effect_sizes        [.pdf/.svg]
 ├── supplementary_figures/   S1_population_trajectories/, S2_city_delineation_maps/, … one folder per item
-├── tables/                  Table_01 … Table_05, Supp_Table_S1 … S8                    [.csv/.xlsx]
-├── appendices/              Appendix_1_PLT_reference                                   [.csv/.xlsx]
+├── tables/                  Table_01 … Table_05, Supp_Table_S1 … S8    [.csv; .xlsx except S3, S4, S6, as v3.0]
 ├── captions.md · number_map.csv · figure_print_sizes.csv · _data_sources.csv
 └── _preview/INDEX.md        monitoring: v3.0 against new previews, data sources, checks, sizes
 ```
