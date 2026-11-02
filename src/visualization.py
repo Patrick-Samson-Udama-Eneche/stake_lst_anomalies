@@ -14629,6 +14629,7 @@ def create_seviri_era5_scatter(
     output_stem: str = 'SEVIRI_vs_ERA5_scatter_combined',
     figsize=(11.69, 5.85),
     dpi: int = 300,
+    tier_title: str = 'MODIS tier',
 ):
     """
     Combined day + night scatter: SEVIRI LST vs ERA5-Land LST (event window).
@@ -14647,6 +14648,8 @@ def create_seviri_era5_scatter(
     output_stem : str
     figsize : tuple  — half-A4 landscape by default
     dpi : int
+    tier_title : str
+        Title of the tier legend.
 
     Returns
     -------
@@ -14731,7 +14734,7 @@ def create_seviri_era5_scatter(
         for t in tier_order
     ]
     if tier_handles:
-        fig.legend(handles=tier_handles, title='MODIS tier',
+        fig.legend(handles=tier_handles, title=tier_title,
                    fontsize=7, title_fontsize=7.5,
                    loc='lower center', ncol=len(tier_handles),
                    bbox_to_anchor=(0.5, -0.01))
@@ -14764,6 +14767,7 @@ def create_era5_modis_hexbin(
     dpi: int = 300,
     gridsize: int = 35,
     show_inline: bool = False,
+    bias_label: str = 'Bias',
 ):
     """
     Two-panel hexbin scatter plot comparing ERA5-Land vs MODIS daily LST.
@@ -14795,6 +14799,8 @@ def create_era5_modis_hexbin(
         Number of hexagons along each axis (higher = finer grid).
     show_inline : bool
         If True, call plt.show(); else close after saving.
+    bias_label : str
+        Label of the bias line in the metric box, e.g. 'Bias (ERA5-Land − MODIS)'.
 
     Returns
     -------
@@ -14868,7 +14874,7 @@ def create_era5_modis_hexbin(
         _fmt = lambda v: f'{v:.3f}' if _np.isfinite(v) else 'N/A'
         ann  = (f"r = {_fmt(r)}\n"
                 f"r² = {_fmt(r2)}\n"
-                f"Bias = {bias:+.2f}°C\n"
+                f"{bias_label} = {bias:+.2f}°C\n"
                 f"RMSE = {_fmt(rmse)}°C\n"
                 f"n = {n:,}")
         ax.text(0.03, 0.97, ann, transform=ax.transAxes,
