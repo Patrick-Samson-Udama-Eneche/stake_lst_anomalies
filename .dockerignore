@@ -27,6 +27,7 @@ data/
 Results/
 private/
 _to_delete/
+Notebook/cache/
 
 # Secrets (mounted as volumes)
 secrets/*.json

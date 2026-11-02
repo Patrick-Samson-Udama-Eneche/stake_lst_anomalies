@@ -65,11 +65,13 @@ desktop.ini
 data/outputs/
 
 # New results directory (revised methodology outputs — large, re-generatable)
-Results/
+Results/*
+!Results/manuscript_outputs/
+Results/manuscript_outputs/REBUILD_REPORT.md
+Results/manuscript_outputs/SCS_numbers_v1.0.1.*
 
 # Documentation (manuscripts, security setup, private project notes)
 docs/*
-!docs/scs_rebuild/
 
 # Large OSM data files (too big for GitHub, re-downloadable from OpenStreetMap)
 data/inputs/osm_nigeria/*.osm.pbf

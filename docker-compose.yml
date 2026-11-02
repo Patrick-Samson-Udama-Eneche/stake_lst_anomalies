@@ -1,6 +1,7 @@
 # docker compose up lab              -> Jupyter Lab on http://localhost:8888
-# docker compose run --rm reproduce  -> R1: rebuild the manuscript figures and tables
-#                                       from the mounted Results/ caches
+# docker compose run --rm reproduce  -> R1: rebuild the manuscript figures and tables from the
+#                                       mounted Results/ caches; the executed notebook, with its
+#                                       check count, lands in Results/_provenance/
 services:
   lab:
     build: .
@@ -20,4 +21,4 @@ services:
     volumes:
       - ./data:/app/data
       - ./Results:/app/Results
-    command: python run_all.py --scope manuscript
+    command: python run_all.py --scope manuscript --output-dir Results/_provenance

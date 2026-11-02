@@ -32,7 +32,6 @@ COPY src/ src/
 COPY scripts/ scripts/
 COPY Notebook/ Notebook/
 COPY tests/ tests/
-COPY docs/ docs/
 
 RUN mkdir -p data Results secrets
 

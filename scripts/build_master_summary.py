@@ -473,7 +473,7 @@ def build_city_year_summary(ref, spots, study_year=STUDY_YEAR):
     # validation_tier and bh_any are derived here. They used to be read from NB05's
     # master_city_composite.csv, which no notebook cell writes any more; both rules were
     # checked against that file for the 55 cities it holds, with zero differences
-    # (docs/scs_rebuild/WORKLOG.md, 2026-10-29). The file has no row for Ikare, the city with
+    # (2026-10-29). The file has no row for Ikare, the city with
     # no spots, so Ikare's values come from the same rules here as everyone else's.
     # validation_tier: the day and night selected-event tiers joined day-first, e.g.
     # 'EXCELLENT/GOOD'. A pair, not a ranked grade.

@@ -1,4 +1,4 @@
-# Dynamics of Urban Surface Warming in Nigerian Cities: A Multi-source, Landscape-oriented, Stakeholder-informed Analysis
+# Urban surface thermal anomalies in Nigeria: A multi-source, landscape-oriented and stakeholder-informed analysis
 
 ## Overview
 
@@ -171,6 +171,13 @@ docker compose up lab                                    # Jupyter Lab on http:/
 docker compose run --rm reproduce                        # rebuild the manuscript outputs from Results/
 ```
 
+The rebuild reads only `data/inputs/` and `Results/01_…` to `Results/06_…`. It writes the executed
+notebook to `Results/_provenance/`, where its last output gives the number of checks passed.
+
+Docker cannot read files that a cloud service keeps online only, so I run it from a local copy of the
+project rather than a synced folder. The image has no Arial, so figures drawn in it use DejaVu Sans;
+the values do not change.
+
 ---
 
 ## Notebook Pipeline
@@ -300,7 +307,7 @@ stake_lst_modelling/
 │
 ├── scripts/                   # Re-runnable pipeline scripts (ship with the repository)
 │   ├── build_master_summary.py   # Assembles the published composite dataset from cached Results/
-│   └── qa_master_summary.py      # 60-check QA suite over the built dataset
+│   └── qa_master_summary.py      # 89-check QA suite over the built dataset
 │
 ├── src/                       # Reusable Python modules
 │   ├── aoi_utils.py           # AOI processing (buffers, boundaries, statistics)
@@ -311,6 +318,7 @@ stake_lst_modelling/
 │   ├── decision_tree_utils.py # Heat event decision tree logic
 │   ├── seviri_processing_utils.py  # EUMETSAT SEVIRI download and processing
 │   ├── modelling_utils.py     # Hierarchical regression, panel charts (NB06)
+│   ├── pub_figures.py         # Main-figure drawing code and the rules of Table 3 (NB07)
 │   ├── pub_hotspot_tables.py  # Manuscript §3.3–§3.4 table builders (csv + styled xlsx)
 │   ├── temporal_panels.py     # Annual/monthly trend panel renderer (NB03 split)
 │   └── visualization.py       # All plotting functions (~8,000 lines)
@@ -322,7 +330,7 @@ stake_lst_modelling/
 │   │   └── osm_nigeria/            # Pre-downloaded OSM data
 │   └── outputs/                    # Legacy outputs (kept for reference)
 │
-├── Results/                   # Current pipeline outputs (git-ignored; published via Zenodo)
+├── Results/                   # Pipeline outputs: manuscript_outputs/ ships with the repository, the rest is git-ignored
 │   ├── 01_aoi_delineation/         # City AOI boundaries, zones, population, cluster tables
 │   ├── 02_stakeholder_analysis/    # Survey maps, perception charts, stakeholder figures
 │   ├── 03_… / 04_… / 06_…          # Temporal, daily and modelling outputs
@@ -333,15 +341,9 @@ stake_lst_modelling/
 │   │       └── _build/             # reports, README, CHANGELOG, checksums (not archived)
 │   └── manuscript_outputs/         # Assembled manuscript figures/tables/appendices (see above)
 │
-├── secrets/                   # API credentials (git-ignored)
-│   ├── gee_service_account.json
-│   └── eumetsat_credentials.json
-│
-└── docs/                      # Documentation
-    ├── PROJECT_AUDIT_REPORT.md      # Full project audit and dependency analysis
-    ├── PROGRESS_TRACKER.md          # Current status
-    ├── execution_strategy.md        # Setup reference
-    └── ...
+└── secrets/                   # API credentials (git-ignored)
+    ├── gee_service_account.json
+    └── eumetsat_credentials.json
 ```
 
 ---
@@ -390,8 +392,12 @@ manuscript order. I take the values from the published dataset (v1.0.1,
 `Results/05_hotspot_analysis/surface_thermal_anomaly_stakeholder_composite/`), and from the cached
 results of NB01–NB06 only where the dataset holds no equivalent, checking them against the dataset
 wherever the two overlap. The notebook draws with the functions the analysis notebooks use
-(`src/visualization.py`, `src/temporal_panels.py`, `src/pub_hotspot_tables.py`) and makes no GEE,
+(`src/visualization.py`, `src/temporal_panels.py`, `src/pub_figures.py`,
+`src/pub_hotspot_tables.py`) and makes no GEE,
 EUMETSAT or OSM call.
+
+The finished outputs ship with this repository (about 210 MB). To produce anything else, or to rebuild
+them, run the pipeline: the caches of NB01–NB06 under `Results/` are not in git.
 
 Run it after NB01–NB06 (or on their cached `Results/`):
 

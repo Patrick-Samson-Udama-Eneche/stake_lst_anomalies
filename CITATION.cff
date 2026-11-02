@@ -1,8 +1,6 @@
 cff-version: 1.2.0
 title: >-
-  DRAFT: Surface Thermal Warming Anomalies of Nigerian Cities and the Influence of their Physiographic Landscape Characters:
-  A Stakeholder-inclusive Geospatial Analysis.
-
+  Urban surface thermal anomalies in Nigeria: A multi-source, landscape-oriented and stakeholder-informed analysis
 message: >-
   If you use this software or data, please cite it using the metadata
   from this file.
@@ -10,9 +8,21 @@ type: software
 authors:
   - family-names: Eneche
     given-names: Patrick Samson Udama
-    affiliation: University of Twente, The Netherlands & Prince Abubakar Audu Univeristy, Nigeria
+    affiliation: University of Twente, The Netherlands & Prince Abubakar Audu University, Nigeria
     orcid: https://orcid.org/0000-0002-0504-9677
-repository-code: https://github.com/EnechePSU/stake_lst_modelling
+  - family-names: Zeng
+    given-names: Yijian
+    affiliation: University of Twente
+    orcid: https://orcid.org/0000-0002-2166-5314
+  - family-names: Atun
+    given-names: Funda
+    affiliation: University of Twente
+    orcid: https://orcid.org/0000-0002-6222-8049
+  - family-names: Pfeffer
+    given-names: Karin
+    affiliation: University of Twente
+    orcid: https://orcid.org/0000-0002-6080-1323
+repository-code: https://github.com/Patrick-Samson-Udama-Eneche/stake_lst_modelling
 license: CC-BY-4.0
 version: "1.0.0"
 date-released: "2026-02-15"
