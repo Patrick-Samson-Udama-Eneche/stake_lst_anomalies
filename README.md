@@ -381,27 +381,46 @@ The `CITIES` list is populated dynamically by scanning Notebook 04 SEVIRI output
 
 ### Manuscript Outputs (`Notebook/07_publication_outputs.ipynb`)
 
-The manuscript-assembly notebook gathers every figure, supplementary figure, table and appendix
-**in the order they appear in the manuscript**, re-rendering them from cached `Results/`. Outputs
-are written under `Results/manuscript_outputs/`:
+Notebook 07 builds every figure and table of the SCS article and of its supplementary material, in
+manuscript order. Its values come from the published dataset (v1.0.1,
+`Results/05_hotspot_analysis/surface_thermal_anomaly_stakeholder_composite/`); where the dataset
+holds no equivalent, from the cached results of NB01–NB06, each such read permitted per item in the
+work plan, logged, and asserted against the dataset wherever the two overlap. It draws with the same
+functions the analysis notebooks use (`src/visualization.py`, `src/temporal_panels.py`,
+`src/pub_hotspot_tables.py`) and makes no GEE, EUMETSAT or OSM call.
+
+Run it after NB01–NB06 (or on their cached `Results/`):
+
+```powershell
+python run_all.py --scope manuscript          # or: python scripts/build_scs_outputs.py
+# or open Notebook/07_publication_outputs.ipynb and Run All
+```
+
+- **Cell order.** Setup, then the shared-inputs cell; after that any item cell runs on its own
+  (Fig. 6 after Fig. 5). The notebook opens with a table of contents linking every item.
+- **Checks.** Every value shown is asserted against the dataset (`check()`); every read passes a
+  source guard (`read_source()`), and a forbidden source stops the run.
+- **Supplementary sets** show one example per level (national, one cluster, one city); their second
+  cell writes the whole set.
+- **Skip logic.** A figure set already written by the current drawing code from the current inputs
+  (a stamp in its folder) is not redrawn, nor is a preview newer than its files; the checks always
+  run. Set `REBUILD = True` in Setup to redraw everything, e.g. after re-running NB01–NB06.
+
+Outputs, under `Results/manuscript_outputs/`:
 
 ```
 Results/manuscript_outputs/
-├── main_figures/          Figure_1 (study area) … Figure_5 (stakeholder radial)   [.pdf/.svg]
-├── supplementary_figures/
-│   ├── 1.1_city_trends/     Supp Fig 1.1.1–1.1.67  (per-city population trajectories)
-│   ├── 1.2_cluster_trends/  Supp Fig 1.2.1–1.2.16  (per-cluster population trends)
-│   ├── 2_city_aoi_maps/     Supp Fig 2.1–2.56      (per-city three-zone AOI maps)
-│   └── 3_stakeholder_maps/  Supp Fig 3.1 / 3.2     (cluster- / city-level stakeholder maps)
-├── tables/                Table_2 (PLT composition), Supp_Table_1 (CR+UC distribution)  [.csv/.xlsx]
-└── appendices/            Appendix_1 (Cluster25 reference palette)                        [.csv/.xlsx]
+├── main_figures/            Fig_01_study_area … Fig_15_association_effect_sizes        [.pdf/.svg]
+├── supplementary_figures/   S1_population_trajectories/, S2_city_delineation_maps/, … one folder per item
+├── tables/                  Table_01 … Table_05, Supp_Table_S1 … S8                    [.csv/.xlsx]
+├── appendices/              Appendix_1_PLT_reference                                   [.csv/.xlsx]
+├── captions.md · number_map.csv · figure_print_sizes.csv · _data_sources.csv
+└── _preview/INDEX.md        monitoring: v3.0 against new previews, data sources, checks, sizes
 ```
 
-The supplementary set documents the study's two nested levels — **cluster** and **city**. The
-**National** aggregation layer belongs to the Results section and is assembled in §2 of the same
-notebook. Figures are sized to the manuscript; vector formats (`.pdf`, `.svg`) are emitted by
-default (set the env var `LST_EXPORT_MODE=all` to also produce `.png`). *Figure 3* and *Figure 6*
-are Draw.io schematics and are not reproduced by the notebook.
+Fig. 2 (the workflow) and the graphical abstract are drawn by the author outside the notebook. The
+work plan is `docs/scs_rebuild/SCS_Figures_Tables_WorkPlan.md` and the running log
+`docs/scs_rebuild/WORKLOG.md`.
 
 ---
 
