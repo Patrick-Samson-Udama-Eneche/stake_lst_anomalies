@@ -617,7 +617,40 @@ def load_stakeholder_datasets(config):
     return boundary_gdf, cities_df, survey_df
 
 
-def export_stakeholder_outputs(stakeholder_map, cities_gdf, workshop_prof, 
+def stakeholder_counts(survey, wup, clusters, config):
+    """The counts behind the stakeholder maps, from load_stakeholder_datasets' survey and WUP table.
+
+    Registrations are counted by registered city; attendance and profession by workshop city, for
+    workshops in a WUP city. clusters maps a study city to its cluster.
+
+    Returns registered per city, the workshop rows, attendance per city, professions per city,
+    professions per cluster, registered per cluster, and the WUP cities with those counts.
+    """
+    from shapely.geometry import Point
+
+    registered = survey.groupby("matched_city_x")["pid"].nunique()
+    workshop = survey[(survey["survey status"] == "Yes")
+                      & survey["matched_city_y"].isin(set(wup["Urban Agglomeration"].str.strip()))]
+    attended = workshop.groupby("matched_city_y")["pid"].nunique()
+    city_prof = (workshop.groupby(["matched_city_y", "45_disc_prof"])["pid"].nunique().reset_index()
+                 .rename(columns={"matched_city_y": "city", "45_disc_prof": "profession", "pid": "count"}))
+    cluster_prof = (workshop.assign(Cluster25=workshop["matched_city_y"].map(clusters))
+                    .groupby(["Cluster25", "45_disc_prof"])["pid"].nunique().reset_index()
+                    .rename(columns={"45_disc_prof": "profession", "pid": "count"}))
+    cluster_registered = registered.groupby(registered.index.map(clusters)).sum()
+    g = wup[["Urban Agglomeration", "Latitude", "Longitude", str(config.PROJECT_STUDY_YEAR)]].copy()
+    g.columns = ["city", "latitude", "longitude", "population"]
+    g = g.dropna(subset=["latitude", "longitude"])
+    cities = (gpd.GeoDataFrame(g, geometry=[Point(xy) for xy in zip(g.longitude, g.latitude)], crs=config.WGS84)
+              .merge(registered.rename("registered_count"), left_on="city", right_index=True, how="left")
+              .merge(attended.rename("total_attendees"), left_on="city", right_index=True, how="left"))
+    cities[["registered_count", "total_attendees"]] = (cities[["registered_count", "total_attendees"]]
+                                                       .fillna(0).astype(int))
+    cities["population_2024"] = cities["population"]
+    return registered, workshop, attended, city_prof, cluster_prof, cluster_registered, cities
+
+
+def export_stakeholder_outputs(stakeholder_map, cities_gdf, workshop_prof,
                                output_dir, study_year, figure_dpi=300, donut_fig=None):
     """
     Export stakeholder analysis outputs (maps and data tables).
