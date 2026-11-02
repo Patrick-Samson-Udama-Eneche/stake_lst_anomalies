@@ -3003,6 +3003,9 @@ def main(argv=None) -> int:
         for f, (o, n) in r["md5"].items():
             print(f"  {f:55} {o}  ->  {n}{'' if o != n else '  (unchanged)'}")
         return 0
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import env_report                          # record the environment of this build
+    env_report.write()
     rep = build_dataset(out_dir=a.out, build_date=a.build_date, staging_dir=a.staging,
                         compare_only=a.compare_only, keep_staging=a.keep_staging,
                         with_csv=a.with_csv, with_geojson=a.with_geojson)

@@ -1,0 +1,23 @@
+# docker compose up lab              -> Jupyter Lab on http://localhost:8888
+# docker compose run --rm reproduce  -> R1: rebuild the manuscript figures and tables
+#                                       from the mounted Results/ caches
+services:
+  lab:
+    build: .
+    image: stake-lst-modelling
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./data:/app/data
+      - ./Results:/app/Results
+      - ./secrets:/app/secrets
+      - ./Notebook:/app/Notebook
+    command: jupyter lab --ip=0.0.0.0 --no-browser --allow-root --notebook-dir=/app
+
+  reproduce:
+    build: .
+    image: stake-lst-modelling
+    volumes:
+      - ./data:/app/data
+      - ./Results:/app/Results
+    command: python run_all.py --scope manuscript

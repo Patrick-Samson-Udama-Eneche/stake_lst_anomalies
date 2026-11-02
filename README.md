@@ -57,38 +57,44 @@ python run_all.py --cities "Lag0s" "Abuja"
 
 ### 1. Initial Setup
 
-**Prerequisites:** Python **3.11 or 3.12**, Git, and (for the GEE/EUMETSAT notebooks) internet access.
+**Prerequisites:** Python **3.12.10**, Git, and (for the GEE/EUMETSAT notebooks) internet access.
 
-Create and activate a virtual environment named **`geovenv`** (this exact name is what the tooling
-expects), then install the pinned dependencies:
+I produced the results in an environment named **`geovenv`** with Python 3.12.10. `requirements.lock`
+holds its exact package versions for Windows, Linux and macOS; `requirements.txt` is the loose list
+for new scenarios. Use any one of the four routes below; all give the same versions.
 
 ```powershell
-# 1. Clone the repository
 git clone <repo-url>
 cd stake_lst_modelling
 
-# 2. Create the virtual environment (uses your Python 3.11/3.12 interpreter)
-python -m venv geovenv
+# Route 1 — uv (fastest)
+uv venv --python 3.12.10 geovenv
+uv pip sync requirements.lock --python geovenv
 
-# 3. Activate it
-.\geovenv\Scripts\Activate.ps1     # Windows PowerShell
-# .\geovenv\Scripts\activate.bat   # Windows cmd
-# source geovenv/bin/activate      # Linux / macOS
+# Route 2 — pip
+py -3.12 -m venv geovenv                 # Linux / macOS: python3.12 -m venv geovenv
+.\geovenv\Scripts\python.exe -m pip install -r requirements.lock
 
-# 4. Upgrade pip and install all dependencies (incl. geopandas, osmnx, xlsxwriter, earthengine-api)
-python -m pip install --upgrade pip
-pip install -r requirements.txt
+# Route 3 — conda-forge (if the pip GDAL wheels fail on your machine)
+conda env create -f environment.yml      # then: conda activate stake-lst-modelling
 
-# 5. Register the environment as a Jupyter kernel named "python3"
-#    (run_all.py and the notebooks execute against this kernel)
+# Route 4 — Docker (no local install; see "5. Docker")
+docker build -t stake-lst-modelling .
+```
+
+Then activate the environment (`.\geovenv\Scripts\Activate.ps1`; Linux / macOS:
+`source geovenv/bin/activate`) and register it as the Jupyter kernel `python3`, which `run_all.py`
+and the notebooks use:
+
+```powershell
 python -m ipykernel install --user --name python3 --display-name "Python (geovenv)"
 ```
 
-> **Always activate `geovenv` first** — launch `jupyter lab` and run `python run_all.py` from the
-> activated environment so the notebooks resolve the correct packages.
+> **Always activate the environment first** — launch `jupyter lab` and run `python run_all.py` from
+> it. Every run of `run_all.py` records the environment in `Results/_provenance/`.
 >
-> **Note:** `osmnx` (in `requirements.txt`) is required for Notebook 01 to extract OSM roads and
-> places via the Overpass API.
+> **Managed Windows:** an Application Control policy may block a package's DLL the first time it
+> loads (seen with `statsmodels` and `geemap`); importing again usually works.
 
 ### 2. Configure Credentials
 See [secrets/README.md](secrets/README.md) for the file formats and set-up.
@@ -129,7 +135,7 @@ When you run `python run_all.py` without `--notebooks`, it asks which outputs to
 
 | Choice | `--scope` value | What runs |
 |--------|-----------------|-----------|
-| **1. Manuscript outputs only** | `manuscript` | `Notebook/07_publication_outputs.ipynb` — assembles all manuscript figures, tables and appendices **from cached `Results/`** (no GEE/OSM, minutes) |
+| **1. Manuscript outputs only** | `manuscript` | `Notebook/07_publication_outputs.ipynb` — assembles all manuscript figures and tables **from cached `Results/`** (no GEE/OSM, minutes) |
 | **2. All project outputs** | `all` | The analysis pipeline 01 → 05 (NB05's last section builds and checks the published dataset) → 06, then the manuscript assembly |
 | **3. Analytic outputs only** | `analytic` | The analysis notebooks 01–06 (no manuscript assembly) |
 | **4. Published dataset only** | `dataset` | `build_dataset()` from `scripts/build_master_summary.py`, called directly **from cached `Results/`** with no notebook run; QA runs if the deposit changed (no credentials, ~1 minute) |
@@ -154,15 +160,15 @@ pytest tests/test_config.py -v
 ```
 
 ### 5. Docker (Optional)
+
+The image holds Python 3.12.10 and `requirements.lock`; data, `Results/` and secrets are mounted at
+run time.
+
 ```powershell
-# Build
-docker build -t lst-modelling .
-
-# Run interactively
-docker run -it -v ${PWD}/data:/app/data -v ${PWD}/secrets:/app/secrets lst-modelling bash
-
-# Run the pipeline
-docker run -v ${PWD}/data:/app/data -v ${PWD}/secrets:/app/secrets lst-modelling python run_all.py
+docker build -t stake-lst-modelling .                    # build
+docker run --rm stake-lst-modelling pytest tests -q      # run the tests in the image
+docker compose up lab                                    # Jupyter Lab on http://localhost:8888
+docker compose run --rm reproduce                        # rebuild the manuscript outputs from Results/
 ```
 
 ---
@@ -212,7 +218,7 @@ Timings below were measured on a modest development workstation:
 | **CPU** | Intel Core i7-4600U @ 2.10 GHz (2 cores, 4 threads) |
 | **RAM** | 8 GB DDR3 |
 | **OS** | Windows 11 |
-| **Python** | 3.11 |
+| **Python** | 3.12.10 |
 | **Internet** | ~50 Mbps (required for GEE/OSM/EUMETSAT APIs) |
 
 | Notebook | ~Time (5 cities) | ~Time per city | Notes |

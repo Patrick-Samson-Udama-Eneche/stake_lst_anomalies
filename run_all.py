@@ -731,6 +731,11 @@ def main():
         print("\n[DRY RUN] No notebooks were executed.")
         return
 
+    # ---- record the environment of this run (Results/_provenance/) ----
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
+    import env_report
+    print(f"Environment recorded: {env_report.write().name}")
+
     # ---- Step 5: Execute notebooks ----
     output_dir = Path(args.output_dir) if args.output_dir else None
     if output_dir:
