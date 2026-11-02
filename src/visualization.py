@@ -6456,6 +6456,7 @@ def create_perception_chart_with_donuts(
     figsize: tuple = (14, 5.5),
     legend_scale: float = 1.2,
     peak_total: pd.Series = None,
+    panel_letters: tuple = ('A)', 'B)', 'C)'),
 ) -> tuple:
     """
     Create combined bar charts with embedded donut charts for stakeholder perception.
@@ -6585,7 +6586,7 @@ def create_perception_chart_with_donuts(
     ax1.set_yticks(range(len(warming_data)))
     ax1.set_yticklabels(warming_data.index, fontsize=10)
     ax1.set_xlabel('Number of Participants', fontsize=10)
-    ax1.set_title('A) City Warming Over 10 Years', fontsize=11, fontweight='bold', loc='left')
+    ax1.set_title(f'{panel_letters[0]} City Warming Over 10 Years', fontsize=11, fontweight='bold', loc='left')
     ax1.invert_yaxis()
     ax1.set_xlim(0, 35)  # Fixed limit for consistent panel width
     
@@ -6641,7 +6642,7 @@ def create_perception_chart_with_donuts(
     ax2.set_yticklabels([])  # Shared with left panel
     ax2.invert_yaxis()
     ax2.set_xlabel('Number of Participants', fontsize=10)
-    ax2.set_title('B) Timing of Most Severe Heat', fontsize=11, fontweight='bold', loc='left')
+    ax2.set_title(f'{panel_letters[1]} Timing of Most Severe Heat', fontsize=11, fontweight='bold', loc='left')
     ax2.set_xlim(0, 35)  # Fixed limit for consistent panel width
     
     # Add count labels
@@ -6697,7 +6698,7 @@ def create_perception_chart_with_donuts(
         ax3.set_yticklabels([])  # shared with left panel
         ax3.invert_yaxis()
         ax3.set_xlabel('Number of Participants', fontsize=10)
-        ax3.set_title('C) Peak Heat Season', fontsize=11, fontweight='bold', loc='left')
+        ax3.set_title(f'{panel_letters[2]} Peak Heat Season', fontsize=11, fontweight='bold', loc='left')
         ax3.set_xlim(0, 35)
 
         for i, city in enumerate(peak_data.index):
@@ -8890,6 +8891,507 @@ def create_gistar_distribution(city, z_grids, periods=('day', 'night')):
                           alpha=0.88, edgecolor='gray'))
 
     plt.tight_layout(rect=[0, 0, 1, 0.95])
+    return fig
+
+
+def create_city_spot_area_ranked(spots, cities, city_to_cluster, cluster_colors, spot_type_filter,
+                                 chart_title, legend_clusters, periods=('day', 'night'),
+                                 panel_title_fmt='{period} — {spot}spot Area\n'
+                                                 '(* = BH-FDR  |  colour = Cluster25  |  hatch = contour zone)',
+                                 legend_title='Cluster25  |  Contour zone'):
+    """
+    Ranked horizontal bars of each city's spot area, day and night side by side (NB05 §11c, chart D/E).
+
+    One bar per city with spots in the period, sorted by L50 area: the L90 / L75-L90 / L50-L75
+    segments in the cluster colour with hatches; a star marks a BH-FDR-significant city.
+
+    Parameters
+    ----------
+    spots : DataFrame
+        One row per spot: city, period, spot_type, area_km2_50, area_km2_75, area_km2_90,
+        bh_significant.
+    cities : list
+        The cities to consider (NB05: the cities with SEVIRI data).
+    city_to_cluster : dict
+        ``{city: cluster}``.
+    cluster_colors : dict
+        ``{cluster: colour}``.
+    spot_type_filter : str
+        'hot' or 'cold'.
+    chart_title : str
+        Figure title.
+    legend_clusters : list
+        The clusters listed in the legend.
+    periods : tuple
+        Panel order.
+    panel_title_fmt : str
+        Panel title, formatted with ``period`` and ``spot`` ('Hot' / 'Cold').
+    legend_title : str
+        Title of the bottom legend.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Not saved and not shown: the caller does both.
+    """
+    import matplotlib.patches as mpatches
+
+    _bh_h = max(0.28, 5.5 / max(len(cities), 1))
+    fig_d, axes_d = plt.subplots(1, 2,
+        figsize=(17, max(7, len(cities)*_bh_h + 2.5)),
+        sharey=False)
+
+    for ax_d, period in zip(axes_d, periods):
+        _rows_d = []
+        for city in cities:
+            sub = spots[(spots.city==city) & (spots.period==period) &
+                        (spots.spot_type==spot_type_filter)]
+            a50 = float(sub['area_km2_50'].sum()) if len(sub) else 0.
+            a75 = float(sub['area_km2_75'].fillna(0).sum()) if len(sub) else 0.
+            a90 = float(sub['area_km2_90'].fillna(0).sum()) if len(sub) else 0.
+            bh  = bool(sub['bh_significant'].any()) if len(sub) else False
+            cl  = int(city_to_cluster.get(city, -1))
+            _rows_d.append({'city': city, 'a50': a50, 'a75': a75, 'a90': a90,
+                            'bh': bh, 'cluster': cl})
+
+        # Exclude cities with no spots for this period
+        _dat_d = (pd.DataFrame(_rows_d)
+                  .query('a50 > 0')
+                  .sort_values('a50', ascending=True))
+
+        if _dat_d.empty:
+            ax_d.set_title(f'{period.capitalize()} — no {spot_type_filter} spots')
+            ax_d.axis('off')
+            continue
+
+        left = np.zeros(len(_dat_d))
+        for seg_vals, htch, alpha_v, seg_lbl in [
+            (_dat_d['a90'].values,                          'oo', 0.85, 'L90 dense core'),
+            ((_dat_d['a75']-_dat_d['a90']).clip(0).values, 'xx', 0.70, 'L75 inner zone'),
+            ((_dat_d['a50']-_dat_d['a75']).clip(0).values, '//', 0.55, 'L50 outer extent'),
+        ]:
+            bar_clrs = [cluster_colors.get(int(_dat_d.iloc[i]['cluster']), '#BAB0AC')
+                        for i in range(len(_dat_d))]
+            ax_d.barh(range(len(_dat_d)), seg_vals, left=left,
+                      color=bar_clrs, hatch=htch, alpha=alpha_v,
+                      edgecolor='black', lw=0.4, label=seg_lbl)
+            left += seg_vals
+
+        ylabels = [f'{r.city}{"*" if r.bh else ""}' for _, r in _dat_d.iterrows()]
+        ax_d.set_yticks(range(len(_dat_d)))
+        ax_d.set_yticklabels(ylabels, fontsize=9)
+        ax_d.set_xlabel('Area (km²)', fontsize=9)
+        ax_d.set_title(panel_title_fmt.format(period=period.capitalize(),
+                                              spot=spot_type_filter.capitalize()),
+                       fontsize=9, fontweight='bold')
+
+    # Legend
+    cl_handles = [mpatches.Patch(color=cluster_colors.get(cl, '#BAB0AC'),
+                                 label=f'C{cl}', edgecolor='black', lw=0.5)
+                  for cl in sorted(legend_clusters)]
+    hatch_handles = [
+        mpatches.Patch(facecolor='#AAAAAA', hatch='oo', edgecolor='black', label='L90 dense core'),
+        mpatches.Patch(facecolor='#AAAAAA', hatch='xx', edgecolor='black', label='L75 inner zone'),
+        mpatches.Patch(facecolor='#AAAAAA', hatch='//', edgecolor='black', label='L50 outer extent'),
+    ]
+    fig_d.legend(handles=cl_handles + [mpatches.Patch(visible=False)] + hatch_handles,
+                 title=legend_title, fontsize=7.0, title_fontsize=8,
+                 loc='lower center', ncol=min(len(cl_handles)+4, 10),
+                 bbox_to_anchor=(0.5, -0.02), framealpha=0.9)
+    fig_d.suptitle(chart_title, fontsize=11, fontweight='bold')
+    plt.tight_layout(rect=[0, 0.07, 1, 1])
+    return fig_d
+
+
+_HD_HOT_BASE, _HD_COLD_BASE, _HD_MIN_ARC = '#E07B00', '#2B6CB0', 8.0
+
+
+def _hd_fmt(v):
+    if v >= 1e6: return f'{v/1e6:.1f}M'
+    if v >= 1e3: return f'{v/1e3:.1f}k'
+    return f'{int(v)}'
+
+
+def _hd_blend(hex_c, fade):
+    import matplotlib.colors as _mc
+    rgb = np.array(_mc.to_rgb(hex_c))
+    return tuple(rgb + fade * (1 - rgb))
+
+
+def create_population_halfdonut(sub_gdf, title):
+    """
+    Population within hot and cold spots as a half-donut (NB05 §11d, ``_draw_halfdonut``).
+
+    Flat edge down, arc up; left half = hot spots, right half = cold spots. Ring 1 (inner) =
+    spot type, proportional to its population; ring 2 = day / night within each type; ring 3
+    (outer) = contour zone (L90 / L75 excl. / L50 excl.). Labels only for arcs >= 8 degrees,
+    spaced per side.
+
+    Parameters
+    ----------
+    sub_gdf : DataFrame
+        Rows of one city, cluster or the nation, with spot_type, period, population (L50),
+        pop_75, pop_90 and area_km2_50 / _75 / _90 (used only where pop_75 / pop_90 are absent).
+    title : str
+        Axes title.
+
+    Returns
+    -------
+    matplotlib.figure.Figure or None
+        None when ``sub_gdf`` is empty. Not saved and not shown: the caller does both.
+    """
+    from matplotlib.patches import Wedge as _W11d, Patch as _P11d
+    HOT_BASE, COLD_BASE, MIN_ARC = _HD_HOT_BASE, _HD_COLD_BASE, _HD_MIN_ARC
+    _fmt11d, _blend11d = _hd_fmt, _hd_blend
+
+    if not len(sub_gdf):
+        return None
+
+    fig, ax = plt.subplots(figsize=(10, 6.5), subplot_kw=dict(aspect='equal'))
+
+    r_i = [0.32, 0.60, 0.92]
+    r_w = [0.25, 0.28, 0.28]
+
+    def _pop(st, per):
+        s = sub_gdf[(sub_gdf.spot_type == st) & (sub_gdf.period == per)]
+        return float(s['population'].sum()) if len(s) else 0.
+
+    def _pop75(st, per):
+        s = sub_gdf[(sub_gdf.spot_type == st) & (sub_gdf.period == per)]
+        if 'pop_75' in s.columns and s['pop_75'].notna().any():
+            return float(s['pop_75'].sum()) if len(s) else 0.
+        a50 = float(s['area_km2_50'].sum()) or 1
+        a75 = float(s['area_km2_75'].fillna(0).sum())
+        return _pop(st, per) * (a75 / a50)
+
+    def _pop90(st, per):
+        s = sub_gdf[(sub_gdf.spot_type == st) & (sub_gdf.period == per)]
+        if 'pop_90' in s.columns and s['pop_90'].notna().any():
+            return float(s['pop_90'].sum()) if len(s) else 0.
+        a50 = float(s['area_km2_50'].sum()) or 1
+        a90 = float(s['area_km2_90'].fillna(0).sum())
+        return _pop(st, per) * (a90 / a50)
+
+    total_hot_pop  = _pop('hot', 'day')  + _pop('hot', 'night')
+    total_cold_pop = _pop('cold', 'day') + _pop('cold', 'night')
+    total_pop      = total_hot_pop + total_cold_pop
+
+    total_all  = (total_hot_pop + total_cold_pop) or 1
+    hot_sweep  = min(180., 180. * total_hot_pop  / total_all)
+    cold_sweep = min(180., 180. * total_cold_pop / total_all)
+
+    raw_labels = []   # collect before drawing (to apply spacing first)
+
+    for st, base_ang, ang_span, base_clr in (
+        ('hot',  180 - hot_sweep,  hot_sweep,  HOT_BASE),
+        ('cold', 0,                cold_sweep, COLD_BASE),
+    ):
+        side = 'left' if st == 'hot' else 'right'
+        if ang_span < 0.5:
+            continue
+
+        # Ring 1: spot-type band
+        ax.add_patch(_W11d((0, 0), r_i[0] + r_w[0], base_ang, base_ang + ang_span,
+                           width=r_w[0], facecolor=_blend11d(base_clr, 0.0),
+                           edgecolor='white', lw=2.0))
+        if ang_span >= MIN_ARC:
+            mid_ang = base_ang + ang_span / 2
+            mid_r   = r_i[0] + r_w[0] / 2
+            raw_labels.append({'ang': mid_ang, 'r': mid_r, 'side': side,
+                               'text': f'{"Hot" if st=="hot" else "Cold"}: '
+                                       f'{_fmt11d(total_hot_pop if st=="hot" else total_cold_pop)}',
+                               'fs': 9, 'fw': 'bold'})
+
+        # Ring 2: Day / Night
+        ang2    = base_ang
+        tot_st  = (total_hot_pop if st == 'hot' else total_cold_pop) or 1
+        for per, fade, ico in (('day', 0.0, '☀'), ('night', 0.30, '☾')):
+            pp  = _pop(st, per)
+            sw2 = ang_span * (pp / tot_st)
+            if pp > 0 and sw2 > 0.5:
+                ax.add_patch(_W11d((0, 0), r_i[1] + r_w[1], ang2, ang2 + sw2,
+                                   width=r_w[1], facecolor=_blend11d(base_clr, fade),
+                                   edgecolor='white', lw=1.4))
+                if sw2 >= MIN_ARC:
+                    raw_labels.append({'ang': ang2 + sw2 / 2, 'r': r_i[1] + r_w[1] / 2,
+                                       'side': side,
+                                       'text': f'{ico} {per.capitalize()}: {_fmt11d(pp)}',
+                                       'fs': 7.5, 'fw': 'normal'})
+
+                # Ring 3: contour zones
+                p90    = min(_pop90(st, per), pp)
+                p75    = min(_pop75(st, per), pp)
+                p75_ex = max(0, p75 - p90)
+                p50_ex = max(0, pp  - p75)
+                ang3   = ang2
+                for pop_seg, fade3, htch, zone_lbl in (
+                    (p90,    0.0,  'oo', 'L90'),
+                    (p75_ex, 0.15, 'xx', 'L75'),
+                    (p50_ex, 0.30, '//', 'L50'),
+                ):
+                    sw3 = sw2 * (pop_seg / pp) if pp > 0 else 0
+                    if pop_seg > 0 and sw3 > 0.3:
+                        ax.add_patch(_W11d((0, 0), r_i[2] + r_w[2], ang3, ang3 + sw3,
+                                          width=r_w[2],
+                                          facecolor=_blend11d(base_clr, 0.55 + fade3),
+                                          hatch=htch, edgecolor='white', lw=0.8))
+                        if sw3 >= MIN_ARC:
+                            raw_labels.append({
+                                'ang':  ang3 + sw3 / 2,
+                                'r':    r_i[2] + r_w[2] / 2,
+                                'side': side,
+                                'text': f'{zone_lbl}: {_fmt11d(pop_seg)}',
+                                'fs':   6.5, 'fw': 'normal'})
+                    ang3 += sw3
+            ang2 += sw2
+
+    # Centre label
+    ax.text(0,  0.10, _fmt11d(total_pop),   ha='center', va='center',
+            fontsize=13, fontweight='bold', color='#333')
+    ax.text(0, -0.08, 'Total\npop',          ha='center', va='center',
+            fontsize=7, color='#666')
+    ax.text(-0.7, -0.08, '← Hot spots',  ha='center', va='top',
+            fontsize=9, fontweight='bold', color=HOT_BASE)
+    ax.text( 0.7, -0.08, 'Cold spots →', ha='center', va='top',
+            fontsize=9, fontweight='bold', color=COLD_BASE)
+
+    ax.set_xlim(-2.2, 2.2)
+    ax.set_ylim(-0.6, 1.80)
+
+    # Build annotate positions; enforce minimum y-spacing per side
+    MIN_DY = 0.14
+    annots = []
+    for sp in raw_labels:
+        ang_r = np.radians(sp['ang'])
+        rx = sp['r'] * np.cos(ang_r)
+        ry = sp['r'] * np.sin(ang_r)
+        lx = -1.90 if sp['side'] == 'left' else 1.90
+        annots.append({**sp, 'rx': rx, 'ry': ry, 'lx': lx, 'y_text': max(0.04, ry)})
+
+    for side in ('left', 'right'):
+        side_a = sorted([a for a in annots if a['side'] == side],
+                        key=lambda a: a['y_text'])
+        for i in range(1, len(side_a)):
+            if side_a[i]['y_text'] - side_a[i - 1]['y_text'] < MIN_DY:
+                side_a[i]['y_text'] = side_a[i - 1]['y_text'] + MIN_DY
+
+    for sp in annots:
+        ax.annotate(
+            sp['text'],
+            xy=(sp['rx'], sp['ry']),
+            xytext=(sp['lx'], sp['y_text']),
+            ha='right' if sp['side'] == 'left' else 'left',
+            va='center', fontsize=sp['fs'], fontweight=sp['fw'],
+            color='#222',
+            bbox=dict(boxstyle='round,pad=0.18', fc='white', ec='none', alpha=0.88),
+            arrowprops=dict(arrowstyle='-', color='#bbb', lw=0.5))
+
+    ax.axis('off')
+    ax.set_title(title, fontsize=9, fontweight='bold', pad=10)
+
+    leg_h = [
+        _P11d(facecolor=HOT_BASE,  label='Hot spots'),
+        _P11d(facecolor=COLD_BASE, label='Cold spots'),
+        _P11d(facecolor='#AAAAAA', hatch='oo', edgecolor='white', label='L90 dense core'),
+        _P11d(facecolor='#AAAAAA', hatch='xx', edgecolor='white', label='L75 inner zone'),
+        _P11d(facecolor='#AAAAAA', hatch='//', edgecolor='white', label='L50 outer extent'),
+    ]
+    ax.legend(handles=leg_h, loc='lower center', ncol=5, fontsize=7.5,
+              bbox_to_anchor=(0.5, -0.04), framealpha=0.9)
+    plt.tight_layout()
+    return fig
+
+
+def create_national_population_map(spots, centroids, cities, landscape_gdf, nigeria_gdf,
+                                   cluster25_colors, spot_type_filter='hot', title=None,
+                                   spot_label=None, pop_word='pop exp',
+                                   scale_title='Population\nExposure'):
+    """
+    National map of each city's spot area and the population within it (NB05 §11e,
+    ``plot_national_map_v2``).
+
+    Background: the Cluster25 landscape (alpha 0.30) and the national boundary. Per city: a
+    circle sized by the population within its L50 spots (day + night), split into a day and a
+    night wedge by spot area, labelled with the city and its area; grey dot where the city has
+    none. Legend, north arrow, ~100 km scale bar, national statistics box and a population key.
+
+    Parameters
+    ----------
+    spots : DataFrame
+        city, period, spot_type, area_km2_50, population (L50), bh_significant.
+    centroids : dict
+        ``{city: (lon, lat)}``, the urban-core centroids (EPSG:4326).
+    cities : list
+        The cities analysed (NB05: the cities with SEVIRI data).
+    landscape_gdf : GeoDataFrame
+        Landscape polygons with a ``Cluster25`` column.
+    nigeria_gdf : GeoDataFrame
+        National boundary.
+    cluster25_colors : dict
+        ``{cluster: colour}``.
+    spot_type_filter : str
+        'hot' or 'cold'.
+    title : str or None
+        Axes title; None gives NB05's.
+    spot_label : str or None
+        'Hotspot' / 'Coldspot' (NB05's) when None; used in the title, legend and box.
+    pop_word : str
+        The statistics box's population label (NB05: 'pop exp').
+    scale_title : str
+        Title of the population key (NB05: 'Population\\nExposure').
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        Not saved and not shown: the caller does both.
+    """
+    from matplotlib.patches import Wedge as _Wedge5e
+    import matplotlib.patches as _mp5e
+    import matplotlib.lines as _ml5e_leg
+    _fmt_pop5e = _hd_fmt
+
+    DAY_CLR   = '#FF9500' if spot_type_filter == 'hot' else '#00CED1'
+    NIGHT_CLR = '#4A4A4A' if spot_type_filter == 'hot' else '#1565C0'
+    if spot_label is None:
+        spot_label = 'Hotspot' if spot_type_filter == 'hot' else 'Coldspot'
+
+    land = landscape_gdf.to_crs('EPSG:4326').copy()
+    land['_clr'] = land['Cluster25'].apply(lambda c: cluster25_colors.get(int(c), '#DDDDDD'))
+
+    fig, ax = plt.subplots(figsize=(10, 10))
+
+    # ── Background: Cluster25 landscape (single vectorised call) ─────────────
+    land.plot(ax=ax, color=land['_clr'], alpha=0.30, edgecolor='none', zorder=1)
+
+    # National boundary outline (on top of landscape)
+    nigeria_gdf.boundary.plot(ax=ax, edgecolor='#1A1A1A', lw=1.8, zorder=6)
+
+    # ── Per-city wedge circles ────────────────────────────────────────────────
+    city_stats = {}
+    for city in cities:
+        if city not in centroids: continue
+        lon, lat = centroids[city]
+        stats = {'lon': lon, 'lat': lat}
+        for period in ('day', 'night'):
+            sub = spots[(spots.city==city) & (spots.period==period) &
+                        (spots.spot_type==spot_type_filter)]
+            stats[f'{period}_area'] = float(sub['area_km2_50'].sum()) if len(sub) else 0.
+            stats[f'{period}_pop']  = float(sub['population'].sum())  if len(sub) else 0.
+        stats['total_area'] = stats['day_area'] + stats['night_area']
+        stats['total_pop']  = stats['day_pop']  + stats['night_pop']
+        stats['bh'] = bool(spots[(spots.city==city)&(spots.spot_type==spot_type_filter)]['bh_significant'].any())
+        city_stats[city] = stats
+
+    max_area = max((s['total_area'] for s in city_stats.values() if s['total_area'] > 0), default=1)
+    max_pop  = max((s['total_pop']  for s in city_stats.values() if s['total_pop']  > 0), default=1)
+    SCALE = 0.55
+
+    total_day_pop   = sum(s['day_pop']   for s in city_stats.values())
+    total_night_pop = sum(s['night_pop'] for s in city_stats.values())
+    n_with_spots    = sum(1 for s in city_stats.values() if s['total_area'] > 0)
+    total_area_km2  = sum(s['total_area'] for s in city_stats.values())
+
+    for city, s in city_stats.items():
+        lon, lat = s['lon'], s['lat']
+        total = s['total_area'] or 0
+        total_pop_city = s['total_pop'] or 0
+        if total <= 0 or total_pop_city <= 0:
+            ax.plot(lon, lat, 'o', color='#CCCCCC', ms=4, zorder=5, alpha=0.6)
+            continue
+        radius  = SCALE * (max(total_pop_city, 1) / max_pop) ** 0.5
+        day_f   = s['day_area']   / total
+        night_f = s['night_area'] / total
+        day_start = 90; day_end = 90 + day_f * 360
+        if s['day_area'] > 0:
+            ax.add_patch(_Wedge5e((lon, lat), radius, day_start, day_end,
+                                  facecolor=DAY_CLR, edgecolor='white', lw=0.8,
+                                  alpha=0.92, zorder=6))
+        night_start = day_end; night_end = 450
+        if s['night_area'] > 0:
+            ax.add_patch(_Wedge5e((lon, lat), radius, night_start, night_end,
+                                  facecolor=NIGHT_CLR, edgecolor='white', lw=0.8,
+                                  alpha=0.92, zorder=6))
+        ax.plot(lon, lat, 'ko', ms=2.5, zorder=7)
+        ax.text(lon, lat - radius - 0.08,
+                f"{city}\n({s['total_area']:.0f} km²)",
+                ha='center', va='top', fontsize=5.5, color='#222', zorder=7,
+                linespacing=0.9,
+                bbox=dict(boxstyle='round,pad=0.1', fc='white', ec='none', alpha=0.65))
+
+    bounds = nigeria_gdf.total_bounds
+    ax.set_xlim(bounds[0]-0.5, bounds[2]+0.5)
+    ax.set_ylim(bounds[1]-1.0, bounds[3]+0.8)
+    ax.grid(True, alpha=0.12, ls='--', lw=0.4, zorder=0)
+    ax.set_xlabel('Longitude', fontsize=10)
+    ax.set_ylabel('Latitude',  fontsize=10)
+    ax.set_aspect('equal')
+    ax.set_title(title if title is not None else
+                 f'Nigeria UHI {spot_label} Summary — Area & Population Exposure',
+                 fontsize=13, fontweight='bold', pad=12)
+
+    # Legend — Day / Night / No spots only (no Cluster25 entries)
+    legend_els = [
+        _mp5e.Patch(facecolor=DAY_CLR,   edgecolor='white',
+                    label=f'Day {spot_label.lower()} area',   alpha=0.92),
+        _mp5e.Patch(facecolor=NIGHT_CLR, edgecolor='white',
+                    label=f'Night {spot_label.lower()} area', alpha=0.92),
+        _mp5e.Patch(facecolor='#CCCCCC', edgecolor='none',
+                    label='No spots detected'),
+        _ml5e_leg.Line2D([0], [0], color='#1A1A1A', lw=1.8,
+                         label='Nigeria boundary'),
+    ]
+    ax.legend(handles=legend_els, loc='lower left', fontsize=8.5, framealpha=0.95,
+              edgecolor='#999', title='Legend', title_fontsize=10, ncol=1)
+
+    # North arrow
+    ax.annotate('N', xy=(0.97, 0.96), xytext=(0.97, 0.91),
+                xycoords='axes fraction', fontsize=12, ha='center', fontweight='bold',
+                arrowprops=dict(arrowstyle='->', lw=2, color='black'), zorder=10)
+
+    # Scale bar — bottom centre
+    _deg_100km = 100 / 111.0   # degrees ≈ 100km at equator
+    sc_lon = (bounds[0] + bounds[2]) / 2 - _deg_100km / 2
+    sc_lat = bounds[1] - 0.55
+    ax.plot([sc_lon, sc_lon+0.9], [sc_lat, sc_lat], 'k-', lw=3, zorder=8)
+    ax.plot([sc_lon, sc_lon], [sc_lat-0.1, sc_lat+0.1], 'k-', lw=2, zorder=8)
+    ax.plot([sc_lon+0.9, sc_lon+0.9], [sc_lat-0.1, sc_lat+0.1], 'k-', lw=2, zorder=8)
+    ax.text(sc_lon+0.45, sc_lat+0.15, '~100 km',
+            ha='center', va='bottom', fontsize=8, fontweight='bold', zorder=8)
+
+    # Stats box
+    stats_box = (
+        f'National Summary\n'
+        f'─────────────\n'
+        f'Cities analysed : {len(cities)}\n'
+        f'Cities w/ {spot_label.lower()}s: {n_with_spots}\n'
+        f'Total area (km²): {total_area_km2:.0f}\n'
+        f'Day   {pop_word}  : {_fmt_pop5e(total_day_pop)}\n'
+        f'Night {pop_word}  : {_fmt_pop5e(total_night_pop)}'
+    )
+    ax.text(0.98, 0.01, stats_box, transform=ax.transAxes,
+            fontsize=8, va='bottom', ha='right',
+            bbox=dict(boxstyle='round,pad=0.5', fc='white', ec='#AAA', alpha=0.9),
+            fontfamily='monospace', zorder=10)
+
+    # Proportional circle legend (population scale) — bottom right, above stats box
+    _prop_ins = ax.inset_axes([0.77, 0.14, 0.20, 0.20])
+    _prop_ins.set_xlim(0, 10); _prop_ins.set_ylim(0, 10)
+    _prop_ins.set_facecolor('white'); _prop_ins.patch.set_alpha(0.92)
+    _prop_ins.patch.set_edgecolor('#AAAAAA'); _prop_ins.patch.set_linewidth(0.8)
+    _prop_ins.axis('off')
+    _prop_ins.text(5, 9.3, scale_title, ha='center', va='top',
+                   fontsize=6, fontweight='bold')
+    _ref_pops5e = [max_pop, max_pop * 0.35, max_pop * 0.08]
+    _ref_lbl5e  = [_fmt_pop5e(p) for p in _ref_pops5e]
+    for _ri, (_rp, _rl) in enumerate(zip(_ref_pops5e, _ref_lbl5e)):
+        _rr = 2.0 * (_rp / max_pop) ** 0.5
+        _yc = 7.0 - _ri * 3.0
+        _prop_ins.add_patch(_Wedge5e((3, _yc), _rr, 0, 360,
+                                     facecolor=DAY_CLR, edgecolor='white',
+                                     lw=0.6, alpha=0.88))
+        _prop_ins.text(3 + _rr + 0.4, _yc, _rl, va='center', ha='left', fontsize=6)
+
+    plt.tight_layout()
     return fig
 
 
