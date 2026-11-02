@@ -2,18 +2,18 @@
 
 ## Overview
 
-Reproducible Land Surface Temperature (LST) modeling and Urban Heat Island (UHI) hotspot analysis for Nigerian cities. The project integrates multi-source satellite data (MODIS, ERA5-Land, MSG SEVIRI), stakeholder survey data from workshops organized, and landscape assessment to identify, quantify, and validate persistent heat events across multiple study cities.
+I model land surface temperature (LST) and map surface hot and cold spots in Nigerian cities. I combine satellite data (MODIS, ERA5-Land, MSG SEVIRI), a stakeholder survey from the workshops I organised, and the physiographic landscape typology of Nigeria to identify, quantify and corroborate persistent heat events and surface thermal anomalies.
 
-**Study cities:** 67 Nigerian cities ≥300k population (UN WUP 2025) → 58 unique AOIs after spatial deduplication (configurable in `config.py`)  
+**Study cities:** the 67 Nigerian cities of at least 300,000 inhabitants (UN WUP); 11 of them lie within the urban core of a larger neighbour and merge into it, leaving 56 study cities (configurable in `config.py`)  
 **Test cities:** Lagos, Abuja, Kano, Jos, Port Harcourt  
-**Workshop cities:** Individuals from 28 cities across Nigeria were in attendance (stakeholder survey)  
-**Study year:** 2024/2025  
+**Stakeholders:** 105 workshop participants from 21 cities in 10 typology clusters  
+**Period:** LST trends 2006–2025; persistent heat events and surface spots in 2024  
 
 ---
 
-## Valid City Names (67 cities ≥300k → 58 AOIs)
+## Valid City Names (67 cities ≥300k → 56 study cities)
 
-The pipeline uses **67 cities** from the UN WUP 2025 dataset with population ≥300k (2024 estimates). After spatial deduplication in Notebook 01 (merging overlapping AOIs), this produces **58 unique AOIs**. Spelling and capitalisation must match — the runner will flag typos and suggest corrections.
+The pipeline uses **67 cities** from the UN WUP dataset with population ≥300k (2024 estimates). Notebook 01 merges the 11 that lie within a larger neighbour's urban core, leaving **56 study cities**. Spelling and capitalisation must match — the runner flags typos and suggests corrections.
 
 <details>
 <summary>Click to expand full list (67 cities, sorted alphabetically)</summary>
@@ -38,7 +38,7 @@ The pipeline uses **67 cities** from the UN WUP 2025 dataset with population ≥
 | 16 | Dere | 33 | Iseyin | 50 | Warri | 67 | Yenagoa |
 | 17 | | 34 | Jos | 51 | Yola | | Zaria |
 
-> **Note:** 9 cities are absorbed into parent AOIs during spatial deduplication (e.g., Ikorodu → Lagos), resulting in 58 unique AOIs.
+> **Note:** 11 cities merge into a neighbouring study city (e.g., Ikorodu → Lagos), leaving 56 study cities.
 
 </details>
 
@@ -91,7 +91,7 @@ python -m ipykernel install --user --name python3 --display-name "Python (geoven
 > places via the Overpass API.
 
 ### 2. Configure Credentials
-See [docs/SECURITY_SETUP.md](docs/SECURITY_SETUP.md) for detailed instructions.
+See [secrets/README.md](secrets/README.md) for the file formats and set-up.
 
 | Credential | Required By | Location |
 |-----------|------------|----------|
@@ -192,7 +192,7 @@ stages.
 | 02 | `02_stakeholder_analysis.ipynb` | Stakeholder survey mapping and perception analysis | — | `master_composite.csv`, cities CSV |
 | 03 | `03_temporal_analysis_months_annual.ipynb` | Monthly/annual LST extraction and trend analysis (2006–2024) | GEE (MODIS) | Notebook 01 AOI outputs |
 | 04 | `04_temporal_analysis_daily.ipynb` | Daily LST analysis: MODIS + ERA5 hot events, SEVIRI persistent heat rasters | GEE, EUMETSAT | Notebook 01 AOI outputs |
-| 05 | `05_hotspot_analysis.ipynb` | UHI hotspot detection (Gi\*), KDE delineation, landscape enrichment, population exposure, stakeholder validation | GEE (GHSL) | Notebooks 03 + 04 outputs, landscape/survey data |
+| 05 | `05_hotspot_analysis.ipynb` | Surface hot and cold spot detection (Gi\*), KDE delineation, landscape enrichment, population within spots, stakeholder corroboration | GEE (GHSL) | Notebooks 03 + 04 outputs, landscape/survey data |
 | 06 | `06_hotspot_modelling.ipynb` | Landscape-oriented modelling: extent (OLS) and intensity (OLS) with hierarchical block entry, city-clustered SEs, and Wild Cluster Bootstrap inference (B = 999) | — | Notebook 05 hotspot outputs, landscape data |
 | pub | `07_publication_outputs.ipynb` | **Manuscript assembly** — re-renders every manuscript figure, supplementary figure, table and appendix from cached `Results/`, in manuscript order. No GEE/OSM. | — | Cached `Results/` from 01–06 |
 
@@ -221,7 +221,7 @@ Timings below were measured on a modest development workstation:
 | **02** Stakeholder Analysis | 3–5 min | — | Survey data (no per-city loop) |
 | **03** Monthly/Annual LST | 30–45 min | 6–9 min | GEE MODIS extraction (2006–2024) |
 | **04** Daily LST + SEVIRI | 45–90 min | 10–18 min | GEE + EUMETSAT download (network-bound) |
-| **05** Hotspot Analysis | 20–30 min | 4–6 min | Gi\* statistics, KDE, population exposure |
+| **05** Hotspot Analysis | 20–30 min | 4–6 min | Gi\* statistics, KDE, population within spots |
 
 > **Tip:** For 67 cities (`CITY_SELECTION_MODE = "ABOVE_300K"`), expect 8–12 hours total.  
 > Use `"TEST"` mode (5 cities) for development/debugging (~2–3 hours total).
@@ -248,7 +248,7 @@ City selection is controlled in **`config.py`** via `CITY_SELECTION_MODE`. Edit 
 | `"ALL"` | All cities in the CSV file | 791 cities |
 | `"ABOVE_1M"` | Cities with population ≥ 1 million | 17 cities |
 | `"ABOVE_500K"` | Cities with population ≥ 500k | 37 cities |
-| `"ABOVE_300K"` | Cities with population ≥ 300k (default) | 67 cities → 58 AOIs |
+| `"ABOVE_300K"` | Cities with population ≥ 300k (default) | 67 cities → 56 study cities |
 | `"TEST"` | Quick development/debugging runs | Lagos, Abuja, Kano, Jos, Port Harcourt |
 | `"SPECIFIC"` | User-specified custom selection | Any from 791 valid cities |
 
@@ -365,72 +365,61 @@ The `CITIES` list is populated dynamically by scanning Notebook 04 SEVIRI output
 - **City grid maps** — multi-panel hotspot maps with survey overlay per city
 - **Gi\* distribution plots** — statistical significance of hotspot detection
 - **Contour area charts** — hotspot area by landscape class and contour level
-- **Population exposure half-donuts** — people exposed to UHI per city
+- **Population half-donuts** — residents within surface hot and cold spots per city
 - **National summary map** — proportional symbol map across all study cities
 - **Stakeholder perception charts** — reasons/mitigation by Cluster25 landscape type
 - **Tree species heatmaps** — 4 variants (by cluster/city × top-15/all species)
 
 ### Notebook 06 — Hotspot Modelling Outputs
-- **Data composition charts** — donut and Sankey diagrams showing sample composition by landscape class
-- **Skewness diagnostics** — 2×2 Day|Night panels with normal distribution overlay
-- **Model comparison tables** (CSV) — hierarchical block R², ΔR², AIC, BIC per analysis
-- **Coefficient tables** (CSV) — OLS coefficients with clustered SEs, Wild Cluster Bootstrap *p*-values, and % change
-- **Variance partitioning panels** — Day|Night stacked bar charts showing block-level R² contributions
-- **Coefficient forest plots** — Day|Night horizontal panel with significance colouring (OLS and bootstrap)
-- **Model metadata** (JSON) — reproducibility records per analysis/period
+- **Normality diagnostics** (CSV) — Shapiro–Wilk and D'Agostino–Pearson tests of SUHII and spot area
+- **Part A tables** (CSV) — the typology against spot occurrence (Monte Carlo χ², Cramér's V), SUHII and area (Kruskal–Wallis, η²)
+- **Part B tables** (CSV) — the same tests for each typology element (climate, geology, elevation), Holm-corrected
+- **Synthesis tables** (CSV) — the typology against its best single element for every outcome
+- **Forest plot** — effect sizes of the typology and its elements
 
 ### Manuscript Outputs (`Notebook/07_publication_outputs.ipynb`)
 
-Notebook 07 builds every figure and table of the SCS article and of its supplementary material, in
-manuscript order. Its values come from the published dataset (v1.0.1,
-`Results/05_hotspot_analysis/surface_thermal_anomaly_stakeholder_composite/`); where the dataset
-holds no equivalent, from the cached results of NB01–NB06, each such read permitted per item in the
-work plan, logged, and asserted against the dataset wherever the two overlap. It draws with the same
-functions the analysis notebooks use (`src/visualization.py`, `src/temporal_panels.py`,
-`src/pub_hotspot_tables.py`) and makes no GEE, EUMETSAT or OSM call.
+Notebook 07 builds every figure and table of the SCS article and its supplementary material, in
+manuscript order. I take the values from the published dataset (v1.0.1,
+`Results/05_hotspot_analysis/surface_thermal_anomaly_stakeholder_composite/`), and from the cached
+results of NB01–NB06 only where the dataset holds no equivalent, checking them against the dataset
+wherever the two overlap. The notebook draws with the functions the analysis notebooks use
+(`src/visualization.py`, `src/temporal_panels.py`, `src/pub_hotspot_tables.py`) and makes no GEE,
+EUMETSAT or OSM call.
 
 Run it after NB01–NB06 (or on their cached `Results/`):
 
 ```powershell
-python run_all.py --scope manuscript          # or: python scripts/build_scs_outputs.py
+python run_all.py --scope manuscript
 # or open Notebook/07_publication_outputs.ipynb and Run All
 ```
 
 - **Cell order.** Setup, then the shared-inputs cell; after that any item cell runs on its own
-  (Fig. 6 after Fig. 5). The notebook opens with a table of contents linking every item.
-- **Checks.** Every value shown is asserted against the dataset (`check()`); every read passes a
-  source guard (`read_source()`), and a forbidden source stops the run.
+  (Fig. 6 after Fig. 5, Supp. Table S6 after Table 3). The notebook opens with a table of contents.
+- **Checks.** Every value shown is asserted against the dataset (`check()`); every file read is
+  logged (`read_source()`), and a forbidden source stops the run.
 - **Supplementary sets** show one example per level (national, one cluster, one city); their second
   cell writes the whole set.
 - **Skip logic.** A figure set already written by the current drawing code from the current inputs
-  (a stamp in its folder) is not redrawn, nor is a preview newer than its files; the checks always
-  run. Set `REBUILD = True` in Setup to redraw everything, e.g. after re-running NB01–NB06.
+  is not redrawn. Set `REBUILD = True` in Setup to redraw everything, e.g. after re-running NB01–NB06.
 
 Outputs, under `Results/manuscript_outputs/`:
 
 ```
 Results/manuscript_outputs/
 ├── main_figures/            Fig_01_study_area … Fig_15_association_effect_sizes        [.pdf/.svg]
-├── supplementary_figures/   S1_population_trajectories/, S2_city_delineation_maps/, … one folder per item
 ├── main_tables/             Table_01 … Table_05                                        [.csv/.xlsx]
-├── supplementary_tables/    Supp_Table_S1 … S8                  [.csv; .xlsx except S3, S4, S6, as v3.0]
-├── captions.md · figure_print_sizes.csv · _data_sources.csv
-└── _preview/INDEX.md        monitoring: v3.0 against new previews, data sources, checks, sizes
+├── supplementary_figures/   S1_population_trajectories/ … S11_city_perception/, one folder per item
+├── supplementary_tables/    Supp_Table_S1 … S8                         [.csv; .xlsx except S3, S4, S6]
+└── captions.md · figure_print_sizes.csv · _data_sources.csv
 ```
 
-Fig. 2 (the workflow) and the graphical abstract are drawn by the author outside the notebook. The
-work plan is `docs/scs_rebuild/SCS_Figures_Tables_WorkPlan.md` and the running log
-`docs/scs_rebuild/WORKLOG.md`.
+I draw Fig. 2 (the workflow) and the graphical abstract outside the notebook.
 
 ---
 
 ## Documentation
 
-- [docs/PROJECT_CONCEPT_NOTE.md](docs/PROJECT_CONCEPT_NOTE.md) — Unified project concept note (research context, methodology, architecture, outputs)
-- [docs/MANUSCRIPT_DRAFT.md](docs/MANUSCRIPT_DRAFT.md) — Nature Cities manuscript draft (complete with all numerical results)
-- [docs/manuscript_draft_elsevier.md](docs/manuscript_draft_elsevier.md) — Urban Climate / Elsevier manuscript draft (complete with all numerical results)
-- [docs/SECURITY_SETUP.md](docs/SECURITY_SETUP.md) — Credential management and setup instructions
-- [docs/Idea_mapping_formatted.md](docs/Idea_mapping_formatted.md) — Original research strategy document
 - [secrets/README.md](secrets/README.md) — API credential file formats and setup guide
 - [secrets/gee_service_account.json.example](secrets/gee_service_account.json.example) — GEE service account template
 - [secrets/eumetsat_credentials.json.example](secrets/eumetsat_credentials.json.example) — EUMETSAT API key template
@@ -444,8 +433,9 @@ work plan is `docs/scs_rebuild/SCS_Figures_Tables_WorkPlan.md` and the running l
 | **Phase 1** | Complete | AOI delineation and stakeholder analysis |
 | **Phase 2** | Complete | Monthly/annual LST temporal analysis |
 | **Phase 3** | Complete | Daily LST analysis (MODIS, ERA5, SEVIRI) |
-| **Phase 4** | Complete | UHI hotspot detection and stakeholder validation |
-| **Phase 5** | Complete | Landscape-oriented hotspot modelling — occurrence, extent, and intensity (Notebook 06) |
+| **Phase 4** | Complete | Surface hot and cold spot detection and stakeholder corroboration |
+| **Phase 5** | Complete | Landscape-oriented spot modelling — occurrence, extent and intensity (Notebook 06) |
+| **Phase 6** | Complete | Manuscript figures and tables (Notebook 07) |
 
 ---
 
