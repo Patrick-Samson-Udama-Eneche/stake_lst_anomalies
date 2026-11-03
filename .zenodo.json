@@ -1,0 +1,61 @@
+{
+  "title": "Urban surface thermal anomalies in Nigeria: A multi-source, landscape-oriented and stakeholder-informed analysis",
+  "upload_type": "software",
+  "description": "<p>Code for mapping surface hot and cold spots in 56 Nigerian cities and relating them to the physiographic landscape typology of Nigeria. It combines MODIS, ERA5-Land and MSG SEVIRI land surface temperature with a stakeholder survey of 105 participants from 21 cities. Notebooks 01 to 06 run the analysis; Notebook 07 rebuilds every figure and table of the research article and checks each value against the published dataset.</p><p>The release holds no satellite data: Notebooks 01 to 05 download it with the user's own Google Earth Engine and EUMETSAT credentials. The few small inputs it does hold (the national boundary, the landscape typology, the UN city populations, OpenStreetMap extracts and the survey responses) are listed with their sources and terms in the README. The dataset has its own DOI (10.5281/zenodo.23050559). <code>REPRODUCIBILITY.md</code> explains how to install the environment (Python 3.12.10, exact versions in <code>requirements.lock</code>) and how to reproduce each result.</p>",
+  "creators": [
+    {
+      "name": "Eneche, Patrick Samson Udama",
+      "affiliation": "University of Twente, The Netherlands & Prince Abubakar Audu University, Nigeria",
+      "orcid": "0000-0002-0504-9677"
+    },
+    {
+      "name": "Zeng, Yijian",
+      "affiliation": "University of Twente",
+      "orcid": "0000-0002-2166-5314"
+    },
+    {
+      "name": "Atun, Funda",
+      "affiliation": "University of Twente",
+      "orcid": "0000-0002-6222-8049"
+    },
+    {
+      "name": "Pfeffer, Karin",
+      "affiliation": "University of Twente",
+      "orcid": "0000-0002-6080-1323"
+    }
+  ],
+  "license": "cc-by-4.0",
+  "access_right": "open",
+  "language": "eng",
+  "keywords": [
+    "hot and cold spots",
+    "land surface temperature",
+    "Nigeria",
+    "MODIS",
+    "SEVIRI",
+    "Thermal anomaly",
+    "ERA5-Land",
+    "landscape typology",
+    "stakeholder validation"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "10.5281/zenodo.23050559",
+      "relation": "references",
+      "resource_type": "dataset",
+      "scheme": "doi"
+    },
+    {
+      "identifier": "10.4121/f7e4e2f9-a97c-4259-86bc-4840bc95be2f.v1",
+      "relation": "isDerivedFrom",
+      "resource_type": "dataset",
+      "scheme": "doi"
+    },
+    {
+      "identifier": "10.3390/rs10071114",
+      "relation": "references",
+      "resource_type": "publication-article",
+      "scheme": "doi"
+    }
+  ]
+}

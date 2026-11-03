@@ -27,7 +27,7 @@ license: CC-BY-4.0
 version: "1.0.0"
 date-released: "2026-02-15"
 keywords:
-  - urban heat island
+  - surface hot and cold spots
   - land surface temperature
   - Nigeria
   - MODIS
@@ -36,10 +36,10 @@ keywords:
   - stakeholder validation
   - landscape characterisation
 abstract: >-
-  Reproducible land surface temperature (LST) modelling and mapping of
-  surface hot and cold spots in 56 Nigerian cities. Integrates
+  This is a reproducible land surface temperature (LST) analysis and mapping of
+  surface thermal anomalies in 56 Nigerian cities. We integrate
   multi-source satellite data (MODIS, ERA5-Land, MSG SEVIRI), a
-  stakeholder survey of 105 workshop participants from 21 cities, and
+  stakeholder survey of 105 participants from 21 cities, and
   the physiographic landscape typology of Nigeria to identify, quantify
   and corroborate persistent heat events and surface thermal anomalies.
-  Runs on Python 3.12.10; exact package versions in requirements.lock.
+  All pre-tests ran on on Python 3.12.10; exact package versions in requirements.lock.
