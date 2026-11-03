@@ -5042,15 +5042,6 @@ def create_nigeria_cities_landscape_map(
     ax.grid(True, alpha=0.15, linestyle='--', linewidth=0.5, zorder=0)
     ax.set_aspect('equal')
 
-    # Candidate cities absorbed into a neighbour: a heavy cross on a white halo, so the
-    # mark stays legible over any landscape-class colour.
-    if absorbed_points:
-        for _lon, _lat, _nm in absorbed_points:
-            ax.plot(_lon, _lat, 'o', markersize=9, markerfacecolor='white',
-                    markeredgecolor='none', alpha=0.95, zorder=7)
-            ax.plot(_lon, _lat, 'x', markersize=6, markeredgewidth=2.0,
-                    color='#B2182B', zorder=8)
-
     bounds = nigeria_gdf.total_bounds
     ax.set_xlim(bounds[0] - 0.5, bounds[2] + 0.5)
     ax.set_ylim(bounds[1] - 1.0, bounds[3] + 0.5)
@@ -10604,15 +10595,6 @@ Total Population at Risk (Gi*): {format_population(gi_star_pop)}
     ax.set_aspect('equal')
     
     # Expand bounds to include Lagos and labels
-    # Candidate cities absorbed into a neighbour: a heavy cross on a white halo, so the
-    # mark stays legible over any landscape-class colour.
-    if absorbed_points:
-        for _lon, _lat, _nm in absorbed_points:
-            ax.plot(_lon, _lat, 'o', markersize=9, markerfacecolor='white',
-                    markeredgecolor='none', alpha=0.95, zorder=7)
-            ax.plot(_lon, _lat, 'x', markersize=6, markeredgewidth=2.0,
-                    color='#B2182B', zorder=8)
-
     bounds = nigeria_gdf.total_bounds
     ax.set_xlim(bounds[0] - 0.5, bounds[2] + 0.5)
     ax.set_ylim(bounds[1] - 1.0, bounds[3] + 0.5)
