@@ -1,0 +1,2 @@
+# Notebooks go into git without their outputs: run `python scripts/strip_outputs.py install` once per clone
+*.ipynb filter=strip-outputs

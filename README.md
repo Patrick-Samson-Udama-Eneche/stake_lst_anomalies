@@ -100,6 +100,10 @@ python -m ipykernel install --user --name python3 --display-name "Python (geoven
 >
 > **To check an install at any time:** `python scripts/check_project.py`. It reports PASS, FAIL or NOTE for
 > the environment, code, dataset, outputs and repository. It makes no remote call and runs no notebook.
+>
+> **Before committing from a clone:** run `python scripts/strip_outputs.py install` once. Git then stores
+> every notebook without its outputs (your copy keeps them) and refuses a commit that would add figures,
+> results or secrets. I keep the repository to code and text; the figures and tables are in the article.
 
 ### 2. Configure Credentials
 See [secrets/README.md](secrets/README.md) for the file formats and set-up.
@@ -313,7 +317,8 @@ stake_lst_anomalies/
 ├── scripts/                   # Re-runnable pipeline scripts (ship with the repository)
 │   ├── build_master_summary.py   # Assembles the published composite dataset from cached Results/
 │   ├── check_project.py          # Reports the state of the environment, code, dataset and outputs
-│   └── qa_master_summary.py      # 89-check QA suite over the built dataset
+│   ├── qa_master_summary.py      # 89-check QA suite over the built dataset
+│   └── strip_outputs.py          # Keeps notebook outputs, figures, results and secrets out of git
 │
 ├── src/                       # Reusable Python modules
 │   ├── aoi_utils.py           # AOI processing (buffers, boundaries, statistics)
