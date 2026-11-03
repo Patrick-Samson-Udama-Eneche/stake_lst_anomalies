@@ -187,7 +187,8 @@ def check_results():
 def check_repository():
     print("Repository")
     print(f"  branch {git('branch', '--show-current')}, {git('rev-list', '--count', 'HEAD')} commits, remote {git('remote', 'get-url', 'origin')}")
-    changed = git("status", "--porcelain").splitlines()
+    changed = [line for line in subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain"], capture_output=True,
+                                               text=True).stdout.splitlines() if line]
     if changed:
         report("NOTE", f"{len(changed)} files changed or new", "; ".join(c[3:] for c in changed[:5]))
     else:
