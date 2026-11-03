@@ -465,6 +465,10 @@ I draw Fig. 2 (the workflow) and the graphical abstract outside the notebook.
 
 ## Reproducibility & Data Availability
 
+**[REPRODUCIBILITY.md](REPRODUCIBILITY.md) is the full guide:** the four install routes and how I tested
+them, where to get the caches and the dataset, the four ways to reproduce, run times, and how to check
+that a run worked.
+
 This repository is designed so that the public can **reproduce or replicate** the study either
 end-to-end or at the manuscript-assembly stage alone.
 
@@ -554,7 +558,7 @@ regenerates its checksums without touching the data.
 
 | Deposit | Contents | DOI |
 |---------|----------|-----|
-| **Dataset** | `surface_thermal_anomaly_stakeholder_composite` (GeoPackage + data dictionary) | _to be added_ |
+| **Dataset** | `surface_thermal_anomaly_stakeholder_composite` (GeoPackage + data dictionary) | v1.0.1: [10.5281/zenodo.23777933](https://doi.org/10.5281/zenodo.23777933); all versions: [10.5281/zenodo.23050559](https://doi.org/10.5281/zenodo.23050559) |
 | **Software** | Citable snapshot of this repository, minted from a GitHub release | _to be added_ |
 
 ---
