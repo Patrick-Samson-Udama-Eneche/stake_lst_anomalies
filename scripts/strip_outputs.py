@@ -7,8 +7,8 @@
 
 The filter clears every code cell's outputs and execution count, drops the run timings from the cell
 metadata and gives the notebook the generic kernel `python3`. It works on what git stores, not on the
-file on disk: the notebooks I run keep their figures and tables in my editor, and the repository holds
-code and text only. `git restore` or `git checkout` of a notebook brings back the stored version,
+file on disk: notebooks keep their figures and tables in the editor, and the repository holds code and
+text only. `git restore` or `git checkout` of a notebook brings back the stored version,
 without outputs.
 
 The check runs before every commit. It refuses notebooks that still carry outputs (the filter is not

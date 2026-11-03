@@ -2,7 +2,7 @@
 
 ## Overview
 
-I model land surface temperature (LST) and map surface hot and cold spots in Nigerian cities. I combine satellite data (MODIS, ERA5-Land, MSG SEVIRI), a stakeholder survey from the workshops I organised, and the physiographic landscape typology of Nigeria to identify, quantify and corroborate persistent heat events and surface thermal anomalies.
+We model land surface temperature (LST) and map surface hot and cold spots in Nigerian cities. We combine satellite data (MODIS, ERA5-Land, MSG SEVIRI), a stakeholder survey from the workshops we organised, and the physiographic landscape typology of Nigeria to identify, quantify and corroborate persistent heat events and surface thermal anomalies.
 
 **Study cities:** the 67 Nigerian cities of at least 300,000 inhabitants (UN WUP); 11 of them lie within the urban core of a larger neighbour and merge into it, leaving 56 study cities (configurable in `config.py`)  
 **Test cities:** Lagos, Abuja, Kano, Jos, Port Harcourt  
@@ -59,7 +59,7 @@ python run_all.py --cities "Lag0s" "Abuja"
 
 **Prerequisites:** Python **3.12.10**, Git, and (for the GEE/EUMETSAT notebooks) internet access.
 
-I produced the results in an environment named **`geovenv`** with Python 3.12.10. `requirements.lock`
+We produced the results in an environment named **`geovenv`** with Python 3.12.10. `requirements.lock`
 holds its exact package versions for Windows, Linux and macOS; `requirements.txt` is the loose list
 for new scenarios. Use any one of the four routes below; all give the same versions.
 
@@ -94,8 +94,8 @@ python -m ipykernel install --user --name python3 --display-name "Python (geoven
 > it. Every run of `run_all.py` records the environment in `Results/_provenance/`.
 >
 > **Windows with Smart App Control:** Windows may refuse a package's DLL with "An Application Control
-> policy has blocked this file". Importing again often clears it (I saw this with `statsmodels` and
-> `geemap`). conda-forge's numpy stays blocked, so after `conda env create` I run
+> policy has blocked this file". Importing again often clears it (we saw this with `statsmodels` and
+> `geemap`). conda-forge's numpy stays blocked, so after `conda env create` we run
 > `python -m pip install --force-reinstall --no-deps numpy==2.4.4`, the PyPI build of the same version.
 >
 > **To check an install at any time:** `python scripts/check_project.py`. It reports PASS, FAIL or NOTE for
@@ -103,7 +103,7 @@ python -m ipykernel install --user --name python3 --display-name "Python (geoven
 >
 > **Before committing from a clone:** run `python scripts/strip_outputs.py install` once. Git then stores
 > every notebook without its outputs (your copy keeps them) and refuses a commit that would add figures,
-> results or secrets. I keep the repository to code and text; the figures and tables are in the article.
+> results or secrets. We keep the repository to code and text; the figures and tables are in the article.
 
 ### 2. Configure Credentials
 See [secrets/README.md](secrets/README.md) for the file formats and set-up.
@@ -183,7 +183,7 @@ docker compose run --rm reproduce                        # rebuild the manuscrip
 The rebuild reads only `data/inputs/` and `Results/01_…` to `Results/06_…`. It writes the executed
 notebook to `Results/_provenance/`, where its last output gives the number of checks passed.
 
-Docker cannot read files that a cloud service keeps online only, so I run it from a local copy of the
+Docker cannot read files that a cloud service keeps online only, so we run it from a local copy of the
 project rather than a synced folder. The image has no Arial, so figures drawn in it use DejaVu Sans;
 the values do not change.
 
@@ -400,7 +400,7 @@ is unreliable, so the notebook uses non-parametric association tests.
 ### Manuscript Outputs (`Notebook/07_publication_outputs.ipynb`)
 
 Notebook 07 builds every figure and table of the SCS article and its supplementary material, in
-manuscript order. I take the values from the published dataset (v1.0.1,
+manuscript order. We take the values from the published dataset (v1.0.1,
 `Results/05_hotspot_analysis/surface_thermal_anomaly_stakeholder_composite/`), and from the cached
 results of NB01–NB06 only where the dataset holds no equivalent, checking them against the dataset
 wherever the two overlap. The notebook draws with the functions the analysis notebooks use
@@ -440,7 +440,7 @@ Results/manuscript_outputs/
 └── captions.md · figure_print_sizes.csv · _data_sources.csv
 ```
 
-I draw Fig. 2 (the workflow) and the graphical abstract outside the notebook.
+We draw Fig. 2 (the workflow) and the graphical abstract outside the notebook.
 
 ---
 
@@ -467,7 +467,7 @@ I draw Fig. 2 (the workflow) and the graphical abstract outside the notebook.
 
 ## Reproducibility & Data Availability
 
-**[REPRODUCIBILITY.md](REPRODUCIBILITY.md) is the full guide:** the four install routes and how I tested
+**[REPRODUCIBILITY.md](REPRODUCIBILITY.md) is the full guide:** the four install routes and how we tested
 them, the credentials and downloads, the ways to reproduce, run times, and how to check that a run worked.
 
 This repository is designed so that the public can **reproduce or replicate** the study either

@@ -7,7 +7,7 @@ The repository holds the code and a few small inputs (see *Data in this reposito
 It holds no satellite data: the notebooks download it with your own Google Earth Engine and EUMETSAT credentials.
 The figures and tables are published with the article, and Notebook 07 rebuilds them. The dataset is on Zenodo.
 
-| I want to … | I need | Where | Time |
+| To … | You need | Where | Time |
 |---|---|---|---|
 | **A.** re-run the study from the sources | Earth Engine and EUMETSAT credentials | [section 3](#a-re-run-the-study-from-the-sources) | hours |
 | **B.** rebuild the article's figures and tables | the results of A | [section 4](#b-rebuild-the-articles-figures-and-tables) | 6–15 min |
@@ -38,7 +38,7 @@ The notebooks download:
 
 ## 1. Install
 
-I produced the results with **Python 3.12.10** in an environment named `geovenv`. `requirements.lock` holds
+We produced the results with **Python 3.12.10** in an environment named `geovenv`. `requirements.lock` holds
 its exact package versions for Windows, Linux and macOS. Any one of four routes gives the same versions:
 
 ```powershell
@@ -65,11 +65,11 @@ For routes 1 and 2, activate the environment (`.\geovenv\Scripts\Activate.ps1`; 
 `source geovenv/bin/activate`) before running anything. Then run `python scripts/check_project.py`: it reports
 PASS, FAIL or NOTE for the environment, code, dataset, outputs and repository, without any remote call.
 
-I tested every route from a fresh start on Windows 11, with the results of a full run in place:
+We tested every route from a fresh start on Windows 11, with the results of a full run in place:
 
 | Route | Project check | Notebook 07 | Notes |
 |---|---|---|---|
-| uv | 17 passed, 0 failed | 79 of 79 | the same GEOS 3.13.1, PROJ 9.5.1 and GDAL 3.11.4 as my build |
+| uv | 17 passed, 0 failed | 79 of 79 | the same GEOS 3.13.1, PROJ 9.5.1 and GDAL 3.11.4 as our build |
 | pip | 17 passed, 0 failed | 79 of 79 | the same libraries as uv |
 | conda | 17 passed, 0 failed | 79 of 79 | newer GEOS 3.14.1, PROJ 9.8.1 and GDAL 3.13.3: the same values, not the same bytes |
 | Docker (Linux) | 59 tests pass in the image | 79 of 79 | the same values; text files with Linux line endings; figures in DejaVu Sans |
@@ -82,7 +82,7 @@ I tested every route from a fresh start on Windows 11, with the results of a ful
   a local folder: Docker cannot read files that a cloud service keeps online only.
 - **Windows with Smart App Control.** Windows may refuse a package's DLL with "An Application Control policy has
   blocked this file". Importing again often clears it. conda-forge's numpy stays blocked, so after
-  `conda env create` I run `python -m pip install --force-reinstall --no-deps numpy==2.4.4`, the PyPI build of
+  `conda env create` we run `python -m pip install --force-reinstall --no-deps numpy==2.4.4`, the PyPI build of
   the same version.
 
 ## 2. Accounts and credentials
@@ -124,7 +124,7 @@ Each notebook keeps what it has downloaded, so a run that stops can be started a
 missing. Earth Engine requests that hang (a computer going to sleep, a dropped connection) time out and are
 retried.
 
-**Time.** I tested this from an empty folder with two cities, Jos and Bida, on the laptop of section 1:
+**Time.** We tested this from an empty folder with two cities, Jos and Bida, on the laptop of section 1:
 
 | Step | Time for two cities |
 |---|---|
@@ -139,7 +139,7 @@ For all 56 cities the run takes the better part of a day; with the downloads in 
 18 minutes, Notebook 06 two minutes and Notebook 07 6–15 minutes.
 
 **It worked if** `run_all.py` ends with "0 failed" and Notebook 07 reports "Assertions: 79 of 79 passed". With the
-same downloads as mine, Notebook 05's rebuild of the dataset matches the published one except for the one value
+same downloads as ours, Notebook 05's rebuild of the dataset matches the published one except for the one value
 described in section 6. If a provider has reprocessed its archive since, values can differ; Notebook 05's quality
 checks and Notebook 07's assertions then name what changed.
 
@@ -208,7 +208,7 @@ layer = gpd.read_file(path, layer="...")  # one layer, by name
 
 ### The published dataset and this code
 
-The code rebuilds the dataset as I last built it, on 29 October 2026. The published v1.0.1 is the build of
+The code rebuilds the dataset as we last built it, on 29 October 2026. The published v1.0.1 is the build of
 28 October. The two differ in one data value: one participant left "recency of contact with the city" blank,
 which v1.0.1 stores as empty and the rebuild stores as "I'd rather not say". No figure or table reads this field,
 and Notebook 07 passes all 79 checks with v1.0.1. The wording of the data dictionary and a few entries of the
@@ -232,7 +232,7 @@ Every run of `run_all.py` also records the environment (Python, packages and lib
 ## Releasing a new version
 
 1. `python scripts/check_project.py` reads 0 failed, and `pytest tests -q` passes.
-2. I publish a release on GitHub (tag `v<version>`). Zenodo archives it at once under the code's concept DOI, with
+2. We publish a release on GitHub (tag `v<version>`). Zenodo archives it at once under the code's concept DOI, with
    the metadata in `.zenodo.json`.
 
 ## How to cite
