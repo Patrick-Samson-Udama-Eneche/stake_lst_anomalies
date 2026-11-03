@@ -50,12 +50,6 @@
       "relation": "isDerivedFrom",
       "resource_type": "dataset",
       "scheme": "doi"
-    },
-    {
-      "identifier": "10.3390/rs10071114",
-      "relation": "references",
-      "resource_type": "publication-article",
-      "scheme": "doi"
     }
   ]
 }
