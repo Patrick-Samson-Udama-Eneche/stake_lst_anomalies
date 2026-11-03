@@ -1,10 +1,10 @@
 # Secrets Directory
 
-This directory contains sensitive credentials and API keys for the LST Modeling Project.
+This directory contains sensitive credentials but have been .gitignored.
 
 ## ⚠️ SECURITY NOTICE
 
-**All files in this directory are git-ignored and should NEVER be committed to version control.**
+**Use the examples provided to prepare your keys or access files.**
 
 ## Required Files
 
