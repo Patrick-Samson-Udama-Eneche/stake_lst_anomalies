@@ -6,7 +6,7 @@ I model land surface temperature (LST) and map surface hot and cold spots in Nig
 
 **Study cities:** the 67 Nigerian cities of at least 300,000 inhabitants (UN WUP); 11 of them lie within the urban core of a larger neighbour and merge into it, leaving 56 study cities (configurable in `config.py`)  
 **Test cities:** Lagos, Abuja, Kano, Jos, Port Harcourt  
-**Stakeholders:** 105 workshop participants from 21 cities in 10 typology clusters  
+**Stakeholders:** 105 participants from 21 cities in 10 typology clusters  
 **Period:** LST trends 2006–2025; persistent heat events and surface spots in 2024  
 
 ---
@@ -20,23 +20,23 @@ The pipeline uses **67 cities** from the UN WUP dataset with population ≥300k 
 
 | # | City | # | City | # | City | # | City |
 |---|------|---|------|---|------|---|------|
-| 1 | Aba | 18 | Enugu | 35 | Kaduna | 52 | Oron |
-| 2 | Abakaliki | 19 | Erin-osun | 36 | Kano | 53 | Oshogbo |
-| 3 | Abeokuta | 20 | Gamboru | 37 | Katsina | 54 | Otite |
-| 4 | Aboh | 21 | Gboko | 38 | KUNDULUN | 55 | Owerri |
-| 5 | Abonnema | 22 | Gusau | 39 | Lagos | 56 | Oyigbo |
-| 6 | Abuja | 23 | Gwagwalada | 40 | Lokoja | 57 | Oyo |
-| 7 | Ado Ekiti | 24 | Ibadan | 41 | Madalla | 58 | Port Harcourt |
-| 8 | Akure | 25 | Ife | 42 | Maiduguri | 59 | Potiskum |
-| 9 | Asaba | 26 | Ijebu-Ode | 43 | Makurdi | 60 | Saki |
-| 10 | Bauchi | 27 | Ikare | 44 | Minna | 61 | Sapele |
-| 11 | Benin City | 28 | Ikere-Ekiti | 45 | Nsukka | 62 | Sokoto |
-| 12 | Bida | 29 | Ikorodu | 46 | Ogale | 63 | Titi |
-| 13 | Bonny | 30 | Ikot Ekpene | 47 | Ogbomosho | 64 | Ughelli |
-| 14 | Calabar | 31 | Ilesa | 48 | Ondo | 65 | Umuahia |
-| 15 | Daura | 32 | Ilorin | 49 | Onitsha | 66 | Uyo |
-| 16 | Dere | 33 | Iseyin | 50 | Warri | 67 | Yenagoa |
-| 17 | | 34 | Jos | 51 | Yola | | Zaria |
+| 1 | Aba | 18 | Erin-osun | 35 | Kano | 52 | Owerri |
+| 2 | Abakaliki | 19 | Gamboru | 36 | Katsina | 53 | Oyigbo |
+| 3 | Abeokuta | 20 | Gboko | 37 | KUNDULUN | 54 | Oyo |
+| 4 | Aboh | 21 | Gusau | 38 | Lagos | 55 | Port Harcourt |
+| 5 | Abonnema | 22 | Gwagwalada | 39 | Lokoja | 56 | Potiskum |
+| 6 | Abuja | 23 | Ibadan | 40 | Madalla | 57 | Saki |
+| 7 | Ado Ekiti | 24 | Ife | 41 | Maiduguri | 58 | Sapele |
+| 8 | Akure | 25 | Ijebu-Ode | 42 | Makurdi | 59 | Sokoto |
+| 9 | Asaba | 26 | Ikare | 43 | Minna | 60 | Titi |
+| 10 | Bauchi | 27 | Ikere-Ekiti | 44 | Nsukka | 61 | Ughelli |
+| 11 | Benin City | 28 | Ikorodu | 45 | Ogale | 62 | Umuahia |
+| 12 | Bida | 29 | Ikot Ekpene | 46 | Ogbomosho | 63 | Uyo |
+| 13 | Bonny | 30 | Ilesa | 47 | Ondo | 64 | Warri |
+| 14 | Calabar | 31 | Ilorin | 48 | Onitsha | 65 | Yenagoa |
+| 15 | Daura | 32 | Iseyin | 49 | Oron | 66 | Yola |
+| 16 | Dere | 33 | Jos | 50 | Oshogbo | 67 | Zaria |
+| 17 | Enugu | 34 | Kaduna | 51 | Otite |  |  |
 
 > **Note:** 11 cities merge into a neighbouring study city (e.g., Ikorodu → Lagos), leaving 56 study cities.
 
@@ -110,7 +110,7 @@ See [secrets/README.md](secrets/README.md) for the file formats and set-up.
 
 | Credential | Required By | Location |
 |-----------|------------|----------|
-| GEE Service Account | Notebooks 01, 03, 04, 05 | `secrets/gee_service_account.json` |
+| GEE Service Account | Notebooks 01, 03, 04 and the population step (`scripts/extract_population_100m.py`, run with Notebook 05) | `secrets/gee_service_account.json` |
 | EUMETSAT API Keys | Notebook 04 (SEVIRI) | `secrets/eumetsat_credentials.json` |
 
 ### 3. Run the Analysis
@@ -195,27 +195,23 @@ All notebooks live in `Notebook/` and must be run in order — each builds on ou
 stages.
 
 ```
-01_AOI_delineation ──► 02_stakeholder_analysis (independent)
-│                            │
-├──► 03_temporal_months_annual│
-│                             │
-└──► 04_temporal_daily        │
-        │                     │
-        └──► 05_hotspot_analysis
-                │             │
+01_AOI_delineation
+├──► 02_stakeholder_analysis
+├──► 03_temporal_analysis_months_annual   (also reads NB02's attendee list)
+└──► 04_temporal_analysis_daily
+        └──► 05_hotspot_analysis           (with the population step; builds the dataset)
                 └──► 06_hotspot_modelling
-                              │
-                              └──► 07_publication_outputs (manuscript assembly)
+                        └──► 07_publication_outputs (manuscript assembly)
 ```
 
 | # | Notebook | Purpose | External APIs | Inputs |
 |---|---------|---------|--------------|--------|
-| 01 | `01_AOI_delineation.ipynb` | Define city AOIs (zones, boundaries, population, Cluster25) **and** extract OSM water/roads/places + create study-area maps (former `01a`, now merged) | GEE, OSM | Cities CSV, urban/boundary GeoJSON |
-| 02 | `02_stakeholder_analysis.ipynb` | Stakeholder survey mapping and perception analysis | — | `master_composite.csv`, cities CSV |
-| 03 | `03_temporal_analysis_months_annual.ipynb` | Monthly/annual LST extraction and trend analysis (2006–2024) | GEE (MODIS) | Notebook 01 AOI outputs |
-| 04 | `04_temporal_analysis_daily.ipynb` | Daily LST analysis: MODIS + ERA5 hot events, SEVIRI persistent heat rasters | GEE, EUMETSAT | Notebook 01 AOI outputs |
-| 05 | `05_hotspot_analysis.ipynb` | Surface hot and cold spot detection (Gi\*), KDE delineation, landscape enrichment, population within spots, stakeholder corroboration | GEE (GHSL) | Notebooks 03 + 04 outputs, landscape/survey data |
-| 06 | `06_hotspot_modelling.ipynb` | Landscape-oriented modelling: extent (OLS) and intensity (OLS) with hierarchical block entry, city-clustered SEs, and Wild Cluster Bootstrap inference (B = 999) | — | Notebook 05 hotspot outputs, landscape data |
+| 01 | `01_AOI_delineation.ipynb` | Three zones per city from GHS-SMOD (urban core, background reference area, city region), with JRC surface water removed; OpenStreetMap roads and places; each city's 2024 UN WUP population and landscape cluster; overview, zone and population-trend figures; the zones exported as Earth Engine assets | GEE, OSM | UN WUP 2025 cities, Nigeria boundary, landscape typology |
+| 02 | `02_stakeholder_analysis.ipynb` | Stakeholder survey: who took part, from which cities and clusters, and how they perceive warming | — | `master_composite.csv`, NB01's `city_cluster25_lookup.csv` |
+| 03 | `03_temporal_analysis_months_annual.ipynb` | Monthly and annual MODIS LST for the three zones, 2006–2025, and their long-term trends per city, cluster and nation | GEE (MODIS) | NB01's zones and assets, NB02's attendee list |
+| 04 | `04_temporal_analysis_daily.ipynb` | Daily MODIS and ERA5-Land LST in 2024, persistent heat events, one selected event per city and period, and its MSG-SEVIRI composites | GEE, EUMETSAT | NB01's zones and assets |
+| 05 | `05_hotspot_analysis.ipynb` | Surface hot and cold spot detection (Gi\*), KDE contours, landscape enrichment, population within spots, stakeholder corroboration; builds the published dataset (§14) | — (the population step uses GEE) | NB01's zones, NB04's SEVIRI composites and SUHII, the survey |
+| 06 | `06_hotspot_modelling.ipynb` | Association of the landscape typology (Cluster25) and of its elements (climate zone, geology, elevation) with spot occurrence (Monte Carlo χ², Cramér's V), SUHII and spot area (Kruskal–Wallis, η², Dunn post-hoc), Holm-corrected across elements | — | NB05's spot layer, NB04's SUHII |
 | pub | `07_publication_outputs.ipynb` | **Manuscript assembly** — re-renders every manuscript figure, supplementary figure, table and appendix from cached `Results/`, in manuscript order. No GEE/OSM. | — | Cached `Results/` from 01–06 |
 
 | data | `scripts/build_master_summary.py` | **Published dataset assembly** — builds the composite GeoPackage and its data dictionary from cached `Results/`, then runs the QA suite. No GEE/OSM. | — | Cached `Results/` from 01–05 |
@@ -225,41 +221,22 @@ stages.
 > `--scope manuscript` / `--scope dataset`). Both read only cached `Results/` and need no
 > credentials. Registry entries may point at a notebook (`file`) or a Python script (`script`).
 
-### Execution Times (Benchmark)
+### Run times
 
-Timings below were measured on a modest development workstation:
+Measured on a laptop with an Intel Core i7-8650U, 16 GB of RAM and Windows 11 (3 November 2026):
 
-| Component | Specification |
-|-----------|---------------|
-| **CPU** | Intel Core i7-4600U @ 2.10 GHz (2 cores, 4 threads) |
-| **RAM** | 8 GB DDR3 |
-| **OS** | Windows 11 |
-| **Python** | 3.12.10 |
-| **Internet** | ~50 Mbps (required for GEE/OSM/EUMETSAT APIs) |
+| Notebook | Time | Notes |
+|----------|------|-------|
+| **01** AOI delineation | about 5 min for two cities | downloads OpenStreetMap, GHS-SMOD and JRC water; exports the Earth Engine assets |
+| **02** Stakeholder analysis | under 1 min | no download |
+| **03** Monthly and annual LST | 3 to about 40 min per city | MODIS 2006–2025 through Earth Engine; longer for complex city outlines |
+| **04** Daily LST | 28 min for two cities | ERA5-Land and MODIS through Earth Engine, MSG-SEVIRI from EUMETSAT |
+| **05** Hotspot analysis | 18–20 min for all 56 cities | with the downloads in place |
+| **06** Typology association | 2 min | |
+| **07** Publication outputs | 6–15 min | |
 
-| Notebook | ~Time (5 cities) | ~Time per city | Notes |
-|----------|------------------|----------------|-------|
-| **01** AOI Delineation (incl. OSM/JRC) | 18–28 min | 4–6 min | Local zones + GEE water + OSM roads/places + maps |
-| **02** Stakeholder Analysis | 3–5 min | — | Survey data (no per-city loop) |
-| **03** Monthly/Annual LST | 30–45 min | 6–9 min | GEE MODIS extraction (2006–2024) |
-| **04** Daily LST + SEVIRI | 45–90 min | 10–18 min | GEE + EUMETSAT download (network-bound) |
-| **05** Hotspot Analysis | 20–30 min | 4–6 min | Gi\* statistics, KDE, population within spots |
-
-> **Tip:** For 67 cities (`CITY_SELECTION_MODE = "ABOVE_300K"`), expect 8–12 hours total.  
-> Use `"TEST"` mode (5 cities) for development/debugging (~2–3 hours total).
-
-### Visualization and Output Logic
-
-When processing many cities (`ALL` or `ABOVE_1M` mode), the pipeline uses **smart output strategies** to keep publication figures readable while still generating per-city outputs:
-
-| Output Type | ALL/ABOVE_1M Mode | TEST/SPECIFIC Mode |
-|-------------|-------------------|-------------------|
-| **Publication study area map** | Nigeria + 5 TEST cities only | All selected cities |
-| **Per-city study area maps** | ✓ Saved to `City_[Name]/Figures/` | ✓ Saved to `City_[Name]/Figures/` |
-| **Per-city feature maps** | ✓ AOI-bounded extent | ✓ AOI-bounded extent |
-| **Summary charts** | ✓ All cities included | ✓ All cities included |
-
-All per-city maps use the **AOI boundary from Notebook 01** as the definitive map extent, ensuring consistent framing across the pipeline.
+A full run for all 56 cities takes many hours, most of them in Notebooks 03 and 04; with two cities (`--cities`)
+it took about an hour. [REPRODUCIBILITY.md](REPRODUCIBILITY.md) gives the details.
 
 ### City Selection Configuration
 
@@ -267,16 +244,16 @@ City selection is controlled in **`config.py`** via `CITY_SELECTION_MODE`. Edit 
 
 | Mode | Description | Cities |
 |------|-------------|--------|
-| `"ALL"` | All cities in the CSV file | 791 cities |
+| `"ALL"` | All cities in the UN WUP table | 67 cities |
 | `"ABOVE_1M"` | Cities with population ≥ 1 million | 17 cities |
 | `"ABOVE_500K"` | Cities with population ≥ 500k | 37 cities |
 | `"ABOVE_300K"` | Cities with population ≥ 300k (default) | 67 cities → 56 study cities |
 | `"TEST"` | Quick development/debugging runs | Lagos, Abuja, Kano, Jos, Port Harcourt |
-| `"SPECIFIC"` | User-specified custom selection | Any from 791 valid cities |
+| `"SPECIFIC"` | User-specified custom selection | Any of the 67 cities |
 
 ```python
 # In config.py — change this line:
-CITY_SELECTION_MODE = "ALL"        # All 791 cities in CSV
+CITY_SELECTION_MODE = "ALL"        # All 67 cities in the UN WUP table
 CITY_SELECTION_MODE = "ABOVE_1M"   # 17 cities >= 1M population
 CITY_SELECTION_MODE = "ABOVE_500K" # 37 cities >= 500k population
 CITY_SELECTION_MODE = "ABOVE_300K" # 67 cities >= 300k population (default)
@@ -292,7 +269,9 @@ Lagos, Onitsha, Kano, Owerri, Ibadan, Port Harcourt, Kaduna, Benin City, Warri, 
 
 ### City Selection Flow
 
-Cities selected in **config.py** automatically flow to all downstream notebooks. Each downstream notebook auto-discovers cities by scanning the output directories of its predecessors — no manual configuration needed.
+Notebook 01 takes its cities from `CITY_SELECTION_MODE` (`python run_all.py --cities …` sets `"SPECIFIC"` for every
+notebook it runs). The later notebooks find the cities in the outputs of the earlier ones, so start from an empty
+`Results/` when you change the set of cities.
 
 ---
 
@@ -300,13 +279,16 @@ Cities selected in **config.py** automatically flow to all downstream notebooks.
 
 ```
 stake_lst_anomalies/
-├── run_all.py                 # Master runner script (automated execution)
-├── config.py                  # Centralized configuration (paths, parameters, CRS)
-├── requirements.txt           # Python dependencies
-├── .gitignore                 # Git ignore rules
+├── run_all.py                 # Runs the notebooks in order (and the population step)
+├── config.py                  # Paths, parameters, CRS, city selection
+├── requirements.lock          # Exact package versions (Python 3.12.10); requirements.txt: loose list
+├── environment.yml            # conda route
+├── Dockerfile, docker-compose.yml
+├── REPRODUCIBILITY.md         # How to install, run and check
+├── CITATION.cff, .zenodo.json, LICENSE
 │
 ├── Notebook/                  # All notebooks (analysis 01–06 + manuscript assembly)
-│   ├── 01_AOI_delineation.ipynb          # AOI zones + OSM/JRC features (former 01a merged in)
+│   ├── 01_AOI_delineation.ipynb
 │   ├── 02_stakeholder_analysis.ipynb
 │   ├── 03_temporal_analysis_months_annual.ipynb
 │   ├── 04_temporal_analysis_daily.ipynb
@@ -314,25 +296,31 @@ stake_lst_anomalies/
 │   ├── 06_hotspot_modelling.ipynb
 │   └── 07_publication_outputs.ipynb         # Assembles manuscript artwork from cached Results/
 │
-├── scripts/                   # Re-runnable pipeline scripts (ship with the repository)
-│   ├── build_master_summary.py   # Assembles the published composite dataset from cached Results/
+├── scripts/
+│   ├── build_master_summary.py   # Builds the published dataset from cached Results/ (also run by NB05 §14)
+│   ├── qa_master_summary.py      # QA suite over the built dataset
+│   ├── extract_population_100m.py  # Sums GHS-POP inside each spot and zone (Earth Engine)
+│   ├── compute_hitrate.py        # Stakeholder hit rates (NB05 and the dataset build)
+│   ├── env_report.py             # Records the environment of every run in Results/_provenance/
+│   ├── build_scs_outputs.py      # Runs Notebook 07
+│   ├── make_cluster_labels.py    # Writes the cluster label lookup
+│   ├── compare_to_archive.py     # Compares a dataset build with the published v1.0.0
 │   ├── check_project.py          # Reports the state of the environment, code, dataset and outputs
-│   ├── qa_master_summary.py      # 89-check QA suite over the built dataset
 │   └── strip_outputs.py          # Keeps notebook outputs, figures, results and secrets out of git
 │
-├── src/                       # Reusable Python modules
-│   ├── aoi_utils.py           # AOI processing (buffers, boundaries, statistics)
+├── src/                       # Python modules used by the notebooks
+│   ├── aoi_utils.py, dual_zone_aoi_utils.py, water_download_utils.py   # zones and water (NB01; aoi_utils also NB03)
+│   ├── gee_utils.py           # Earth Engine: start-up, MODIS and ERA5-Land extraction (NB01, NB03, NB04)
+│   ├── temporal_analysis.py   # LST trend statistics (NB03)
+│   ├── daily_analysis_utils.py  # Daily series and persistent heat events (NB04)
+│   ├── seviri_processing_utils.py  # EUMETSAT MSG-SEVIRI download and processing (NB04)
 │   ├── data_io.py             # Data loading, export, spatial operations
-│   ├── gee_utils.py           # Google Earth Engine extraction (MODIS, ERA5)
-│   ├── temporal_analysis.py   # LST trend analysis and statistics
-│   ├── temporal_analysis_utils.py  # Daily LST helper functions
-│   ├── decision_tree_utils.py # Heat event decision tree logic
-│   ├── seviri_processing_utils.py  # EUMETSAT SEVIRI download and processing
-│   ├── modelling_utils.py     # Hierarchical regression, panel charts (NB06)
-│   ├── pub_figures.py         # Main-figure drawing code and the rules of Table 3 (NB07)
-│   ├── pub_hotspot_tables.py  # Manuscript §3.3–§3.4 table builders (csv + styled xlsx)
-│   ├── temporal_panels.py     # Annual/monthly trend panel renderer (NB03 split)
-│   └── visualization.py       # All plotting functions (~8,000 lines)
+│   ├── visualization.py       # Plotting functions (~16,700 lines; NB01–NB04, NB07)
+│   ├── pub_figures.py, pub_hotspot_tables.py, temporal_panels.py, scs_style.py   # NB07
+│   ├── decision_tree_utils.py, temporal_analysis_utils.py   # covered by the tests, not called by the notebooks
+│   └── modelling_utils.py     # the earlier regression approach to NB06, no longer used
+│
+├── tests/                     # pytest suite (59 tests)
 │
 ├── data/
 │   ├── inputs/
@@ -342,15 +330,16 @@ stake_lst_anomalies/
 │   └── outputs/                    # The run log of run_all.py (not in git)
 │
 ├── Results/                   # Pipeline outputs and caches (git-ignored)
-│   ├── 01_aoi_delineation/         # City AOI boundaries, zones, population, cluster tables
+│   ├── 01_aoi_delineation/         # Zones, population, cluster tables; <City>/figures/ and <City>/osm/
 │   ├── 02_stakeholder_analysis/    # Survey maps, perception charts, stakeholder figures
-│   ├── 03_… / 04_… / 06_…          # Temporal, daily and modelling outputs
-│   ├── 05_hotspot_analysis/        # Hotspot outputs, and the published dataset:
-│   │   └── surface_thermal_anomaly_stakeholder_composite/
-│   │       ├── surface_thermal_anomaly_stakeholder_composite.gpkg   # 17 layers, the dataset
-│   │       ├── data_dictionary.csv / .md                            # one table per layer
-│   │       └── _build/             # reports, README, CHANGELOG, checksums (not archived)
-│   └── manuscript_outputs/         # Assembled manuscript figures/tables/appendices (see above)
+│   ├── 03_… / 04_… / 06_…          # Temporal, daily and association outputs
+│   ├── 05_hotspot_analysis/        # Spots, contours, population, and the dataset:
+│   │   ├── surface_thermal_anomaly_stakeholder_composite/
+│   │   │   ├── surface_thermal_anomaly_stakeholder_composite.gpkg   # 18 layers, the dataset
+│   │   │   ├── data_dictionary.csv / .md                            # one table per layer
+│   │   │   └── README.md, CHANGELOG.md, LICENSE.txt, checksums_md5.txt
+│   │   └── dataset_build/          # build record: reports and checks (not published)
+│   └── manuscript_outputs/         # Manuscript figures/tables/appendices (see Outputs Summary)
 │
 └── secrets/                   # API credentials (git-ignored)
     ├── gee_service_account.json
@@ -363,38 +352,50 @@ stake_lst_anomalies/
 
 | Parameter | Value | Description |
 |-----------|-------|-------------|
-| `PROJECT_STUDY_YEAR` | 2024 | Reference year for all analyses |
-| `HOTSPOT_CONFIG.percentile_hot` | 90 | Top 10% = hot pixels |
-| `KDE_CONFIG.contour_levels` | [50, 75, 90] | Nested hotspot polygons |
-| `RESAMPLE_CONFIG.resolution_m` | 250 | Resampled binary mask resolution |
-| `AOI_BUFFER_DISTANCE` | 5000m | Buffer around urban polygons |
-| `FIGURE_DPI` | 300 | Publication-quality output |
-| `HIERARCHY_BLOCKS` | Climate → Geology → Elevation | Hierarchical regression block order |
-| `OLS_CLUSTERED_CONFIG.cluster_variable` | city | City-level clustered standard errors |
-| `WILD_BOOTSTRAP_CONFIG.n_bootstrap` | 999 | Wild Cluster Bootstrap replications (Rademacher weights) |
+| `PROJECT_STUDY_YEAR` | 2024 | Study year of the daily analysis, the events and the spots |
+| `TEMPORAL_CONFIG['years']` | 2006–2025 | Years of the long-term MODIS series (NB03) |
+| `CITY_SELECTION_MODE` | `"ABOVE_300K"` | Cities to process (see City Selection Configuration) |
+| `BRA_BUFFER_M` | 10,000 m | The background reference area: the envelope of the urban core buffered by this distance |
+| `HOTSPOT_PERCENTILE_HOT` / `HOTSPOT_PERCENTILE_COLD` | 90 / 10 | LST percentiles of the hot and cold candidate pixels (NB05) |
+| `HOTSPOT_FDR_ALPHA` | 0.05 | Benjamini–Hochberg false discovery rate for Gi\* (NB05) |
+| `KDE_CONTOUR_LEVELS` | 0.50, 0.75, 0.90 | Nested contour levels L50 ⊃ L75 ⊃ L90 of each spot (NB05) |
+| `FIGURE_DPI` | 300 | Resolution of saved raster figures |
 
-The `CITIES` list is populated dynamically by scanning Notebook 04 SEVIRI outputs (via `load_cities_from_daily_analysis()`). For Notebook 01, cities are selected interactively or via CLI.
+`config.py` also holds settings from the earlier regression approach to Notebook 06 (`HIERARCHY_BLOCKS`,
+`OLS_CLUSTERED_CONFIG`, `WILD_BOOTSTRAP_CONFIG`); no notebook uses them.
 
 ---
 
 ## Outputs Summary
 
 ### Notebook 05 — Hotspot Analysis Outputs
-- **Hotspot polygons** (GeoJSON, EPSG:4326 + EPSG:3857) with landscape, LST, and population attributes
-- **City grid maps** — multi-panel hotspot maps with survey overlay per city
-- **Gi\* distribution plots** — statistical significance of hotspot detection
-- **Contour area charts** — hotspot area by landscape class and contour level
-- **Population half-donuts** — residents within surface hot and cold spots per city
-- **National summary map** — proportional symbol map across all study cities
-- **Stakeholder perception charts** — reasons/mitigation by Cluster25 landscape type
-- **Tree species heatmaps** — 4 variants (by cluster/city × top-15/all species)
+- **Spot layer** `all_cities_spots.geojson` / `.csv` (EPSG:4326; computed in ESRI:102022): the L50 footprint of
+  every surface hot and cold spot with its landscape, LST, SUHII and population attributes
+- **`master_thermal_spots.gpkg`** — the L50/L75/L90 contours, the city zones and the stakeholder hot and cold points
+- **Summary tables** — per spot, per cluster, national, and the population half-donut tables (city, cluster)
+- **Per-city maps** (§11a) — the LST raster with the L50/L75/L90 contours, the urban core and the stakeholder points
+- **A4 grids** (§11a2) — all 56 cities, day and night
+- **Gi\* distribution plots** (§11b) — the Z-score distributions, hot and cold
+- **Contour area charts** (§11c) — spot area by landscape cluster
+- **Population half-donuts** (§11d) — residents within surface hot and cold spots, per city, cluster and nation
+- **National summary maps** (§11e) — proportional population circles over the Cluster25 map, hot and cold
+- **Stakeholder perception chart** (§11f) — Q60 (diurnal severity) and Q61 (ten-year warming) by Cluster25
+- **Descriptive charts** (§12b, §12c) — spot area, population within spots and core compactness by cluster;
+  ranked spot area per city and per cluster
+- **The published dataset** (§14), in `surface_thermal_anomaly_stakeholder_composite/`
 
-### Notebook 06 — Hotspot Modelling Outputs
+### Notebook 06 — Typology Association Outputs
+
+Units: 56 cities and 185 spots (95 hot, 90 cold). With a median of 3–5 cities per cluster, regression inference
+is unreliable, so the notebook uses non-parametric association tests.
+
 - **Normality diagnostics** (CSV) — Shapiro–Wilk and D'Agostino–Pearson tests of SUHII and spot area
 - **Part A tables** (CSV) — the typology against spot occurrence (Monte Carlo χ², Cramér's V), SUHII and area (Kruskal–Wallis, η²)
 - **Part B tables** (CSV) — the same tests for each typology element (climate, geology, elevation), Holm-corrected
-- **Synthesis tables** (CSV) — the typology against its best single element for every outcome
-- **Forest plot** — effect sizes of the typology and its elements
+- **Synthesis tables** (CSV) — Cramér's V between the typology and each element; the typology against its best
+  single element for every outcome; the master synthesis table of all results
+- **Figures** — effect-size heatmaps, the cluster thermal profile heatmap, distribution boxplots by cluster and by
+  element, Dunn post-hoc heatmaps, and the forest plot of all effect sizes
 
 ### Manuscript Outputs (`Notebook/07_publication_outputs.ipynb`)
 
@@ -459,7 +460,7 @@ I draw Fig. 2 (the workflow) and the graphical abstract outside the notebook.
 | **Phase 2** | Complete | Monthly/annual LST temporal analysis |
 | **Phase 3** | Complete | Daily LST analysis (MODIS, ERA5, SEVIRI) |
 | **Phase 4** | Complete | Surface hot and cold spot detection and stakeholder corroboration |
-| **Phase 5** | Complete | Landscape-oriented spot modelling — occurrence, extent and intensity (Notebook 06) |
+| **Phase 5** | Complete | Association of the landscape typology with spot occurrence, SUHII and area (Notebook 06) |
 | **Phase 6** | Complete | Manuscript figures and tables (Notebook 07) |
 
 ---
@@ -492,7 +493,9 @@ end-to-end or at the manuscript-assembly stage alone.
   ```
 
 - **Step-by-step (incremental) reproduction** — open the notebooks in order (01 → 06, then
-  `Notebook/07_publication_outputs.ipynb`) in Jupyter and run them cell by cell.
+  `Notebook/07_publication_outputs.ipynb`) in Jupyter and run them cell by cell. On a first run, Notebook 05
+  stops after writing its spots and zones: run `python scripts/extract_population_100m.py`, then Notebook 05
+  again.
 
 ### The published dataset
 

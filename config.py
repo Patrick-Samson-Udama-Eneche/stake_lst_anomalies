@@ -153,13 +153,13 @@ SEVIRI_NATIONAL_BBOX = {
 # =============================================================================
 # VALID CITY NAMES (from Major_cities_population_Nigeria_WUP_2025.csv)
 # =============================================================================
-# These are all 791 cities in the UN WUP 2025 File 21 dataset for Nigeria.
+# These are the 67 Nigerian cities of at least 300,000 inhabitants in the UN WUP 2025 cities table.
 # City names passed via CLI (--cities) or selected in Notebook 01 are
 # validated against this list.  Spelling and capitalisation must match
 # exactly.  Use validate_city_names() to check user input and get
 # suggestions for typos.
 #
-# Rather than embedding 791 names here, VALID_CITIES is built lazily
+# Rather than embedding the names here, VALID_CITIES is built lazily
 # from the CSV file the first time it is needed.
 _VALID_CITIES_CACHE: Optional[List[str]] = None
 
@@ -331,7 +331,7 @@ TEST_CITIES: List[str] = [
 # Control which cities to process in notebooks.
 # 
 # CITY_SELECTION_MODE options:
-#   - "ALL"        : Process all 791 cities in the CSV file
+#   - "ALL"        : Process all 67 cities in the CSV file
 #   - "ABOVE_1M"   : 17 cities with population >= 1 million
 #   - "ABOVE_500K" : 37 cities with population >= 500k
 #   - "ABOVE_300K" : 67 cities with population >= 300k (default)
@@ -340,7 +340,7 @@ TEST_CITIES: List[str] = [
 #
 # SELECTED_CITIES:
 #   - Only used when CITY_SELECTION_MODE = "SPECIFIC"
-#   - Can be any cities from VALID_CITIES (all 791 Nigerian cities)
+#   - Can be any cities from VALID_CITIES (the 67 cities in the CSV file)
 #   - Example: ["Lagos", "Abuja", "Enugu", "Maiduguri"]
 
 
@@ -349,7 +349,7 @@ CITY_SELECTION_MODE: str = "ABOVE_300K"  # Options: "ALL", "ABOVE_1M", "ABOVE_50
 
 SELECTED_CITIES: List[str] = [
     # Add cities here when using CITY_SELECTION_MODE = "SPECIFIC"
-    # Can select from any of the 791 cities in VALID_CITIES
+    # Can select from any of the 67 cities in VALID_CITIES
     # "Lagos",
     # "Enugu",
     # "Maiduguri",
