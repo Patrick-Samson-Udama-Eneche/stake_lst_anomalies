@@ -488,9 +488,22 @@ elif _GEE_KEY_OLD.exists():
 else:
     _GEE_SERVICE_JSON = None
 
+_GEE_SERVICE_PATH = os.getenv("GEE_SERVICE_JSON", str(_GEE_SERVICE_JSON) if _GEE_SERVICE_JSON else "")
+
+
+def _project_in_key(path: str) -> str:
+    """The Cloud project named in the service-account key, so that no project ID is written in the code."""
+    import json
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8")).get("project_id", "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
 GEE_CONFIG = {
-    'service_json': os.getenv("GEE_SERVICE_JSON", str(_GEE_SERVICE_JSON) if _GEE_SERVICE_JSON else ""),
-    'project_id': os.getenv("GEE_PROJECT_ID", "your-gee-project-id"),    # ← CHANGE THIS  (your GEE Cloud project ID)
+    'service_json': _GEE_SERVICE_PATH,
+    # Your GEE Cloud project: GEE_PROJECT_ID if set, else the project_id in the service-account key
+    'project_id': os.getenv("GEE_PROJECT_ID") or _project_in_key(_GEE_SERVICE_PATH),
     'collection_name': os.getenv("GEE_COLLECTION", "AOI_Nigeria_Cities"),  # ← CHANGE THIS  (GEE asset collection name)
     
     # LST visualization parameters (colour ramp for map exports)
