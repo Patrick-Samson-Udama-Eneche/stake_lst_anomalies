@@ -65,7 +65,7 @@ for new scenarios. Use any one of the four routes below; all give the same versi
 
 ```powershell
 git clone <repo-url>
-cd stake_lst_modelling
+cd stake_lst_anomalies
 
 # Route 1 — uv (fastest)
 uv venv --python 3.12.10 geovenv
@@ -93,8 +93,13 @@ python -m ipykernel install --user --name python3 --display-name "Python (geoven
 > **Always activate the environment first** — launch `jupyter lab` and run `python run_all.py` from
 > it. Every run of `run_all.py` records the environment in `Results/_provenance/`.
 >
-> **Managed Windows:** an Application Control policy may block a package's DLL the first time it
-> loads (seen with `statsmodels` and `geemap`); importing again usually works.
+> **Windows with Smart App Control:** Windows may refuse a package's DLL with "An Application Control
+> policy has blocked this file". Importing again often clears it (I saw this with `statsmodels` and
+> `geemap`). conda-forge's numpy stays blocked, so after `conda env create` I run
+> `python -m pip install --force-reinstall --no-deps numpy==2.4.4`, the PyPI build of the same version.
+>
+> **To check an install at any time:** `python scripts/check_project.py`. It reports PASS, FAIL or NOTE for
+> the environment, code, dataset, outputs and repository. It makes no remote call and runs no notebook.
 
 ### 2. Configure Credentials
 See [secrets/README.md](secrets/README.md) for the file formats and set-up.
@@ -290,7 +295,7 @@ Cities selected in **config.py** automatically flow to all downstream notebooks.
 ## Project Structure
 
 ```
-stake_lst_modelling/
+stake_lst_anomalies/
 ├── run_all.py                 # Master runner script (automated execution)
 ├── config.py                  # Centralized configuration (paths, parameters, CRS)
 ├── requirements.txt           # Python dependencies
@@ -307,6 +312,7 @@ stake_lst_modelling/
 │
 ├── scripts/                   # Re-runnable pipeline scripts (ship with the repository)
 │   ├── build_master_summary.py   # Assembles the published composite dataset from cached Results/
+│   ├── check_project.py          # Reports the state of the environment, code, dataset and outputs
 │   └── qa_master_summary.py      # 89-check QA suite over the built dataset
 │
 ├── src/                       # Reusable Python modules

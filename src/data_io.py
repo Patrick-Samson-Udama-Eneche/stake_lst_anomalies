@@ -147,7 +147,7 @@ def create_city_output_structure(city_name: str, notebook_name: str = "01_aoi_de
         project_root = Path.cwd().parent  # Go up from notebooks to project root
         base_output_dir = project_root / "data" / "outputs"
     
-    # Create the correct path: stake_lst_modelling/data/outputs/01_aoi_delineation/City_Lagos/
+    # Create the correct path: data/outputs/01_aoi_delineation/City_Lagos/
     notebook_dir = Path(base_output_dir) / notebook_name
     city_dir = notebook_dir / f"City_{city_name}"  
     features_dir = city_dir / "Features"

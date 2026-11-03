@@ -1,5 +1,5 @@
 # =============================================================================
-# Dockerfile — stake_lst_modelling
+# Dockerfile — stake_lst_anomalies
 # =============================================================================
 # The same environment as the published results: Python 3.12.10 and the exact package
 # versions in requirements.lock (the geospatial wheels bring their own GDAL and PROJ).
