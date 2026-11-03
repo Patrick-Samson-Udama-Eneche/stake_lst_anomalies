@@ -141,7 +141,9 @@ copy of them if you want to compare. The notebooks can also be run one by one in
 | 07 Figures and tables | 6–15 min | — |
 
 I measured these times on a laptop with an Intel Core i7-8650U, 16 GB of RAM and Windows 11. The download
-notebooks take several hours for all cities. Their results depend on the providers' archives: if a
+notebooks take several hours for all cities. With the caches in place, the notebooks skip what is already
+downloaded, and Notebooks 01–06 take about 40 minutes in all: the quickest way to check that every notebook
+still runs. Their results depend on the providers' archives: if a
 provider reprocesses a product, the values can change.
 
 Notebook 05 ends by rebuilding the dataset and comparing it with the copy in place, by a content
