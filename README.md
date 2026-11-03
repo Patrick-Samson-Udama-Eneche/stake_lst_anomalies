@@ -336,7 +336,7 @@ stake_lst_anomalies/
 │   │   └── osm_nigeria/            # Pre-downloaded OSM data
 │   └── outputs/                    # Legacy outputs (kept for reference)
 │
-├── Results/                   # Pipeline outputs: manuscript_outputs/ ships with the repository, the rest is git-ignored
+├── Results/                   # Pipeline outputs and caches (git-ignored)
 │   ├── 01_aoi_delineation/         # City AOI boundaries, zones, population, cluster tables
 │   ├── 02_stakeholder_analysis/    # Survey maps, perception charts, stakeholder figures
 │   ├── 03_… / 04_… / 06_…          # Temporal, daily and modelling outputs
@@ -402,8 +402,9 @@ wherever the two overlap. The notebook draws with the functions the analysis not
 `src/pub_hotspot_tables.py`) and makes no GEE,
 EUMETSAT or OSM call.
 
-The finished outputs ship with this repository (about 210 MB). To produce anything else, or to rebuild
-them, run the pipeline: the caches of NB01–NB06 under `Results/` are not in git.
+The figures and tables are published with the article, which is their version of record, so they are not
+in this repository; Notebook 07 rebuilds them. It needs the caches of NB01–NB06 under `Results/`, which are
+not in git either: they come with the code release on Zenodo.
 
 Run it after NB01–NB06 (or on their cached `Results/`):
 

@@ -65,10 +65,12 @@ desktop.ini
 data/outputs/
 
 # New results directory (revised methodology outputs — large, re-generatable)
+# The manuscript figures, tables and captions are published with the article; Notebook 07 rebuilds them.
+# Only the cluster label lookup, which the code reads, stays in git.
 Results/*
 !Results/manuscript_outputs/
-Results/manuscript_outputs/REBUILD_REPORT.md
-Results/manuscript_outputs/SCS_numbers_v1.0.1.*
+Results/manuscript_outputs/*
+!Results/manuscript_outputs/cluster_labels.csv
 
 # Documentation (manuscripts, security setup, private project notes)
 docs/*

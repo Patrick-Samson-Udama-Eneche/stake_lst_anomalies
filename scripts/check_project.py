@@ -159,6 +159,9 @@ def check_results():
         report("NOTE", "caches missing, so Notebook 07 cannot rebuild yet", ", ".join(missing))
     else:
         report("PASS", "the caches of NB01-NB06 are here")
+    if not (OUTPUTS / "main_figures").exists():
+        report("NOTE", "no manuscript outputs here", "they are published with the article; Notebook 07 rebuilds them")
+        return
     expected = (("main_figures", "Fig_*.pdf", 14), ("main_tables", "Table_*.csv", 5), ("supplementary_tables", "Supp_Table_*.csv", 8),
                 ("supplementary_figures", "S*/", 11))
     for folder, pattern, n in expected:
