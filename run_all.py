@@ -52,6 +52,8 @@ Notes:
 
 import argparse
 import json
+import os
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -270,6 +272,14 @@ def check_eumetsat_credentials() -> bool:
     except Exception as e:
         print(f"  [ERROR] EUMETSAT credential check failed: {e}")
         return False
+
+
+def population_pending() -> bool:
+    """True after a first Notebook 05 pass: its spots are written but the population cache is not."""
+    r05 = PROJECT_ROOT / "Results" / "05_hotspot_analysis"
+    pop = r05 / "population_100m"
+    cached = any((pop / "contours").glob("*.csv")) and any((pop / "zones").glob("*.csv"))
+    return (r05 / "master_thermal_spots.gpkg").exists() and not cached
 
 
 def load_available_cities() -> list:
@@ -651,6 +661,8 @@ def main():
             invalid = set(args.cities) - set(cities)
             print(f"\n[WARNING] Skipped invalid: {', '.join(invalid)}")
         print(f"\nCities (from CLI): {', '.join(cities)}")
+        # config.py reads this, so every notebook's kernel processes the same cities
+        os.environ["STAKE_LST_CITIES"] = ";".join(cities)
     else:
         cities = load_available_cities()
         if cities:
@@ -763,6 +775,18 @@ def main():
             timeout=args.timeout,
             output_dir=output_dir,
         )
+        if nb_info["id"] == "05" and population_pending():
+            # A first run from scratch: Notebook 05 stopped after writing its spots and zones,
+            # which the population extraction needs. Extract, then run Notebook 05 again.
+            print("\n  Population cache missing: running scripts/extract_population_100m.py, "
+                  "then Notebook 05 again")
+            pop = subprocess.run([sys.executable, str(PROJECT_ROOT / "scripts" / "extract_population_100m.py")],
+                                 cwd=PROJECT_ROOT)
+            if pop.returncode == 0 and not population_pending():
+                result = execute_notebook(nb_info, cities=None, timeout=args.timeout, output_dir=output_dir)
+            else:
+                result = {"success": False, "duration": result.get("duration", 0), "output_path": None,
+                          "error": "population extraction failed; see the output above"}
         results[nb_info["id"]] = result
 
     # ---- Step 6: Summary ----

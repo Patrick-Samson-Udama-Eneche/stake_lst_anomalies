@@ -355,6 +355,12 @@ SELECTED_CITIES: List[str] = [
     # "Maiduguri",
 ]
 
+# `python run_all.py --cities ...` passes its list through this variable (names separated by ";"),
+# so every notebook it runs processes the same cities.
+if os.getenv("STAKE_LST_CITIES", "").strip():
+    CITY_SELECTION_MODE = "SPECIFIC"
+    SELECTED_CITIES = [c.strip() for c in os.environ["STAKE_LST_CITIES"].split(";") if c.strip()]
+
 
 def get_cities_to_process() -> List[str]:
     """

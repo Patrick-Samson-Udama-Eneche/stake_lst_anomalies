@@ -18,6 +18,26 @@ from google.oauth2 import service_account
 
 import config
 
+# A request whose answer is lost (a laptop going to sleep, a dropped network) would otherwise wait
+# forever. Earth Engine stops an interactive computation after about five minutes anyway.
+REQUEST_DEADLINE_MS = 6 * 60 * 1000
+_TRANSIENT = ('timed out', 'timeout', 'deadline', 'too many requests', '429', '500', '502', '503',
+              '504', 'internal error', 'connection', 'reset', 'unavailable', 'broken pipe')
+
+
+def get_info_retrying(ee_object, attempts=3, pause_s=10):
+    """ee_object.getInfo(), retried when the failure looks transient (timeout, dropped connection,
+    rate limit, server error). Any other error is raised at once, as before."""
+    import time as _t
+    for attempt in range(attempts):
+        try:
+            return ee_object.getInfo()
+        except Exception as e:
+            transient = isinstance(e, TimeoutError) or any(s in str(e).lower() for s in _TRANSIENT)
+            if not transient or attempt == attempts - 1:
+                raise
+            _t.sleep(pause_s * (attempt + 1))
+
 
 def _save_extraction_metadata(output_path, dataset_type, extra_info=None):
     """
@@ -113,8 +133,14 @@ def initialize_gee(service_account_key=None, project_id=None):
         if project_id is None:
             project_id = _cfg.GEE_CONFIG.get('project_id', '')
 
+        # Earth Engine's start-up requests carry no timeout of their own; without a default, a lost
+        # answer would hang here. Connections that set their own timeout keep it.
+        import socket
+        if socket.getdefaulttimeout() is None:
+            socket.setdefaulttimeout(REQUEST_DEADLINE_MS / 1000)
+
         if service_account_key and os.path.exists(service_account_key):
-            print(f"🔑 Found service account key: {service_account_key}")
+            print(f"🔑 Found service account key: {Path(service_account_key).name}")
             credentials = service_account.Credentials.from_service_account_file(
                 service_account_key,
                 scopes=['https://www.googleapis.com/auth/earthengine']
@@ -126,6 +152,7 @@ def initialize_gee(service_account_key=None, project_id=None):
 
         # Test the connection
         ee.Number(1).getInfo()
+        ee.data.setDeadline(REQUEST_DEADLINE_MS)
 
         print("✅ Google Earth Engine initialized successfully")
         return True
@@ -1360,7 +1387,7 @@ def extract_three_zone_lst(city_name, zones, years, output_dir,
                 # One getInfo() per month keeps the computation graph small enough
                 # for large-geometry cities (e.g. Port Harcourt) that exceed GEE's
                 # interactive memory limit when all 12 months are bundled together.
-                feat  = _month_feature(year, month).getInfo()
+                feat  = get_info_retrying(_month_feature(year, month))
                 feats = [feat]
             except Exception as e:
                 print(f'    WARNING {city_name} {year}-{month:02d}: {e}')
