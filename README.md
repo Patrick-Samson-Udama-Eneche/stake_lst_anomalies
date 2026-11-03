@@ -76,10 +76,10 @@ py -3.12 -m venv geovenv                 # Linux / macOS: python3.12 -m venv geo
 .\geovenv\Scripts\python.exe -m pip install -r requirements.lock
 
 # Route 3 — conda-forge (if the pip GDAL wheels fail on your machine)
-conda env create -f environment.yml      # then: conda activate stake-lst-modelling
+conda env create -f environment.yml      # then: conda activate stake_lst_anomalies
 
 # Route 4 — Docker (no local install; see "5. Docker")
-docker build -t stake-lst-modelling .
+docker build -t stake_lst_anomalies .
 ```
 
 Then activate the environment (`.\geovenv\Scripts\Activate.ps1`; Linux / macOS:
@@ -174,8 +174,8 @@ The image holds Python 3.12.10 and `requirements.lock`; data, `Results/` and sec
 run time.
 
 ```powershell
-docker build -t stake-lst-modelling .                    # build
-docker run --rm stake-lst-modelling pytest tests -q      # run the tests in the image
+docker build -t stake_lst_anomalies .                    # build
+docker run --rm stake_lst_anomalies pytest tests -q      # run the tests in the image
 docker compose up lab                                    # Jupyter Lab on http://localhost:8888
 docker compose run --rm reproduce                        # rebuild the manuscript outputs from Results/
 ```

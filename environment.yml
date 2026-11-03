@@ -3,8 +3,8 @@
 # pip then installs everything else from the same lock, so both routes give one environment.
 #
 #   conda env create -f environment.yml      (or: mamba / micromamba create -f environment.yml)
-#   conda activate stake-lst-modelling
-name: stake-lst-modelling
+#   conda activate stake_lst_anomalies
+name: stake_lst_anomalies
 channels:
   - conda-forge
 dependencies:

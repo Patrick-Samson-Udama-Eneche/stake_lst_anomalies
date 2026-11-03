@@ -4,8 +4,8 @@
 # The same environment as the published results: Python 3.12.10 and the exact package
 # versions in requirements.lock (the geospatial wheels bring their own GDAL and PROJ).
 #
-# Build:            docker build -t stake-lst-modelling .
-# Tests:            docker run --rm stake-lst-modelling pytest tests -q
+# Build:            docker build -t stake_lst_anomalies .
+# Tests:            docker run --rm stake_lst_anomalies pytest tests -q
 # Jupyter Lab:      docker compose up lab            (see docker-compose.yml)
 # Reproduce (R1):   docker compose run --rm reproduce
 #

@@ -5,7 +5,7 @@
 services:
   lab:
     build: .
-    image: stake-lst-modelling
+    image: stake_lst_anomalies
     ports:
       - "8888:8888"
     volumes:
@@ -17,7 +17,7 @@ services:
 
   reproduce:
     build: .
-    image: stake-lst-modelling
+    image: stake_lst_anomalies
     volumes:
       - ./data:/app/data
       - ./Results:/app/Results
