@@ -336,10 +336,10 @@ stake_lst_anomalies/
 │
 ├── data/
 │   ├── inputs/
-│   │   ├── geospatial_features/    # Cities CSV, urban/boundary GeoJSON, landscape polygons
-│   │   ├── stakeholder_survey/     # master_composite.csv (1,194 rows × 96 cols)
-│   │   └── osm_nigeria/            # Pre-downloaded OSM data
-│   └── outputs/                    # Legacy outputs (kept for reference)
+│   │   ├── geospatial_features/    # Boundary, typology, UN WUP table, OSM extracts (see "Data in this repository")
+│   │   └── stakeholder_survey/     # master_composite.csv (1,194 rows × 96 cols)
+│   ├── reference/                  # abbreviations.csv
+│   └── outputs/                    # The run log of run_all.py (not in git)
 │
 ├── Results/                   # Pipeline outputs and caches (git-ignored)
 │   ├── 01_aoi_delineation/         # City AOI boundaries, zones, population, cluster tables
@@ -408,8 +408,9 @@ wherever the two overlap. The notebook draws with the functions the analysis not
 EUMETSAT or OSM call.
 
 The figures and tables are published with the article, which is their version of record, so they are not
-in this repository; Notebook 07 rebuilds them. It needs the caches of NB01–NB06 under `Results/`, which are
-not in git either: they come with the code release on Zenodo.
+in this repository; Notebook 07 rebuilds them. It needs the results of NB01–NB06 under `Results/`, which are
+not in git either: running NB01–NB06 with your own Earth Engine and EUMETSAT credentials produces them (see
+[REPRODUCIBILITY.md](REPRODUCIBILITY.md)).
 
 Run it after NB01–NB06 (or on their cached `Results/`):
 
@@ -466,8 +467,7 @@ I draw Fig. 2 (the workflow) and the graphical abstract outside the notebook.
 ## Reproducibility & Data Availability
 
 **[REPRODUCIBILITY.md](REPRODUCIBILITY.md) is the full guide:** the four install routes and how I tested
-them, where to get the caches and the dataset, the four ways to reproduce, run times, and how to check
-that a run worked.
+them, the credentials and downloads, the ways to reproduce, run times, and how to check that a run worked.
 
 This repository is designed so that the public can **reproduce or replicate** the study either
 end-to-end or at the manuscript-assembly stage alone.
@@ -478,8 +478,8 @@ end-to-end or at the manuscript-assembly stage alone.
   ```
   This requires GEE and EUMETSAT credentials (see *Configure Credentials*) and populates `Results/`.
 
-- **Manuscript artwork only** — if the cached `Results/` are already present (e.g. downloaded from
-  the Zenodo data archive), rebuild every figure/table/appendix in minutes, no credentials needed:
+- **Manuscript artwork only** — once your own run of NB01–NB06 has filled `Results/`, rebuild every
+  figure/table/appendix in minutes, no credentials needed:
   ```powershell
   python run_all.py --scope manuscript
   # or open Notebook/07_publication_outputs.ipynb and Run All
@@ -559,13 +559,31 @@ regenerates its checksums without touching the data.
 | Deposit | Contents | DOI |
 |---------|----------|-----|
 | **Dataset** | `surface_thermal_anomaly_stakeholder_composite` (GeoPackage + data dictionary) | v1.0.1: [10.5281/zenodo.23777933](https://doi.org/10.5281/zenodo.23777933); all versions: [10.5281/zenodo.23050559](https://doi.org/10.5281/zenodo.23050559) |
-| **Software** | Citable snapshot of this repository, minted from a GitHub release | _to be added_ |
+| **Software** | Citable snapshot of this repository, archived automatically from each GitHub release | _to be added_ |
+
+---
+
+## Data in this repository
+
+The repository holds no satellite data; the notebooks download it with your own credentials. It does hold these
+inputs, each with its own source and terms:
+
+| File (under `data/`) | What it is | Source and terms | Read by |
+|---|---|---|---|
+| `inputs/geospatial_features/boundary_Nigeria.geojson` | National boundary of Nigeria | Common Operational Dataset of administrative boundaries for Nigeria (COD-AB): Office of the Surveyor General of the Federation of Nigeria, via UN OCHA and the Humanitarian Data Exchange ([download](https://data.humdata.org/dataset/81ac1d38-f603-4a98-804d-325c658599a3/resource/7e30ec96-7f29-4ee8-9f4c-77633b353cbb/download/nga_admin_boundaries.geojson.zip)). Licence: Creative Commons Attribution for Intergovernmental Organisations (CC BY-IGO). | NB01, NB02, NB05, NB07 |
+| `inputs/geospatial_features/landscape_ch_polygons_with_class_metrics.geojson`, `inputs/geospatial_features/urban_landscape_typology_Nigeria.geojson` | Physiographic landscape typology of Nigeria | P.S.U. Eneche, F. Atun, Y. Zeng, K. Pfeffer (2025). *Dataset Associated with the Landscape Character Assessment of Nigeria: A Machine-assisted Learning Approach.* 4TU.ResearchData. [doi:10.4121/f7e4e2f9-a97c-4259-86bc-4840bc95be2f](https://doi.org/10.4121/f7e4e2f9-a97c-4259-86bc-4840bc95be2f). Terms as published there. | NB07, `config.py`, scripts |
+| `inputs/geospatial_features/Major_cities_population_Nigeria_WUP_2025.csv` | City populations, 1975–2050 | United Nations (2025). *World Urbanization Prospects: Summary of Results – Dataset*, [WUP2025-F21-DEGURBA-Cities_Pop.xlsx](https://population.un.org/wup/assets/Download/Cities/WUP2025-F21-DEGURBA-Cities_Pop.xlsx) (accessed 3 September 2026). © United Nations. | NB01, NB03, the dataset build |
+| `inputs/geospatial_features/City_*/` (14 files) | OpenStreetMap built-up areas, roads and places for Abuja, Jos, Kano, Lagos and Port Harcourt, made by `OSM_features.ipynb` before 15 February 2026 | © OpenStreetMap contributors, available under the [Open Database License 1.0](https://www.openstreetmap.org/copyright). | not read (Notebook 01 downloads the OpenStreetMap features it needs) |
+| `inputs/stakeholder_survey/master_composite.csv` | The responses to the stakeholder survey of this study, anonymised (KoboToolbox, twelve virtual workshops, 16 May 2024 – 22 January 2025) | CC BY 4.0, as this repository. The questionnaire: P.S.U. Eneche, F. Atun, Y. Zeng, K. Pfeffer (2025). *Survey Questionnaire: Urban Heating and Strategic Greening of Nigerian Cities.* [doi:10.5281/zenodo.14989792](https://doi.org/10.5281/zenodo.14989792) | NB02, NB05, NB07, the dataset build |
+| `reference/abbreviations.csv` | The abbreviations used in the dataset | CC BY 4.0, as this repository | the dataset build and its QA |
 
 ---
 
 ## License
 
-This project is licensed under [CC-BY-4.0](LICENSE). You are free to share and adapt the material with appropriate credit.
+The code and this project's own data are licensed under [CC-BY-4.0](LICENSE). You are free to share and adapt
+the material with appropriate credit. The third-party inputs listed under *Data in this repository* keep their own
+terms.
 
 ## How to Cite
 
