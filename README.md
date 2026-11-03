@@ -566,7 +566,7 @@ regenerates its checksums without touching the data.
 | Deposit | Contents | DOI |
 |---------|----------|-----|
 | **Dataset** | `surface_thermal_anomaly_stakeholder_composite` (GeoPackage + data dictionary) | [10.5281/zenodo.23777933](https://doi.org/10.5281/zenodo.23777933) for v1.0.1, and [10.5281/zenodo.23050559](https://doi.org/10.5281/zenodo.23050559) for all versions |
-| **Software** | Citable snapshot of this repository, archived automatically from each GitHub release | _to be added_ |
+| **Software** | Citable snapshot of this repository, archived automatically from each GitHub release | [10.5281/zenodo.23924335](https://doi.org/10.5281/zenodo.23924335) for v1.0.0, and [10.5281/zenodo.23924334](https://doi.org/10.5281/zenodo.23924334) for all versions |
 
 ---
 
@@ -594,6 +594,14 @@ terms.
 
 ## How to Cite
 
-If you use this project in your research, please cite it using the metadata in [CITATION.cff](CITATION.cff):
+If you use this project in your research, please cite the version of the code you used and the dataset. The
+metadata of the code is in [CITATION.cff](CITATION.cff), and GitHub's *Cite this repository* button formats it.
+
+- **Code, v1.0.0:** Eneche, P. S. U., Zeng, Y., Atun, F., & Pfeffer, K. (2026). *Urban surface thermal anomalies in Nigeria: A multi-source, landscape-oriented and stakeholder-informed analysis* (Version v1.0.0)
+  [Software]. Zenodo. [https://doi.org/10.5281/zenodo.23924335](https://doi.org/10.5281/zenodo.23924335). The DOI [10.5281/zenodo.23924334](https://doi.org/10.5281/zenodo.23924334)
+  stands for all versions and always resolves to the latest one.
+- **Dataset, v1.0.1:** Eneche, P. S. U., Zeng, Y., Atun, F., & Pfeffer, K. (2026). *Dataset associated with the
+  analysis of surface thermal anomalies, population exposure and stakeholder insights across major Nigerian cities*
+  (Version 1.0.1) [Data set]. Zenodo. [https://doi.org/10.5281/zenodo.23777933](https://doi.org/10.5281/zenodo.23777933)
 
 

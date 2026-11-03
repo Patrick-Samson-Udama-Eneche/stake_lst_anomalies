@@ -26,6 +26,7 @@ repository-code: https://github.com/Patrick-Samson-Udama-Eneche/stake_lst_anomal
 license: CC-BY-4.0
 version: "1.0.0"
 date-released: "2026-11-03"
+doi: 10.5281/zenodo.23924334
 keywords:
   - surface hot and cold spots
   - land surface temperature
@@ -42,4 +43,4 @@ abstract: >-
   stakeholder survey of 105 participants from 21 cities, and
   the physiographic landscape typology of Nigeria to identify, quantify
   and corroborate persistent heat events and surface thermal anomalies.
-  All pre-tests ran on on Python 3.12.10; exact package versions in requirements.lock.
+  All pre-tests ran on Python 3.12.10, with the exact package versions in requirements.lock.

@@ -18,7 +18,7 @@ The figures and tables are published with the article, and Notebook 07 rebuilds 
 
 | Item | Where |
 |---|---|
-| Code | this repository; every release is archived on Zenodo (DOI _to be added_) |
+| Code | this repository, with every release archived on Zenodo: [10.5281/zenodo.23924335](https://doi.org/10.5281/zenodo.23924335) for v1.0.0, and [10.5281/zenodo.23924334](https://doi.org/10.5281/zenodo.23924334) for all versions |
 | Small inputs (boundary, typology, UN city populations, survey responses) | `data/`, with their sources and terms in the README |
 | Satellite and settlement data | downloaded by the notebooks (table below) |
 | Dataset (v1.0.1) | Zenodo, [10.5281/zenodo.23777933](https://doi.org/10.5281/zenodo.23777933) (all versions: [10.5281/zenodo.23050559](https://doi.org/10.5281/zenodo.23050559)) |
@@ -232,9 +232,11 @@ Every run of `run_all.py` also records the environment (Python, packages and lib
 ## Releasing a new version
 
 1. `python scripts/check_project.py` reads 0 failed, and `pytest tests -q` passes.
-2. We publish a release on GitHub (tag `v<version>`). Zenodo archives it at once under the code's concept DOI, with
-   the metadata in `.zenodo.json`.
+2. We publish a release on GitHub (tag `v<version>`). Zenodo archives it at once under the code's concept DOI,
+   [10.5281/zenodo.23924334](https://doi.org/10.5281/zenodo.23924334), with the metadata in `.zenodo.json`.
 
 ## How to cite
 
-Please cite the article and the dataset; [CITATION.cff](CITATION.cff) holds the metadata for this code.
+Please cite the article, the dataset and the version of the code you used. [CITATION.cff](CITATION.cff) holds
+the metadata for the code. Version 1.0.0 is [10.5281/zenodo.23924335](https://doi.org/10.5281/zenodo.23924335), and
+[10.5281/zenodo.23924334](https://doi.org/10.5281/zenodo.23924334) stands for all versions.
